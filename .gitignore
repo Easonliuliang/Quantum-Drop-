@@ -1,0 +1,21 @@
+# Node / Vite
+node_modules/
+dist/
+.vite/
+
+# Rust
+target/
+src-tauri/gen/
+
+# Logs & OS
+logs/
+*.log
+.DS_Store
+
+# Env
+.env
+.env.*
+
+# Editor
+.idea/
+.vscode/

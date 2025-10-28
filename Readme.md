@@ -1,236 +1,131 @@
-太好了 ✅
-下面是更新后的完整 **README.md（含「项目理念 & 背景说明」）** 版本，
-语气保持专业 + 富有故事性，适合放在 GitHub 或白皮书中使用。
-
----
-
 # 🚀 Courier Agent · 智能文件传递体
 
-> **跨设备、零路径、可验证的文件传递智能体**
-> 基于 **Tauri + Rust** 开发，使用 **QUIC / WebRTC / TURN** 多路径传输与端到端加密，
-> 实现「先显现后收敛」的极致传输体验。
+> Zero-path, verifiable file transit that feels instantaneous.<br />
+> Crafted with Tauri · Rust · React and aligned with the AETHER OS ecosystem.
 
 ---
 
-## 💡 项目理念 & 背景说明
+## Overview
 
-### 🌍 现实痛点
+Courier Agent reimagines file transfer as presence instead of motion. Rather than shuttling bytes through brittle relays, the app folds and manifests data across devices, delivering verified artefacts the moment a transfer begins. The experience is inspired by the AETHER OS philosophy—agents cooperate as thought-forms that materialise when needed and vanish without residue.
 
-在当今生态中，几乎所有文件传输都受限于**生态壁垒**：
+Key design intents:
 
-* 微信、飞书、QQ、AirDrop、华为互传、小米互传……
-  每个系统都构建了自己的封闭通道；
-* 用户跨平台传文件时，往往不得不**借助云盘、网盘、临时链接**；
-* 而在隐私与合规上，**中转云端 = 暴露明文**。
-
-**Courier Agent** 想解决的，就是这个最基础、最普遍、最烦人的问题：
-
-> 「为什么我必须依赖某个生态，才能把文件发给另一个设备？」
+- **Presence-first UX** – metadata and proof land instantly, content converges in the background.
+- **Multi-path transport** – QUIC, WebRTC, and TURN routes are orchestrated to keep throughput high.
+- **Verifiable outcomes** – every transition yields a portable Proof of Transition (PoT) artefact.
 
 ---
 
-### ⚛️ 核心理念
+## Features
 
-Courier Agent 的目标不是“再造一个传输工具”，
-而是——**重新定义数据在设备间存在的方式**。
-
-它让文件不再「上传—下载」，
-而是直接「显现—验证」：
-
-> 📦 折叠 → ⚛ 跃迁 → ✨ 显现 → 🧾 真证 → 💨 湮灭
-
-这就是 Courier Agent 的哲学：
-**数据不流动，它在场。**
+- **Aether-Grade Transport Pipeline** – automatic route selection across LAN QUIC, peer-to-peer WebRTC, relay TURN, and optional caching layers.
+- **End-to-End Secrecy** – Noise/XChaCha20-Poly1305 encrypted tunnels with ephemeral identity material; signalling remains blind to payloads.
+- **Proof of Transition Ledger** – Merkle-authenticated receipts exportable for offline verification and audit trails.
+- **Presence UI** – Vite + React surface emphasises “arrival-first” storytelling, with status cards driven by the Rust runtime.
+- **Composable Agents** – the runtime exposes hooks for additional AETHER cognitive agents to subscribe to transfer events and memory graphs.
 
 ---
 
-### 🧠 与 AETHER OS 的关系
+## Folder Structure
 
-Courier Agent 既是一个**独立可用的文件传输应用**，
-也是 **AETHER OS** 的第一个「数据层智能体」。
+```
+courier-agent/
+├─ README.md
+├─ index.html
+├─ package.json
+├─ tsconfig.json
+├─ vitest.config.ts
+├─ docs/
+│  └─ ARCHITECTURE.md
+├─ scripts/
+│  ├─ check.sh
+│  └─ dev.sh
+├─ src/
+│  ├─ App.test.tsx
+│  ├─ App.tsx
+│  ├─ main.tsx
+│  ├─ styles.css
+│  └─ (future feature modules)
+└─ src-tauri/
+   ├─ build.rs
+   ├─ Cargo.toml
+   ├─ src/
+   │  └─ main.rs
+   └─ tauri.conf.json
+```
 
-在 AETHER 的愿景中，每个智能体都是自洽的思维单元，
-而 Courier Agent 是其中负责 **数据存在与传递** 的基础智能体：
+---
+
+## Quick Start
+
+```bash
+# 1. Install toolchains (one time)
+rustup target add x86_64-apple-darwin         # macOS example
+cargo install tauri-cli                      # optional, npm script bundles it
+
+# 2. Install Node dependencies
+npm install
+
+# 3. Launch the React surface + Tauri shell
+npm run tauri:dev
+# or run the helper script
+./scripts/dev.sh
+
+# 4. Quality gate before merging
+./scripts/check.sh
+# (runs lint, unit tests, rustfmt, and cargo clippy)
+```
+
+Additional commands:
+
+- `npm run tauri:build` – produce a distributable desktop bundle.
+- `cargo test --manifest-path src-tauri/Cargo.toml` – execute native tests when they are added.
+- `npm run preview` – open the compiled React bundle without the Tauri shell.
+
+---
+
+## Troubleshooting
+
+- **`cargo clippy` fails with linker errors** – ensure Xcode Command Line Tools (macOS) or the appropriate Visual Studio Build Tools (Windows) are installed; re-run `rustup target add` for the desired target triple.
+- **Tauri dev server cannot reach Vite (`Failed to connect to http://localhost:5173`)** – check that `npm run dev:ui` is running or bump the port in `vite.config.ts` and `src-tauri/tauri.conf.json` to a free slot.
+- **`npm run test` exits with missing jsdom** – delete `node_modules`, reinstall dependencies, and verify that the correct Node version (>=18.17) is active via `nvm` or `fnm`.
+- **PoT attestation files unsynchronised** – copy the receipt payloads stored by the receiving agent; they remain valid even if the UI process crashes.
+
+---
+
+## AETHER OS Design Notes
+
+Courier Agent is the first data-plane intelligence in the broader AETHER OS constellation:
 
 ```
 AETHER OS
 │
-├─ Cognitive Agents (Planner / Writer / Researcher ...)
+├─ Cognitive Agents (Planner · Researcher · Storyteller ...)
+│    ↳ Consume transfer events to seed shared memory graphs
 │
 └─ ⚛ Courier Agent（数据智能体）
-      → 管理文件折叠、跃迁、显现与验证
+     ├─ Fold: locally encrypts + shards payloads
+     ├─ Jump: negotiates multi-path routes with situational policy
+     ├─ Manifest: streams previews and metadata to recipients
+     ├─ Certify: emits Proof of Transition receipts
+     └─ Dissolve: rotates keys and prunes ephemeral caches
 ```
 
-它的设计，将在未来支持：
+The agent exposes a Rust command surface (see `src-tauri/src/main.rs`) that other AETHER nodes can embed or invoke. Future integration points include:
 
-* 与其他智能体共享记忆（Memory Graph）
-* 以「PoT 真证」的方式记录每次数据跃迁
-* 成为 AETHER 的“信息循环神经元”
-
----
-
-## ✨ 核心特性
-
-### 1. ⚛ 多路径传输
-
-自动选择最优通路：
-
-> **LAN（QUIC） → P2P（WebRTC） → Relay（TURN） → 缓存（可选）**
-
-无需配置网络，自动穿透 NAT，确保高成功率。
-
-### 2. 🔒 端到端加密
-
-使用 **Noise / libsodium (XChaCha20-Poly1305)** 协议，
-信令服务器仅作连接协调，不接触任何明文。
-
-### 3. ⚡ “先显现后收敛”
-
-文件的**元数据与预览块**先行显现，
-用户立即看到“文件出现”，后台自动收敛剩余数据。
-
-### 4. 🧾 PoT 真证（Proof of Transition）
-
-每次传输都会生成可离线验证的真证文件，
-确保传输内容完整且可验证，但无明文存留。
+- Memory Graph ingestion for cross-agent context.
+- Adaptive policy modules to choose between LAN, P2P, or relay topologies.
+- Ledger synchronisation with the AETHER “Proof of Thinking” (PoT) standard.
 
 ---
 
-## 🧠 架构概览
+## Contributing & Community
 
-```
-Courier Agent
-│
-├─ UI 层（Tauri / React）
-│   ├─ 拖拽上传 / 输入取件码
-│   ├─ 实时进度与状态反馈
-│   └─ PoT 真证展示
-│
-├─ Core 层（Rust）
-│   ├─ transport.rs   → QUIC / WebRTC / TURN 多路径传输
-│   ├─ crypto.rs      → Noise / libsodium 加密模块
-│   ├─ verifier.rs    → Merkle Tree 校验 + PoT 生成
-│   ├─ signaling.rs   → 极薄信令服务（Axum / WS）
-│   └─ commands.rs    → Tauri 命令接口
-│
-└─ Infra 层
-    ├─ TURN 中继（coturn）
-    ├─ 对象缓存（可选，用于离线兜底）
-    └─ STUN 服务（NAT 穿透）
-```
+We adhere to a Contributor Covenant code of conduct and welcome proposals through issues or discussion threads. See `CONTRIBUTING.md` for workflow details—feature branches, conventional commits, and full check runs (`./scripts/check.sh`) are expected before a pull request is opened.
 
 ---
 
-## ⚙️ 技术栈
+## License
 
-| 模块    | 技术                                                    |
-| ----- | ----------------------------------------------------- |
-| 桌面端   | **Tauri 2.0 + React/Vite + Rust**                     |
-| 移动端   | **Flutter + Rust FFI**（后续阶段）                          |
-| 传输协议  | **QUIC（quinn） / WebRTC（webrtc-rs）**                   |
-| 加密    | **Noise (snow)** / **libsodium (XChaCha20-Poly1305)** |
-| 信令服务  | **Axum / WebSocket**                                  |
-| 中继服务  | **coturn / 自建 relay**                                 |
-| 校验与真证 | **Merkle Tree + CID + PoT 生成**                        |
-
----
-
-## 🧰 项目结构
-
-```
-courier-agent/
-├─ src/                     # 前端
-│  ├─ components/           # 界面组件
-│  ├─ lib/                  # 前端调用封装
-│  ├─ pages/                # 主页面（Send / Receive / History）
-│  └─ main.tsx              # Tauri 入口
-│
-├─ src-tauri/               # 后端（Rust）
-│  ├─ src/
-│  │  ├─ commands.rs        # Tauri 命令接口
-│  │  ├─ transport.rs       # 传输核心模块
-│  │  ├─ crypto.rs          # 加密与密钥管理
-│  │  ├─ verifier.rs        # PoT 真证与 Merkle 校验
-│  │  └─ signaling.rs       # 信令协调（Axum/WS）
-│  └─ Cargo.toml
-│
-├─ public/
-│  ├─ icons/                # 应用图标
-│  └─ index.html
-│
-├─ package.json
-└─ README.md
-```
-
----
-
-## 🧮 三阶段开发路线
-
-| 阶段           | 目标       | 核心任务                                 |
-| ------------ | -------- | ------------------------------------ |
-| **S1｜虫洞最小核** | 同网“即现”体验 | mDNS 发现、QUIC 直连、短码配对、Noise 加密、PoT 生成 |
-| **S2｜跨网与兜底** | 异网稳定传输   | WebRTC 穿透（STUN） + TURN 兜底 + 多路径叠加    |
-| **S3｜体验深水区** | 完善“跃迁感”  | 预热预测、Nebula 多设备同步、专家模式展示传输细节         |
-
----
-
-## 🔧 安装与运行
-
-```bash
-# 克隆项目
-git clone https://github.com/yourname/courier-agent.git
-cd courier-agent
-
-# 安装依赖
-npm install
-
-# 启动开发模式
-npm run tauri dev
-```
-
-> Rust 版本建议：`>=1.77`
-> Node 版本建议：`>=18`
-
----
-
-## 🧱 最小接口（Tauri Command 示例）
-
-```rust
-#[tauri::command]
-async fn courier_generate_code(paths: Vec<String>) -> Result<String, String> {
-    // 1. 生成取件码
-    // 2. 注册信令房间
-    Ok("A7F-9Q2".into())
-}
-
-#[tauri::command]
-async fn courier_send(code: String, paths: Vec<String>) -> Result<(), String> {
-    // QUIC 直连 / WebRTC / Relay
-    // 分块发送 + PoT 生成
-    Ok(())
-}
-
-#[tauri::command]
-async fn courier_receive(code: String, save_dir: String) -> Result<(), String> {
-    // 建立连接 + 解密 + 落地文件
-    Ok(())
-}
-```
-
----
-
-## 🧭 未来展望
-
-* 🔮 **AETHER OS 集成**：成为 AETHER 系统的数据传导层智能体。
-* 🌐 **移动端适配**：支持 iOS / Android（Flutter + Rust FFI）。
-* 🧠 **智能路径调度**：基于实时网络状态的最优路径选择算法。
-* 📡 **PoT 联网验证**：未来支持链上验证或本地审计。
-
----
-
-## 📜 License
-
-MIT © 2025 — Courier Agent by *AETHER OS Project*
-
----
-
+This project is released under the MIT License. A dual-license (MIT + Apache 2.0) can be adopted once upstream dependencies permit.

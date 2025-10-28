@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Courier Agent",
+  "version": "0.1.0",
+  "identifier": "com.aetheros.courier",
+  "build": {
+    "beforeDevCommand": "npm run dev:ui",
+    "beforeBuildCommand": "npm run build:ui",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Courier Agent",
+        "width": 1200,
+        "height": 780,
+        "resizable": true
+      }
+    ]
+  }
+}
