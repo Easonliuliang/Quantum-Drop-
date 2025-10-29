@@ -58,7 +58,7 @@ export interface TransferLifecycleEvent {
   message?: string;
 }
 
-export interface TransferProgressEventPayload {
+export interface TransferProgressPayload {
   task_id: string;
   phase: TransferPhase;
   progress?: number | null;
@@ -69,7 +69,7 @@ export interface TransferProgressEventPayload {
   message?: string | null;
 }
 
-export interface TransferProgressEvent {
+export interface TransferProgress {
   taskId: string;
   phase: TransferPhase;
   progress?: number;
@@ -108,4 +108,42 @@ export interface ExportPotResponse {
 export interface VerifyPotResponse {
   valid: boolean;
   reason?: string | null;
+}
+
+export type CourierGenerateCodeCommand = (
+  paths: string[],
+  expireSec?: number
+) => Promise<GenerateCodeResponse>;
+
+export type CourierSendCommand = (
+  code: string,
+  paths: string[]
+) => Promise<TaskResponse>;
+
+export type CourierReceiveCommand = (
+  code: string,
+  saveDir: string
+) => Promise<TaskResponse>;
+
+export type CourierCancelCommand = (taskId: string) => Promise<void>;
+
+export type ExportPotCommand = (
+  taskId: string,
+  outDir: string
+) => Promise<ExportPotResponse>;
+
+export type VerifyPotCommand = (potPath: string) => Promise<VerifyPotResponse>;
+
+export type ListTransfersCommand = (
+  limit?: number
+) => Promise<TransferSummaryRaw[]>;
+
+export interface CourierCommands {
+  courierGenerateCode: CourierGenerateCodeCommand;
+  courierSend: CourierSendCommand;
+  courierReceive: CourierReceiveCommand;
+  courierCancel: CourierCancelCommand;
+  exportPot: ExportPotCommand;
+  verifyPot: VerifyPotCommand;
+  listTransfers: ListTransfersCommand;
 }

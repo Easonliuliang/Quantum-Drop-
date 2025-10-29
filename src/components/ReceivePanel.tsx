@@ -143,6 +143,28 @@ export default function ReceivePanel(): JSX.Element {
                         {percent !== undefined ? ` · ${percent}%` : ""}
                       </span>
                     </div>
+                    {percent !== undefined && (
+                      <div
+                        className="progress-bar"
+                        role="progressbar"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={percent}
+                      >
+                        <div
+                          className="progress-bar-fill"
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                    )}
+                    {progress?.route && (
+                      <div className="route-line">
+                        <span className="label">Route</span>
+                        <span className={`route-chip route-${progress.route}`}>
+                          {progress.route.toUpperCase()}
+                        </span>
+                      </div>
+                    )}
                     {progress?.message && (
                       <div className="progress-message">{progress.message}</div>
                     )}

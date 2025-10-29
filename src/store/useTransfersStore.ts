@@ -10,8 +10,8 @@ import type {
   TransferLifecycleEventPayload,
   TransferLogEvent,
   TransferLogEventPayload,
-  TransferProgressEvent,
-  TransferProgressEventPayload,
+  TransferProgress,
+  TransferProgressPayload,
   TransferSummary,
   TransferSummaryRaw,
   TransferTab,
@@ -21,7 +21,7 @@ import type {
 
 type TransferRecord = {
   summary: TransferSummary;
-  progress?: TransferProgressEvent;
+  progress?: TransferProgress;
   logs: TransferLogEvent[];
 };
 
@@ -37,7 +37,7 @@ type TransfersState = {
   initialize: () => Promise<void>;
   shutdown: () => void;
   setActiveTab: (tab: TransferTab) => void;
-  initiateSend: (
+  startSend: (
     paths: string[],
     expireSeconds?: number
   ) => Promise<{ taskId: string; code: string }>;
@@ -45,9 +45,12 @@ type TransfersState = {
   cancelTransfer: (taskId: string) => Promise<void>;
   exportPot: (taskId: string, outDir: string) => Promise<string>;
   verifyPot: (potPath: string) => Promise<boolean>;
+  updateProgress: (progress: TransferProgress) => void;
+  complete: (event: TransferLifecycleEvent) => void;
+  fail: (event: TransferLifecycleEvent) => void;
+  listRecent: () => TransferRecord[];
   resetError: () => void;
   clearPending: () => void;
-  getTransfers: () => TransferRecord[];
 };
 
 const nowIso = () => new Date().toISOString();
@@ -72,9 +75,7 @@ const mapLifecycle = (
   message: payload.message ?? undefined,
 });
 
-const mapProgress = (
-  payload: TransferProgressEventPayload
-): TransferProgressEvent => ({
+const mapProgress = (payload: TransferProgressPayload): TransferProgress => ({
   taskId: payload.task_id,
   phase: payload.phase,
   progress: payload.progress ?? undefined,
@@ -192,24 +193,11 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
       });
     });
 
-    await register<TransferProgressEventPayload>(
+    await register<TransferProgressPayload>(
       "transfer_progress",
       (payload) => {
         const progress = mapProgress(payload);
-        set((state) => {
-          const transfers = { ...state.transfers };
-          const existing = transfers[progress.taskId];
-          if (!existing) {
-            transfers[progress.taskId] = {
-              summary: createPlaceholderSummary(progress.taskId, "send"),
-              progress,
-              logs: [],
-            };
-          } else {
-            transfers[progress.taskId] = { ...existing, progress };
-          }
-          return { transfers };
-        });
+        get().updateProgress(progress);
       }
     );
 
@@ -217,43 +205,13 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
       "transfer_completed",
       (payload) => {
         const lifecycle = mapLifecycle(payload);
-        set((state) => {
-          const transfers = { ...state.transfers };
-          const existing =
-            transfers[lifecycle.taskId]?.summary ??
-            createPlaceholderSummary(lifecycle.taskId, lifecycle.direction);
-          const summary: TransferSummary = {
-            ...existing,
-            status: "completed",
-            code: lifecycle.code ?? existing.code,
-            updatedAt: nowIso(),
-            potPath: lifecycle.message ?? existing.potPath,
-          };
-          transfers[lifecycle.taskId] = ensureRecord(transfers, summary);
-          return { transfers };
-        });
+        get().complete(lifecycle);
       }
     );
 
     await register<TransferLifecycleEventPayload>("transfer_failed", (payload) => {
       const lifecycle = mapLifecycle(payload);
-      set((state) => {
-        const transfers = { ...state.transfers };
-        const existing =
-          transfers[lifecycle.taskId]?.summary ??
-          createPlaceholderSummary(lifecycle.taskId, lifecycle.direction);
-        const summary: TransferSummary = {
-          ...existing,
-          status: "failed",
-          code: lifecycle.code ?? existing.code,
-          updatedAt: nowIso(),
-        };
-        transfers[lifecycle.taskId] = ensureRecord(transfers, summary);
-        return {
-          transfers,
-          lastError: lifecycle.message ?? state.lastError,
-        };
-      });
+      get().fail(lifecycle);
     });
 
     await register<TransferLogEventPayload>("transfer_log", (payload) => {
@@ -300,7 +258,7 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
 
   setActiveTab: (tab) => set({ activeTab: tab }),
 
-  initiateSend: async (paths, expireSeconds) => {
+  startSend: async (paths, expireSeconds) => {
     if (!paths.length) {
       throw new Error("No files selected");
     }
@@ -416,11 +374,63 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
     return response.valid;
   },
 
-  resetError: () => set({ lastError: null }),
-  clearPending: () => set({ pendingCode: null }),
+  updateProgress: (progress) =>
+    set((state) => {
+      const transfers = { ...state.transfers };
+      const existing = transfers[progress.taskId];
+      if (!existing) {
+        transfers[progress.taskId] = {
+          summary: createPlaceholderSummary(progress.taskId, "send"),
+          progress,
+          logs: [],
+        };
+      } else {
+        transfers[progress.taskId] = { ...existing, progress };
+      }
+      return { transfers };
+    }),
 
-  getTransfers: () => {
+  complete: (event) =>
+    set((state) => {
+      const transfers = { ...state.transfers };
+      const existing =
+        transfers[event.taskId]?.summary ??
+        createPlaceholderSummary(event.taskId, event.direction);
+      const summary: TransferSummary = {
+        ...existing,
+        status: "completed",
+        code: event.code ?? existing.code,
+        updatedAt: nowIso(),
+        potPath: event.message ?? existing.potPath,
+      };
+      transfers[event.taskId] = ensureRecord(transfers, summary);
+      return { transfers };
+    }),
+
+  fail: (event) =>
+    set((state) => {
+      const transfers = { ...state.transfers };
+      const existing =
+        transfers[event.taskId]?.summary ??
+        createPlaceholderSummary(event.taskId, event.direction);
+      const summary: TransferSummary = {
+        ...existing,
+        status: "failed",
+        code: event.code ?? existing.code,
+        updatedAt: nowIso(),
+      };
+      transfers[event.taskId] = ensureRecord(transfers, summary);
+      return {
+        transfers,
+        lastError: event.message ?? state.lastError,
+      };
+    }),
+
+  listRecent: () => {
     const { transfers } = get();
     return sortTransfers(Object.values(transfers));
   },
+
+  resetError: () => set({ lastError: null }),
+  clearPending: () => set({ pendingCode: null }),
 }));

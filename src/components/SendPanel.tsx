@@ -42,7 +42,7 @@ export default function SendPanel(): JSX.Element {
   const isSending = useTransfersStore((state) => state.isSending);
   const pendingCode = useTransfersStore((state) => state.pendingCode);
   const clearPending = useTransfersStore((state) => state.clearPending);
-  const initiateSend = useTransfersStore((state) => state.initiateSend);
+  const startSend = useTransfersStore((state) => state.startSend);
   const transfersMap = useTransfersStore((state) => state.transfers);
 
   const sendTransfers = useMemo(
@@ -72,7 +72,7 @@ export default function SendPanel(): JSX.Element {
       return;
     }
     try {
-      await initiateSend(selectedFiles);
+      await startSend(selectedFiles);
     } catch (caught: unknown) {
       const message = describeError(caught);
       console.error("failed to initiate send", message);
@@ -170,6 +170,28 @@ export default function SendPanel(): JSX.Element {
                         {percent !== undefined ? ` · ${percent}%` : ""}
                       </span>
                     </div>
+                    {percent !== undefined && (
+                      <div
+                        className="progress-bar"
+                        role="progressbar"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={percent}
+                      >
+                        <div
+                          className="progress-bar-fill"
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                    )}
+                    {progress?.route && (
+                      <div className="route-line">
+                        <span className="label">Route</span>
+                        <span className={`route-chip route-${progress.route}`}>
+                          {progress.route.toUpperCase()}
+                        </span>
+                      </div>
+                    )}
                     {progress?.message && (
                       <div className="progress-message">{progress.message}</div>
                     )}

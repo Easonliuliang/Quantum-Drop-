@@ -26,7 +26,7 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
 │  • MockLocalAdapter loopback  │
 │  • Traits for future QUIC etc │
 │ attestation::{merkle,pot}     │
-│  • Blake3 Merkle + PoT writer │
+│  • SHA-256 Merkle + PoT writer│
 └───────────────────────────────┘
 ```
 
@@ -40,7 +40,7 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
 
 - **`transport`** – defines the abstraction layer for future adapters and provides `MockLocalAdapter` + `MockLocalStream` loopback used for local simulation and unit testing.
 
-- **`attestation`** – Merkle helpers built on Blake3 and a PoT writer that materialises JSON receipts aligned with the blueprint schema.
+- **`attestation`** – Merkle helpers hashing chunks/root with SHA-256 (CID salted via Blake3) and a PoT writer that materialises JSON receipts aligned with the blueprint schema.
 
 - **`crypto`** – lightweight helpers for generating share codes and mock session keys (placeholder for upcoming PAKE / Noise integration).
 
@@ -53,7 +53,7 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
 - **Zustand Store (`src/store/useTransfersStore.ts`)**
   - Centralises command invocation and event subscription (`listen`), ensuring React components receive live transfer updates.
   - Maintains transfer records, progress snapshots, PoT paths, log snippets, and pending codes.
-  - Wraps Tauri commands with typed helpers and exposes ergonomic actions (`initiateSend`, `startReceive`, `exportPot`, `verifyPot`, etc.).
+  - Wraps Tauri commands with typed helpers and exposes ergonomic actions (`startSend`, `startReceive`, `updateProgress`, `complete`, `fail`, `listRecent`, etc.).
 
 - **UI Panels**
   - `SendPanel` – file picker (via Tauri dialog), code share banner, active transfer cards with phase/progress/log views.

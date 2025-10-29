@@ -82,11 +82,49 @@ describe("useTransfersStore", () => {
 
     const result = await useTransfersStore
       .getState()
-      .initiateSend(["/Users/demo/file.txt"]);
+      .startSend(["/Users/demo/file.txt"]);
 
     const state = useTransfersStore.getState();
     expect(result.code).toBe("ZXCV12");
     expect(state.pendingCode?.code).toBe("ZXCV12");
     expect(state.transfers["tsk_send"].summary.direction).toBe("send");
+  });
+
+  it("updates progress via dedicated reducer", () => {
+    useTransfersStore.setState((state) => ({
+      ...state,
+      transfers: {
+        tsk_prog: {
+          summary: {
+            taskId: "tsk_prog",
+            code: "CODE42",
+            direction: "send",
+            status: "pending",
+            createdAt: "2024-01-01T00:00:00Z",
+            updatedAt: "2024-01-01T00:00:00Z",
+            files: [],
+            potPath: undefined,
+          },
+          logs: [],
+          progress: undefined,
+        },
+      },
+    }));
+
+    useTransfersStore.getState().updateProgress({
+      taskId: "tsk_prog",
+      phase: "transferring",
+      progress: 0.42,
+      bytesSent: 4200,
+      bytesTotal: 10000,
+      speedBps: 2048,
+      route: "lan",
+      message: "Streaming payload",
+    });
+
+    const record = useTransfersStore.getState().transfers["tsk_prog"];
+    expect(record.progress?.phase).toBe("transferring");
+    expect(record.progress?.route).toBe("lan");
+    expect(record.progress?.progress).toBeCloseTo(0.42);
   });
 });

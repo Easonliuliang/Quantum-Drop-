@@ -36,17 +36,13 @@ const formatDate = (iso: string) =>
 export default function HistoryPanel(): JSX.Element {
   const [feedback, setFeedback] = useState<string | null>(null);
   const transfersMap = useTransfersStore((state) => state.transfers);
+  const listRecent = useTransfersStore((state) => state.listRecent);
   const exportPot = useTransfersStore((state) => state.exportPot);
   const verifyPot = useTransfersStore((state) => state.verifyPot);
 
   const transfers = useMemo(
-    () =>
-      Object.values(transfersMap).sort(
-        (a, b) =>
-          new Date(b.summary.createdAt).getTime() -
-          new Date(a.summary.createdAt).getTime()
-      ),
-    [transfersMap]
+    () => listRecent(),
+    [listRecent, transfersMap]
   );
 
   const handleExport = async (taskId: string) => {

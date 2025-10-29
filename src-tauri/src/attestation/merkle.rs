@@ -7,6 +7,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const CID_SALT: &[u8] = b"courier-agent::pot::salt::v1";
 
@@ -76,6 +77,7 @@ fn compute_merkle(file: &mut File) -> Result<MerkleComputation> {
         .context("failed to seek start of file")?;
 
     let mut chunk_hashes = Vec::new();
+    let mut leaves: Vec<[u8; 32]> = Vec::new();
     let mut buffer = vec![0u8; CHUNK_SIZE];
 
     loop {
@@ -85,16 +87,18 @@ fn compute_merkle(file: &mut File) -> Result<MerkleComputation> {
         if bytes_read == 0 {
             break;
         }
-        let hash = blake3::hash(&buffer[..bytes_read]);
-        chunk_hashes.push(format!("b3:{}", hash.to_hex()));
+        let digest = sha256_bytes(&buffer[..bytes_read]);
+        chunk_hashes.push(format!("sha256:{}", hex::encode(digest)));
+        leaves.push(digest);
     }
 
     if chunk_hashes.is_empty() {
-        let hash = blake3::hash(&[]);
-        chunk_hashes.push(format!("b3:{}", hash.to_hex()));
+        let digest = sha256_bytes(&[]);
+        chunk_hashes.push(format!("sha256:{}", hex::encode(digest)));
+        leaves.push(digest);
     }
 
-    let root = compute_merkle_root(&chunk_hashes)?;
+    let root = compute_merkle_root(&leaves)?;
 
     Ok(MerkleComputation {
         chunks: chunk_hashes.len(),
@@ -103,46 +107,47 @@ fn compute_merkle(file: &mut File) -> Result<MerkleComputation> {
     })
 }
 
-fn compute_merkle_root(chunk_hashes: &[String]) -> Result<String> {
-    let mut leaves: Vec<[u8; 32]> = chunk_hashes
-        .iter()
-        .map(|hash| {
-            let trimmed = hash.strip_prefix("b3:").unwrap_or(hash);
-            let bytes = hex::decode(trimmed).unwrap_or_else(|_| vec![0u8; 32]); // fall back to zeroed hash
-            let mut leaf = [0u8; 32];
-            if bytes.len() == 32 {
-                leaf.copy_from_slice(&bytes);
-            } else {
-                let hash = blake3::hash(trimmed.as_bytes());
-                leaf.copy_from_slice(hash.as_bytes());
-            }
-            leaf
-        })
-        .collect();
+fn compute_merkle_root(leaves: &[[u8; 32]]) -> Result<String> {
+    let mut nodes = if leaves.is_empty() {
+        vec![sha256_bytes(&[])]
+    } else {
+        leaves.to_vec()
+    };
 
-    if leaves.is_empty() {
-        leaves.push([0u8; 32]);
-    }
-
-    while leaves.len() > 1 {
-        let mut next_level = Vec::with_capacity(leaves.len().div_ceil(2));
-        for pair in leaves.chunks(2) {
+    while nodes.len() > 1 {
+        let mut next_level = Vec::with_capacity(nodes.len().div_ceil(2));
+        for pair in nodes.chunks(2) {
             let left = pair[0];
             let right = if pair.len() == 2 { pair[1] } else { pair[0] };
-            let mut hasher = Hasher::new();
+            let mut hasher = Sha256::new();
             hasher.update(&left);
             hasher.update(&right);
-            next_level.push(hasher.finalize().into());
+            let digest = hasher.finalize();
+            next_level.push(slice_to_array(&digest));
         }
-        leaves = next_level;
+        nodes = next_level;
     }
 
-    Ok(format!("b3:{}", blake3::Hash::from(leaves[0]).to_hex()))
+    Ok(format!("sha256:{}", hex::encode(nodes[0])))
+}
+
+fn sha256_bytes(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    slice_to_array(&digest)
+}
+
+fn slice_to_array(bytes: &[u8]) -> [u8; 32] {
+    let mut array = [0u8; 32];
+    array.copy_from_slice(&bytes[0..32]);
+    array
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -153,8 +158,8 @@ mod tests {
         let attestation = compute_file_attestation(file.path()).expect("attestation");
         assert_eq!(attestation.chunks, 1);
         assert!(
-            attestation.merkle_root.starts_with("b3:"),
-            "merkle root should use b3 prefix"
+            attestation.merkle_root.starts_with("sha256:"),
+            "merkle root should use sha256 prefix"
         );
     }
 
@@ -166,7 +171,9 @@ mod tests {
         let attestation = compute_file_attestation(file.path()).expect("attestation");
         assert_eq!(attestation.chunks, 1);
         assert_eq!(attestation.size, 11);
-        let expected_chunk = format!("b3:{}", blake3::hash(b"hello world").to_hex());
+        let mut hasher = Sha256::new();
+        hasher.update(b"hello world");
+        let expected_chunk = format!("sha256:{}", hex::encode(hasher.finalize()));
         assert_eq!(attestation.chunk_hashes_sample[0], expected_chunk);
         assert!(attestation.cid.starts_with("b3:"));
     }
