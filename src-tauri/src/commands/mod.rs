@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::{
     attestation::{compute_file_attestation, write_proof_of_transition, FileAttestation},
@@ -22,9 +22,9 @@ use crate::{
 
 use state::{TrackedFile, TransferTask};
 use types::{
-    CommandError, ExportPotResponse, GenerateCodeResponse, TaskResponse, TransferDirection,
-    TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute, TransferStatus,
-    TransferSummary, VerifyPotResponse,
+    CommandError, ExportPotResponse, GenerateCodeResponse, P2pSmokeTestResponse, TaskResponse,
+    TransferDirection, TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute,
+    TransferStatus, TransferSummary, VerifyPotResponse,
 };
 
 const DEFAULT_CODE_TTL_SECONDS: i64 = 900;
@@ -175,6 +175,54 @@ pub async fn courier_cancel(
         },
     );
     Ok(())
+}
+
+#[tauri::command]
+pub async fn courier_p2p_smoke_test(app: AppHandle) -> Result<P2pSmokeTestResponse, String> {
+    let router = Router::p2p_only(&app);
+    let session = SessionDesc::new("p2p-smoke-test");
+
+    let SelectedRoute { route, mut stream } = router
+        .connect(&session)
+        .await
+        .map_err(|err| format!("p2p connect failed: {err}"))?;
+
+    let payload = vec![0_u8; 64 * 1024];
+    stream
+        .send(Frame::Data(payload.clone()))
+        .await
+        .map_err(|err| format!("p2p send failed: {err}"))?;
+
+    let mut echoed: Option<u64> = None;
+    for _ in 0..3 {
+        let frame = match timeout(Duration::from_secs(5), stream.recv()).await {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(err)) => {
+                stream.close().await.ok();
+                return Err(format!("p2p recv failed: {err}"));
+            }
+            Err(_) => {
+                stream.close().await.ok();
+                return Err("p2p echo timed out".into());
+            }
+        };
+
+        match frame {
+            Frame::Data(bytes) => {
+                echoed = Some(bytes.len() as u64);
+                break;
+            }
+            Frame::Control(_) => continue,
+        }
+    }
+
+    stream.close().await.ok();
+    let echoed = echoed.ok_or_else(|| "p2p echo missing".to_string())?;
+
+    Ok(P2pSmokeTestResponse {
+        route: route.label().to_string(),
+        bytes_echoed: echoed,
+    })
 }
 
 #[tauri::command]
@@ -382,9 +430,7 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
     );
     sleep(Duration::from_millis(200)).await;
 
-    let session = SessionDesc {
-        session_id: task_id.clone(),
-    };
+    let session = SessionDesc::new(task_id.clone());
     let SelectedRoute {
         route: selected_route,
         mut stream,

@@ -52,6 +52,45 @@ pub struct IceCandidate {
     pub sdp_mid: Option<String>,
 }
 
+/// Aggregate WebRTC session state exchanged via the signaling channel.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDesc {
+    pub session_id: String,
+    #[serde(default)]
+    pub offer: Option<SessionDescription>,
+    #[serde(default)]
+    pub answer: Option<SessionDescription>,
+    #[serde(default)]
+    pub candidates: Vec<IceCandidate>,
+}
+
+#[allow(dead_code)]
+impl SessionDesc {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            offer: None,
+            answer: None,
+            candidates: Vec::new(),
+        }
+    }
+
+    /// Merge partial updates, replacing offer/answer and appending candidates.
+    pub fn merge(&mut self, update: SessionDesc) {
+        if update.offer.is_some() {
+            self.offer = update.offer;
+        }
+        if update.answer.is_some() {
+            self.answer = update.answer;
+        }
+        if !update.candidates.is_empty() {
+            self.candidates.extend(update.candidates);
+        }
+    }
+}
+
 #[cfg(feature = "signaling-server")]
 mod server;
 

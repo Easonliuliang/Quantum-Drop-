@@ -27,6 +27,12 @@ pub struct VerifyPotResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct P2pSmokeTestResponse {
+    pub route: String,
+    pub bytes_echoed: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TransferSummary {
     pub task_id: String,
     pub code: Option<String>,

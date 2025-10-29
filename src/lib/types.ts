@@ -110,6 +110,11 @@ export interface VerifyPotResponse {
   reason?: string | null;
 }
 
+export interface P2pSmokeTestResponse {
+  route: string;
+  bytesEchoed: number;
+}
+
 export type CourierGenerateCodeCommand = (
   paths: string[],
   expireSec?: number
@@ -138,6 +143,8 @@ export type ListTransfersCommand = (
   limit?: number
 ) => Promise<TransferSummaryRaw[]>;
 
+export type CourierP2pSmokeTestCommand = () => Promise<P2pSmokeTestResponse>;
+
 export interface CourierCommands {
   courierGenerateCode: CourierGenerateCodeCommand;
   courierSend: CourierSendCommand;
@@ -146,4 +153,5 @@ export interface CourierCommands {
   exportPot: ExportPotCommand;
   verifyPot: VerifyPotCommand;
   listTransfers: ListTransfersCommand;
+  courierP2pSmokeTest: CourierP2pSmokeTestCommand;
 }

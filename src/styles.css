@@ -121,6 +121,26 @@ body {
   gap: 0.5rem;
 }
 
+.toast {
+  margin: 0.75rem 0 0;
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  border: 1px solid transparent;
+}
+
+.toast-success {
+  background: rgba(34, 197, 94, 0.2);
+  border-color: rgba(74, 222, 128, 0.35);
+  color: #bbf7d0;
+}
+
+.toast-error {
+  background: rgba(220, 38, 38, 0.2);
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #fecaca;
+}
+
 .main-content {
   display: block;
 }
@@ -235,6 +255,10 @@ input[type="text"]::placeholder {
 
 .plain:hover {
   text-decoration: underline;
+}
+
+.smoke-test-button {
+  margin-left: auto;
 }
 
 .file-list {

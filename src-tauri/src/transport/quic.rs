@@ -264,9 +264,7 @@ mod tests {
         let rt = Runtime::new().expect("runtime");
         rt.block_on(async {
             let adapter = QuicAdapter::new().expect("quic adapter");
-            let session = SessionDesc {
-                session_id: "loopback-test".into(),
-            };
+            let session = SessionDesc::new("loopback-test");
             let mut stream = adapter.connect(&session).await.expect("connect quic");
 
             let payload = Frame::Data(vec![42; 512]);

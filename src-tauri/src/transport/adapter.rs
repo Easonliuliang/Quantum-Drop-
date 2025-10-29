@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex};
 
@@ -10,9 +11,22 @@ pub enum Frame {
     Data(Vec<u8>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDesc {
     pub session_id: String,
+    #[cfg(feature = "transport-webrtc")]
+    #[serde(default)]
+    pub webrtc: Option<crate::signaling::SessionDesc>,
+}
+
+impl SessionDesc {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            #[cfg(feature = "transport-webrtc")]
+            webrtc: None,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -102,9 +116,7 @@ mod tests {
         let rt = Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             let adapter = MockLocalAdapter::new();
-            let session = SessionDesc {
-                session_id: "test-session".into(),
-            };
+            let session = SessionDesc::new("test-session");
             let mut stream = adapter
                 .connect(&session)
                 .await

@@ -47,24 +47,57 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
 
 - **`crypto`** – lightweight helpers for generating share codes and mock session keys (placeholder for upcoming PAKE / Noise integration).
 
-- **`signaling`** – session ticket scaffolding, WebRTC `SessionDescription`/ICE types, and an optional Axum `/ws` echo stub (`signaling-server` feature) for future signaling experiments.
+- **`signaling`** – session ticket scaffolding, WebRTC `SessionDescription`/ICE types, and a lightweight Axum `/ws` hub (`signaling-server` feature) that merges `SessionDesc` updates for minimal WebRTC experiments.
+
+## S2 WebRTC DataChannel – Minimal Flow
+
+```
+SendPanel "P2P Smoke Test"
+        │ invoke courier_p2p_smoke_test
+        ▼
+┌────────────────────────┐
+│ Router::p2p_only       │
+│  • WebRtcAdapter       │
+│  • Mock fallback       │
+└─────────────┬──────────┘
+              │ creates paired peers
+              ▼
+┌─────────────────────────────┐
+│ RTCPeerConnection (offerer) │
+│  • courier data channel     │
+│  • ICE → loopback peer      │
+└─────────────┬───────────────┘
+              │ echoed frames
+┌─────────────────────────────┐
+│ RTCPeerConnection (answerer)│
+│  • echoes text / binary      │
+└─────────────────────────────┘
+```
+
+- The Axum `/ws?sessionId=…` signaling server now keeps a shared `SessionDesc` (offer/answer/candidates) so future peers can negotiate across processes.
+- `WebRtcAdapter` spins up a loopback answerer, wires ICE candidates, opens the `courier` data channel, and logs connection state changes via `log::info!`.
+- `Router` prefers the P2P route when available; transfers surface `route="p2p"` as soon as the WebRTC handshake succeeds.
+- The Send panel exposes a “P2P Smoke Test” button that pushes a 64 KiB payload through the data channel and toasts the echoed byte count.
 
 ## Feature Flags & Configuration
 
 - `transport-quic` *(enabled by default)* – spins up the quinn-based `QuicAdapter`, wiring the router to emit `route="lan"` when the LAN hop succeeds.
-- `transport-webrtc` *(opt-in)* – compiles the `WebRtcAdapter` skeleton backed by `webrtc-rs` types; currently returns a stub error until the data channel flow lands.
+- `transport-webrtc` *(enabled by default in dev builds)* – powers the in-process WebRTC data channel loopback, exchanging frames over a `courier` channel with connection state logs.
 - `signaling-server` *(opt-in)* – exposes an Axum router with a placeholder `/ws` endpoint for future signaling integration tests.
 
-The router reads its preferred route ordering from `app.yaml` under the app config directory. If the file is absent, the default order (`lan`, `p2p`, `relay`, then mock fallback) is used.
+The router reads its preferred route ordering from `app.yaml` under the app config directory. If the file is absent, the default order (`p2p`, `lan`, `relay`, then mock fallback) is used.
 
 ```yaml
 # app.yaml
 s2:
   transport:
     preferredRoutes:
-      - lan
       - p2p
+      - lan
       - relay
+    stun:
+      - stun:stun.l.google.com:19302
+      - stun:stun1.l.google.com:19302
 ```
 
 The QUIC loopback spins up an in-process server/client pair bound to `127.0.0.1`, exchanges a self-signed `localhost` certificate, and echoes frames so tests can assert byte-for-byte delivery.

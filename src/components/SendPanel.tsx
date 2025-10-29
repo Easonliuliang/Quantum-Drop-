@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import { useTransfersStore } from "../store/useTransfersStore";
-import type { TransferStatus } from "../lib/types";
+import type { P2pSmokeTestResponse, TransferStatus } from "../lib/types";
 import { describeError } from "../lib/errors";
 import { pickFiles } from "../lib/dialog";
 
@@ -39,6 +40,8 @@ const shortId = (id: string) => `${id.slice(0, 6)}…${id.slice(-4)}`;
 
 export default function SendPanel(): JSX.Element {
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [toast, setToast] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const toastTimer = useRef<number>();
   const isSending = useTransfersStore((state) => state.isSending);
   const pendingCode = useTransfersStore((state) => state.pendingCode);
   const clearPending = useTransfersStore((state) => state.clearPending);
@@ -79,6 +82,42 @@ export default function SendPanel(): JSX.Element {
     }
   };
 
+  const showToast = (kind: "success" | "error", message: string) => {
+    setToast({ kind, message });
+    if (toastTimer.current) {
+      window.clearTimeout(toastTimer.current);
+    }
+    toastTimer.current = window.setTimeout(() => {
+      setToast(null);
+    }, 4000);
+  };
+
+  const handleSmokeTest = async () => {
+    try {
+      const raw = await invoke<{ route: string; bytes_echoed: number }>(
+        "courier_p2p_smoke_test"
+      );
+      const result: P2pSmokeTestResponse = {
+        route: raw.route,
+        bytesEchoed: raw.bytes_echoed ?? 0,
+      };
+      const message = `Echoed ${result.bytesEchoed.toLocaleString()} bytes via ${result.route.toUpperCase()}`;
+      showToast("success", message);
+    } catch (caught: unknown) {
+      const message = describeError(caught);
+      console.error("p2p smoke test failed", message);
+      showToast("error", `P2P smoke test failed: ${message}`);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) {
+        window.clearTimeout(toastTimer.current);
+      }
+    };
+  }, []);
+
   const handleCopyCode = async (code: string) => {
     try {
       await navigator.clipboard.writeText(code);
@@ -95,6 +134,11 @@ export default function SendPanel(): JSX.Element {
         <p className="panel-subtitle">
           Generate a courier code and stream your files over the mock transport.
         </p>
+        {toast && (
+          <div className={`toast toast-${toast.kind}`}>
+            {toast.message}
+          </div>
+        )}
         <div className="form-row">
           <button
             className="primary"
@@ -112,6 +156,16 @@ export default function SendPanel(): JSX.Element {
             disabled={!selectedFiles.length || isSending}
           >
             {isSending ? "Starting…" : "Start send"}
+          </button>
+        </div>
+        <div className="form-row">
+          <button
+            className="secondary smoke-test-button"
+            onClick={() => {
+              void handleSmokeTest();
+            }}
+          >
+            P2P Smoke Test
           </button>
         </div>
         {selectedFiles.length > 0 && (

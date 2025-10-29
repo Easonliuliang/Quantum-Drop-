@@ -34,6 +34,12 @@ pub struct SelectedRoute {
     pub stream: Box<dyn TransportStream>,
 }
 
+#[derive(Default)]
+struct TransportPreferences {
+    routes: Vec<RouteKind>,
+    stun: Vec<String>,
+}
+
 pub struct Router {
     preferred: Vec<RouteKind>,
     mock: MockLocalAdapter,
@@ -45,32 +51,43 @@ pub struct Router {
 
 impl Router {
     pub fn from_app(app: &AppHandle) -> Self {
-        let preferred = read_preferred_routes(app);
-        Self::new(preferred)
+        let prefs = read_transport_preferences(app);
+        Self::build_router(prefs.routes, prefs.stun)
     }
 
+    #[allow(dead_code)]
     pub fn new(preferred: Vec<RouteKind>) -> Self {
-        let mut routes = if preferred.is_empty() {
-            vec![RouteKind::Lan, RouteKind::P2p, RouteKind::Relay]
-        } else {
-            preferred
-        };
-        if routes.iter().all(|route| route != &RouteKind::MockLocal) {
-            routes.push(RouteKind::MockLocal);
-        }
-
-        Router {
-            preferred: routes,
-            mock: MockLocalAdapter::new(),
-            #[cfg(feature = "transport-quic")]
-            quic: QuicAdapter::new().ok(),
-            #[cfg(feature = "transport-webrtc")]
-            webrtc: Some(WebRtcAdapter::default()),
-        }
+        Self::build_router(preferred, Vec::new())
     }
 
     pub fn preferred_routes(&self) -> &[RouteKind] {
         &self.preferred
+    }
+
+    pub fn p2p_only(app: &AppHandle) -> Self {
+        let prefs = read_transport_preferences(app);
+        Self::build_router(vec![RouteKind::P2p], prefs.stun)
+    }
+
+    fn build_router(mut preferred: Vec<RouteKind>, stun: Vec<String>) -> Self {
+        if preferred.is_empty() {
+            preferred = vec![RouteKind::P2p, RouteKind::Lan, RouteKind::Relay];
+        }
+        if preferred.iter().all(|route| route != &RouteKind::MockLocal) {
+            preferred.push(RouteKind::MockLocal);
+        }
+
+        #[cfg(not(feature = "transport-webrtc"))]
+        let _ = &stun;
+
+        Router {
+            preferred,
+            mock: MockLocalAdapter::new(),
+            #[cfg(feature = "transport-quic")]
+            quic: QuicAdapter::new().ok(),
+            #[cfg(feature = "transport-webrtc")]
+            webrtc: build_webrtc_adapter(&stun),
+        }
     }
 
     pub async fn connect(&self, session: &SessionDesc) -> Result<SelectedRoute, TransportError> {
@@ -124,29 +141,44 @@ impl Router {
     }
 }
 
-fn read_preferred_routes(app: &AppHandle) -> Vec<RouteKind> {
-    if let Some(routes) = read_routes_from_app_yaml(app) {
-        return routes;
+fn read_transport_preferences(app: &AppHandle) -> TransportPreferences {
+    if let Some(prefs) = read_transport_from_app_yaml(app) {
+        return prefs;
     }
     if let Ok(value) = serde_json::to_value(app.config()) {
-        return extract_preferred_routes(&value);
+        return extract_transport_preferences(&value);
     }
-    Vec::new()
+    TransportPreferences::default()
 }
 
-fn extract_preferred_routes(config: &Value) -> Vec<RouteKind> {
-    let pointer = "/app/s2/transport/preferredRoutes";
-    let mut routes = Vec::new();
-    if let Some(values) = config.pointer(pointer).and_then(|value| value.as_array()) {
-        for value in values {
-            if let Some(route_str) = value.as_str() {
-                if let Some(route) = parse_route(route_str) {
-                    routes.push(route);
+fn extract_transport_preferences(config: &Value) -> TransportPreferences {
+    let pointer = "/app/s2/transport";
+    let mut prefs = TransportPreferences::default();
+    if let Some(node) = config.pointer(pointer) {
+        if let Some(routes) = node
+            .get("preferredRoutes")
+            .and_then(|value| value.as_array())
+        {
+            for value in routes {
+                if let Some(route_str) = value.as_str() {
+                    if let Some(route) = parse_route(route_str) {
+                        prefs.routes.push(route);
+                    }
+                }
+            }
+        }
+        if let Some(stun) = node.get("stun").and_then(|value| value.as_array()) {
+            for value in stun {
+                if let Some(url) = value.as_str() {
+                    let trimmed = url.trim();
+                    if !trimmed.is_empty() {
+                        prefs.stun.push(trimmed.to_string());
+                    }
                 }
             }
         }
     }
-    routes
+    prefs
 }
 
 fn parse_route(route: &str) -> Option<RouteKind> {
@@ -159,22 +191,48 @@ fn parse_route(route: &str) -> Option<RouteKind> {
     }
 }
 
-fn read_routes_from_app_yaml(app: &AppHandle) -> Option<Vec<RouteKind>> {
+fn read_transport_from_app_yaml(app: &AppHandle) -> Option<TransportPreferences> {
     let mut path = app.path().app_config_dir().ok()?;
     path.push("app.yaml");
     let contents = fs::read_to_string(path).ok()?;
     let parsed: AppYaml = serde_yaml::from_str(&contents).ok()?;
-    let routes = parsed
-        .s2
-        .and_then(|s2| s2.transport)
-        .map(|transport| transport.preferred_routes)
-        .unwrap_or_default();
-    Some(
-        routes
-            .into_iter()
-            .filter_map(|value| parse_route(&value))
-            .collect(),
-    )
+    let transport = parsed.s2?.transport?;
+    let routes = transport
+        .preferred_routes
+        .into_iter()
+        .filter_map(|value| parse_route(&value))
+        .collect();
+    let stun = transport
+        .stun
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect();
+    Some(TransportPreferences { routes, stun })
+}
+
+#[cfg(feature = "transport-webrtc")]
+fn build_webrtc_adapter(stun: &[String]) -> Option<WebRtcAdapter> {
+    use webrtc::ice_transport::ice_server::RTCIceServer;
+    use webrtc::peer_connection::configuration::RTCConfiguration;
+
+    if stun.is_empty() {
+        return Some(WebRtcAdapter::default());
+    }
+
+    let ice_servers = stun
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .map(|url| RTCIceServer {
+            urls: vec![url.clone()],
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
+    let mut config = RTCConfiguration::default();
+    if !ice_servers.is_empty() {
+        config.ice_servers = ice_servers;
+    }
+    Some(WebRtcAdapter::new(config))
 }
 
 #[cfg(test)]
@@ -188,9 +246,7 @@ mod tests {
         let rt = Runtime::new().expect("runtime");
         rt.block_on(async {
             let router = Router::new(vec![RouteKind::Lan]);
-            let session = SessionDesc {
-                session_id: "router-quic".into(),
-            };
+            let session = SessionDesc::new("router-quic");
             let selection = router.connect(&session).await.expect("connect");
             assert_eq!(selection.route, RouteKind::Lan);
             let mut stream = selection.stream;
@@ -215,4 +271,6 @@ struct S2Config {
 struct TransportYaml {
     #[serde(rename = "preferredRoutes", default)]
     preferred_routes: Vec<String>,
+    #[serde(default)]
+    stun: Vec<String>,
 }
