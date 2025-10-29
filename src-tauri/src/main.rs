@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod attestation;
+mod config;
 mod commands;
 mod crypto;
 mod signaling;
@@ -9,8 +10,10 @@ mod transport;
 
 use commands::{
     courier_cancel, courier_generate_code, courier_p2p_smoke_test, courier_receive,
-    courier_relay_smoke_test, courier_send, export_pot, list_transfers, verify_pot, SharedState,
+    courier_relay_smoke_test, courier_send, export_pot, list_transfers, load_settings,
+    update_settings, verify_pot, SharedState,
 };
+use config::ConfigStore;
 use serde::Serialize;
 use store::TransferStore;
 use tauri::Manager;
@@ -37,6 +40,9 @@ fn main() {
             let store = TransferStore::initialise(&app.handle())
                 .expect("failed to initialise transfer store");
             app.manage(store);
+            let config_store = ConfigStore::initialise(&app.handle())
+                .expect("failed to initialise config store");
+            app.manage(config_store);
             Ok(())
         })
         .manage(SharedState::new())
@@ -50,7 +56,9 @@ fn main() {
             courier_relay_smoke_test,
             export_pot,
             verify_pot,
-            list_transfers
+            list_transfers,
+            load_settings,
+            update_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running Courier Agent");

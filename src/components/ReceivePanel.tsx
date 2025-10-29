@@ -25,6 +25,32 @@ const statusLabel = (status: TransferStatus) => {
 
 const shortId = (id: string) => `${id.slice(0, 6)}…${id.slice(-4)}`;
 
+const formatBytes = (size: number) => {
+  if (!size) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exponent = Math.min(
+    Math.floor(Math.log(size) / Math.log(1024)),
+    units.length - 1
+  );
+  const value = size / 1024 ** exponent;
+  return `${value.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+};
+
+const formatDuration = (seconds?: number | null) => {
+  if (seconds === undefined || seconds === null || Number.isNaN(seconds)) {
+    return "—";
+  }
+  const total = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${secs.toString().padStart(2, "0")}s`;
+  }
+  return `${secs}s`;
+};
+
 export default function ReceivePanel(): JSX.Element {
   const [code, setCode] = useState("");
   const [saveDir, setSaveDir] = useState("");
@@ -163,6 +189,16 @@ export default function ReceivePanel(): JSX.Element {
               const percent = progress?.progress
                 ? Math.round(progress.progress * 100)
                 : undefined;
+              const bytesSent =
+                typeof progress?.bytesSent === "number"
+                  ? progress.bytesSent
+                  : undefined;
+              const bytesTotal =
+                typeof progress?.bytesTotal === "number"
+                  ? progress.bytesTotal
+                  : undefined;
+              const averageSpeed = record.metrics?.averageSpeed;
+              const etaSeconds = record.metrics?.etaSeconds;
               return (
                 <article className="transfer-card" key={summary.taskId}>
                   <header className="transfer-header">
@@ -191,6 +227,28 @@ export default function ReceivePanel(): JSX.Element {
                           className="progress-bar-fill"
                           style={{ width: `${percent}%` }}
                         />
+                      </div>
+                    )}
+                    {bytesSent !== undefined && bytesTotal !== undefined && (
+                      <div className="progress-line">
+                        <span className="label">Transferred</span>
+                        <span className="value">
+                          {formatBytes(bytesSent)} / {formatBytes(bytesTotal)}
+                        </span>
+                      </div>
+                    )}
+                    {typeof averageSpeed === "number" && averageSpeed > 0 && (
+                      <div className="progress-line">
+                        <span className="label">Avg speed</span>
+                        <span className="value">
+                          {`${formatBytes(averageSpeed)} /s`}
+                        </span>
+                      </div>
+                    )}
+                    {etaSeconds !== undefined && (
+                      <div className="progress-line">
+                        <span className="label">ETA</span>
+                        <span className="value">{formatDuration(etaSeconds)}</span>
                       </div>
                     )}
                     {progress?.route && (

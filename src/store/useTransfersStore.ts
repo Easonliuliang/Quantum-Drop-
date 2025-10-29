@@ -18,11 +18,19 @@ import type {
   TransferDirection,
   VerifyPotResponse,
 } from "../lib/types";
+import { resolveUserError, type UserFacingError } from "../lib/errors";
+
+type TransferMetrics = {
+  averageSpeed?: number;
+  etaSeconds?: number;
+};
 
 type TransferRecord = {
   summary: TransferSummary;
   progress?: TransferProgress;
   logs: TransferLogEvent[];
+  speedHistory: number[];
+  metrics?: TransferMetrics;
 };
 
 type TransfersState = {
@@ -32,7 +40,7 @@ type TransfersState = {
   ready: boolean;
   isSending: boolean;
   isReceiving: boolean;
-  lastError?: string | null;
+  lastError?: UserFacingError | null;
   teardown?: () => void;
   initialize: () => Promise<void>;
   shutdown: () => void;
@@ -43,8 +51,8 @@ type TransfersState = {
   ) => Promise<{ taskId: string; code: string }>;
   startReceive: (code: string, saveDir: string) => Promise<string>;
   cancelTransfer: (taskId: string) => Promise<void>;
-  exportPot: (taskId: string, outDir: string) => Promise<string>;
-  verifyPot: (potPath: string) => Promise<boolean>;
+  exportPot: (taskId: string) => Promise<string>;
+  verifyPot: (potPath: string) => Promise<VerifyPotResponse>;
   updateProgress: (progress: TransferProgress) => void;
   complete: (event: TransferLifecycleEvent) => void;
   fail: (event: TransferLifecycleEvent) => void;
@@ -116,9 +124,11 @@ const ensureRecord = (
       summary,
       progress: existing.progress,
       logs: existing.logs,
+      speedHistory: existing.speedHistory,
+      metrics: existing.metrics,
     };
   }
-  return { summary, logs: [] };
+  return { summary, logs: [], speedHistory: [] };
 };
 
 const appendLog = (
@@ -131,6 +141,7 @@ const appendLog = (
     transfers[log.taskId] = {
       summary: createPlaceholderSummary(log.taskId, fallbackDirection),
       logs: [log],
+      speedHistory: [],
     };
     return;
   }
@@ -299,8 +310,7 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
 
       return { taskId: response.taskId, code: response.code };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      set({ lastError: message });
+      set({ lastError: resolveUserError(error) });
       throw error;
     } finally {
       set({ isSending: false });
@@ -335,8 +345,7 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
 
       return response.taskId;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      set({ lastError: message });
+      set({ lastError: resolveUserError(error) });
       throw error;
     } finally {
       set({ isReceiving: false });
@@ -347,10 +356,9 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
     await invoke("courier_cancel", { task_id: taskId });
   },
 
-  exportPot: async (taskId, outDir) => {
+  exportPot: async (taskId) => {
     const response = await invoke<ExportPotResponse>("export_pot", {
       task_id: taskId,
-      out_dir: outDir,
     });
     set((state) => {
       const transfers = { ...state.transfers };
@@ -371,31 +379,73 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
       pot_path: potPath,
     });
     if (!response.valid) {
-      set({ lastError: response.reason ?? "Proof verification failed" });
+      set({
+        lastError: resolveUserError({
+          payload: {
+            code: "E_VERIFY_FAIL",
+            message: response.reason ?? "Proof verification failed",
+          },
+        }),
+      });
+    } else {
+      set((state) =>
+        state.lastError?.code === "E_VERIFY_FAIL" ? { lastError: null } : {}
+      );
     }
-    return response.valid;
+    return response;
   },
 
   updateProgress: (progress) =>
     set((state) => {
       const transfers = { ...state.transfers };
       const existing = transfers[progress.taskId];
+      let summary: TransferSummary;
       if (!existing) {
-        const summary = createPlaceholderSummary(progress.taskId, "send");
+        summary = createPlaceholderSummary(progress.taskId, "send");
         if (progress.route) {
           summary.route = progress.route;
         }
-        transfers[progress.taskId] = {
-          summary,
-          progress,
-          logs: [],
-        };
       } else {
-        const summary = progress.route
+        summary = progress.route
           ? { ...existing.summary, route: progress.route }
           : existing.summary;
-        transfers[progress.taskId] = { summary, progress, logs: existing.logs };
       }
+
+      let speedHistory = existing?.speedHistory ?? [];
+      let metrics = existing?.metrics;
+      if (typeof progress.speedBps === "number") {
+        speedHistory = [...speedHistory, progress.speedBps].slice(-5);
+        if (speedHistory.length > 0) {
+          const averageSpeed =
+            speedHistory.reduce((sum, value) => sum + value, 0) /
+            speedHistory.length;
+          let etaSeconds: number | undefined;
+          if (
+            typeof progress.bytesTotal === "number" &&
+            typeof progress.bytesSent === "number"
+          ) {
+            const remaining = Math.max(0, progress.bytesTotal - progress.bytesSent);
+            etaSeconds = averageSpeed > 0 ? Math.ceil(remaining / averageSpeed) : undefined;
+          }
+          metrics = {
+            averageSpeed,
+            etaSeconds: etaSeconds ?? metrics?.etaSeconds,
+          };
+        }
+      } else if (progress.phase === "done") {
+        metrics = {
+          averageSpeed: metrics?.averageSpeed,
+          etaSeconds: 0,
+        };
+      }
+
+      transfers[progress.taskId] = {
+        summary,
+        progress,
+        logs: existing ? existing.logs : [],
+        speedHistory,
+        metrics,
+      };
       return { transfers };
     }),
 
@@ -412,7 +462,13 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
         updatedAt: nowIso(),
         potPath: event.message ?? existing.potPath,
       };
-      transfers[event.taskId] = ensureRecord(transfers, summary);
+      const record = ensureRecord(transfers, summary);
+      transfers[event.taskId] = record.metrics
+        ? {
+            ...record,
+            metrics: { ...record.metrics, etaSeconds: 0 },
+          }
+        : record;
       return { transfers };
     }),
 
@@ -428,10 +484,13 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
         code: event.code ?? existing.code,
         updatedAt: nowIso(),
       };
-      transfers[event.taskId] = ensureRecord(transfers, summary);
+      const record = ensureRecord(transfers, summary);
+      transfers[event.taskId] = record;
       return {
         transfers,
-        lastError: event.message ?? state.lastError,
+        lastError: event.message
+          ? resolveUserError({ message: event.message })
+          : state.lastError,
       };
     }),
 

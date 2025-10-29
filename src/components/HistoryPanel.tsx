@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useTransfersStore } from "../store/useTransfersStore";
@@ -8,7 +8,7 @@ import type {
   TransferSummaryRaw
 } from "../lib/types";
 import { describeError } from "../lib/errors";
-import { pickDirectory, pickPotFile } from "../lib/dialog";
+import { pickPotFile } from "../lib/dialog";
 
 const statusLabel = (status: TransferStatus) => {
   switch (status) {
@@ -51,7 +51,8 @@ const mapSummary = (raw: TransferSummaryRaw): TransferSummary => ({
 });
 
 export default function HistoryPanel(): JSX.Element {
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const toastTimer = useRef<number>();
   const [remoteHistory, setRemoteHistory] = useState<TransferSummary[] | null>(
     null
   );
@@ -105,17 +106,31 @@ export default function HistoryPanel(): JSX.Element {
     );
   }, [remoteHistory, fallbackSummaries]);
 
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) {
+        window.clearTimeout(toastTimer.current);
+      }
+    };
+  }, []);
+
+  const showToast = (kind: "success" | "error", message: string) => {
+    setToast({ kind, message });
+    if (toastTimer.current) {
+      window.clearTimeout(toastTimer.current);
+    }
+    toastTimer.current = window.setTimeout(() => {
+      setToast(null);
+    }, 4000);
+  };
+
   const handleExport = async (taskId: string) => {
     try {
-      const directory = await pickDirectory();
-      if (!directory) {
-        return;
-      }
-      const path = await exportPot(taskId, directory);
-      setFeedback(`PoT exported to ${path}`);
+      const path = await exportPot(taskId);
+      showToast("success", `PoT exported to ${path}`);
     } catch (caught: unknown) {
       const message = describeError(caught);
-      setFeedback(`Failed to export: ${message}`);
+      showToast("error", `Failed to export: ${message}`);
     }
   };
 
@@ -125,11 +140,16 @@ export default function HistoryPanel(): JSX.Element {
       if (!selection) {
         return;
       }
-      const valid = await verifyPot(selection);
-      setFeedback(valid ? "Proof validated successfully" : "Proof invalid");
+      const outcome = await verifyPot(selection);
+      if (outcome.valid) {
+        showToast("success", "Proof validated successfully");
+      } else {
+        const reason = outcome.reason ?? "Proof invalid";
+        showToast("error", reason);
+      }
     } catch (caught: unknown) {
       const message = describeError(caught);
-      setFeedback(`Verification failed: ${message}`);
+      showToast("error", `Verification failed: ${message}`);
     }
   };
 
@@ -140,14 +160,7 @@ export default function HistoryPanel(): JSX.Element {
         <p className="panel-subtitle">
           Timeline of the most recent transfers handled by the native runtime.
         </p>
-        {feedback && (
-          <div className="feedback-banner">
-            <span>{feedback}</span>
-            <button className="plain" onClick={() => setFeedback(null)}>
-              Close
-            </button>
-          </div>
-        )}
+        {toast && <div className={`toast toast-${toast.kind}`}>{toast.message}</div>}
         {transfers.length === 0 ? (
           <p className="empty-state">No transfers recorded yet.</p>
         ) : (

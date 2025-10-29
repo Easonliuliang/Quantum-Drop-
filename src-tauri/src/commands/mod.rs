@@ -13,7 +13,10 @@ use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
 use tokio::time::{sleep, timeout};
 
 use crate::{
-    attestation::{compute_file_attestation, write_proof_of_transition, FileAttestation},
+    attestation::{
+        compute_file_attestation, write_proof_of_transition, ProofOfTransition,
+    },
+    config::{ConfigStore, RuntimeSettings},
     crypto,
     signaling::SessionTicket,
     store::{TransferRecord, TransferStore},
@@ -22,12 +25,11 @@ use crate::{
 
 use state::{TrackedFile, TransferTask};
 use types::{
-    CommandError, ExportPotResponse, GenerateCodeResponse, P2pSmokeTestResponse, TaskResponse,
-    TransferDirection, TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute,
-    TransferStatus, TransferSummary, VerifyPotResponse,
+    CommandError, ExportPotResponse, GenerateCodeResponse, P2pSmokeTestResponse,
+    SettingsPayload, TaskResponse, TransferDirection, TransferLifecycleEvent, TransferPhase,
+    TransferProgressEvent, TransferRoute, TransferStatus, TransferSummary, VerifyPotResponse,
 };
 
-const DEFAULT_CODE_TTL_SECONDS: i64 = 900;
 const MOCK_RECEIVE_FILE_SIZE: u64 = 2 * 1024 * 1024;
 
 pub use state::AppState as SharedState;
@@ -35,13 +37,14 @@ pub use state::AppState as SharedState;
 #[tauri::command]
 pub async fn courier_generate_code(
     state: State<'_, SharedState>,
+    config: State<'_, ConfigStore>,
     paths: Vec<String>,
     expire_sec: Option<i64>,
-) -> Result<GenerateCodeResponse, String> {
+) -> Result<GenerateCodeResponse, CommandError> {
     if paths.is_empty() {
-        return Err(CommandError::invalid("At least one file is required").to_string());
+        return Err(CommandError::invalid("At least one file is required"));
     }
-    let files = collect_files(&paths).map_err(|err| err.to_string())?;
+    let files = collect_files(&paths).map_err(CommandError::from)?;
     let code = crypto::generate_task_code(6);
     let session_key = crypto::derive_mock_session_key();
     let task = TransferTask::new(
@@ -52,7 +55,8 @@ pub async fn courier_generate_code(
     );
     let task = state.insert_task(task).await;
 
-    let ttl = expire_sec.unwrap_or(DEFAULT_CODE_TTL_SECONDS);
+    let settings = config.get();
+    let ttl = expire_sec.unwrap_or(settings.code_expire_sec).max(60);
     let ticket = SessionTicket::new(code.clone(), ttl);
     state.track_code(&code, &task.task_id).await;
 
@@ -70,12 +74,11 @@ pub async fn courier_send(
     state: State<'_, SharedState>,
     code: String,
     paths: Vec<String>,
-) -> Result<TaskResponse, String> {
+) -> Result<TaskResponse, CommandError> {
     if paths.is_empty() {
-        return Err(CommandError::invalid("At least one file is required").to_string());
+        return Err(CommandError::invalid("At least one file is required"));
     }
-    let files = collect_files(&paths).map_err(|err| err.to_string())?;
-    let session_key = crypto::derive_mock_session_key();
+    let files = collect_files(&paths).map_err(CommandError::from)?;
     let maybe_task = state.find_by_code(&code).await;
 
     let task = if let Some(existing) = maybe_task {
@@ -87,15 +90,7 @@ pub async fn courier_send(
             .await
             .unwrap_or(existing)
     } else {
-        let task = TransferTask::new(
-            TransferDirection::Send,
-            Some(code.clone()),
-            files,
-            session_key,
-        );
-        let task = state.insert_task(task).await;
-        state.track_code(&code, &task.task_id).await;
-        task
+        return Err(CommandError::code_expired());
     };
 
     spawn_transfer_runner(&app, state.inner().clone(), task.task_id.clone());
@@ -111,14 +106,14 @@ pub async fn courier_receive(
     state: State<'_, SharedState>,
     code: String,
     save_dir: String,
-) -> Result<TaskResponse, String> {
+) -> Result<TaskResponse, CommandError> {
     let save_dir_path = Path::new(&save_dir);
     if !save_dir_path.exists() {
         fs::create_dir_all(save_dir_path)
-            .map_err(|err| format!("failed to prepare save directory: {err}"))?;
+            .map_err(|err| CommandError::from_io(&err, "failed to prepare save directory"))?;
     }
     if !save_dir_path.is_dir() {
-        return Err(CommandError::invalid("save_dir must be a directory").to_string());
+        return Err(CommandError::invalid("save_dir must be a directory"));
     }
 
     let mock_file_path = save_dir_path.join(format!("courier-receive-{code}.bin"));
@@ -154,11 +149,11 @@ pub async fn courier_cancel(
     app: AppHandle,
     state: State<'_, SharedState>,
     task_id: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let updated = state
         .set_status(&task_id, TransferStatus::Cancelled)
         .await
-        .ok_or_else(|| CommandError::NotFound.to_string())?;
+        .ok_or_else(CommandError::not_found)?;
 
     let direction = updated.direction.clone();
     let code = updated.code.clone();
@@ -178,20 +173,22 @@ pub async fn courier_cancel(
 }
 
 #[tauri::command]
-pub async fn courier_p2p_smoke_test(app: AppHandle) -> Result<P2pSmokeTestResponse, String> {
+pub async fn courier_p2p_smoke_test(
+    app: AppHandle,
+) -> Result<P2pSmokeTestResponse, CommandError> {
     let router = Router::p2p_only(&app);
     let session = SessionDesc::new("p2p-smoke-test");
 
     let SelectedRoute { route, mut stream } = router
         .connect(&session)
         .await
-        .map_err(|err| format!("p2p connect failed: {err}"))?;
+        .map_err(|err| CommandError::route_unreachable(format!("p2p connect failed: {err}")))?;
 
     let payload = vec![0_u8; 64 * 1024];
     stream
         .send(Frame::Data(payload.clone()))
         .await
-        .map_err(|err| format!("p2p send failed: {err}"))?;
+        .map_err(|err| CommandError::route_unreachable(format!("p2p send failed: {err}")))?;
 
     let mut echoed: Option<u64> = None;
     for _ in 0..3 {
@@ -199,11 +196,13 @@ pub async fn courier_p2p_smoke_test(app: AppHandle) -> Result<P2pSmokeTestRespon
             Ok(Ok(frame)) => frame,
             Ok(Err(err)) => {
                 stream.close().await.ok();
-                return Err(format!("p2p recv failed: {err}"));
+                return Err(CommandError::route_unreachable(format!(
+                    "p2p recv failed: {err}"
+                )));
             }
             Err(_) => {
                 stream.close().await.ok();
-                return Err("p2p echo timed out".into());
+                return Err(CommandError::route_unreachable("p2p echo timed out"));
             }
         };
 
@@ -217,7 +216,8 @@ pub async fn courier_p2p_smoke_test(app: AppHandle) -> Result<P2pSmokeTestRespon
     }
 
     stream.close().await.ok();
-    let echoed = echoed.ok_or_else(|| "p2p echo missing".to_string())?;
+    let echoed =
+        echoed.ok_or_else(|| CommandError::route_unreachable("p2p echo missing"))?;
 
     Ok(P2pSmokeTestResponse {
         route: route.label().to_string(),
@@ -226,10 +226,15 @@ pub async fn courier_p2p_smoke_test(app: AppHandle) -> Result<P2pSmokeTestRespon
 }
 
 #[tauri::command]
-pub async fn courier_relay_smoke_test(_app: AppHandle) -> Result<P2pSmokeTestResponse, String> {
+pub async fn courier_relay_smoke_test(
+    _app: AppHandle,
+) -> Result<P2pSmokeTestResponse, CommandError> {
     #[cfg(not(feature = "transport-relay"))]
     {
-        return Err("relay transport disabled at build time".into());
+        let _ = _app;
+        return Err(CommandError::route_unreachable(
+            "relay transport disabled at build time",
+        ));
     }
 
     #[cfg(feature = "transport-relay")]
@@ -240,18 +245,22 @@ pub async fn courier_relay_smoke_test(_app: AppHandle) -> Result<P2pSmokeTestRes
         let SelectedRoute { route, mut stream } = router
             .connect(&session)
             .await
-            .map_err(|err| format!("relay connect failed: {err}"))?;
+            .map_err(|err| {
+                CommandError::route_unreachable(format!("relay connect failed: {err}"))
+            })?;
 
         if route != RouteKind::Relay {
             stream.close().await.ok();
-            return Err("relay route unavailable (fallback engaged)".into());
+            return Err(CommandError::route_unreachable(
+                "relay route unavailable (fallback engaged)",
+            ));
         }
 
         let payload = vec![0_u8; 32 * 1024];
         stream
             .send(Frame::Data(payload.clone()))
             .await
-            .map_err(|err| format!("relay send failed: {err}"))?;
+            .map_err(|err| CommandError::route_unreachable(format!("relay send failed: {err}")))?;
 
         let mut echoed: Option<u64> = None;
         for _ in 0..3 {
@@ -259,11 +268,13 @@ pub async fn courier_relay_smoke_test(_app: AppHandle) -> Result<P2pSmokeTestRes
                 Ok(Ok(frame)) => frame,
                 Ok(Err(err)) => {
                     stream.close().await.ok();
-                    return Err(format!("relay recv failed: {err}"));
+                    return Err(CommandError::route_unreachable(format!(
+                        "relay recv failed: {err}"
+                    )));
                 }
                 Err(_) => {
                     stream.close().await.ok();
-                    return Err("relay echo timed out".into());
+                    return Err(CommandError::route_unreachable("relay echo timed out"));
                 }
             };
 
@@ -277,7 +288,8 @@ pub async fn courier_relay_smoke_test(_app: AppHandle) -> Result<P2pSmokeTestRes
         }
 
         stream.close().await.ok();
-        let echoed = echoed.ok_or_else(|| "relay echo missing".to_string())?;
+        let echoed =
+            echoed.ok_or_else(|| CommandError::route_unreachable("relay echo missing"))?;
 
         Ok(P2pSmokeTestResponse {
             route: route.label().to_string(),
@@ -288,28 +300,52 @@ pub async fn courier_relay_smoke_test(_app: AppHandle) -> Result<P2pSmokeTestRes
 
 #[tauri::command]
 pub async fn export_pot(
+    app: AppHandle,
     state: State<'_, SharedState>,
+    store: State<'_, TransferStore>,
     task_id: String,
-    out_dir: String,
-) -> Result<ExportPotResponse, String> {
-    let task = state
-        .get_task(&task_id)
-        .await
-        .ok_or_else(|| CommandError::NotFound.to_string())?;
+) -> Result<ExportPotResponse, CommandError> {
+    let proof_dir = default_proofs_dir(&app).map_err(CommandError::from)?;
+    fs::create_dir_all(&proof_dir)
+        .map_err(|err| CommandError::from_io(&err, "failed to prepare proofs directory"))?;
 
-    let pot_path = task.pot_path.ok_or_else(|| {
-        CommandError::invalid("Proof of Transition not yet available").to_string()
-    })?;
+    let maybe_task = state.get_task(&task_id).await;
+    let mut source_path = maybe_task
+        .as_ref()
+        .and_then(|task| task.pot_path.clone());
 
-    let out_dir_path = PathBuf::from(out_dir);
-    fs::create_dir_all(&out_dir_path)
-        .map_err(|err| format!("failed to create export directory: {err}"))?;
+    if source_path.is_none() {
+        let record = store
+            .get(&task_id)
+            .map_err(CommandError::from)?
+            .ok_or_else(CommandError::not_found)?;
+        source_path = record.pot_path.map(PathBuf::from);
+    }
 
-    let file_name = pot_path
-        .file_name()
-        .ok_or_else(|| CommandError::invalid("invalid pot path").to_string())?;
-    let destination = out_dir_path.join(file_name);
-    fs::copy(&pot_path, &destination).map_err(|err| format!("failed to export PoT file: {err}"))?;
+    let source_path =
+        source_path.ok_or_else(|| CommandError::invalid("Proof of Transition not yet available"))?;
+    if !source_path.exists() {
+        return Err(CommandError::verify_failed(format!(
+            "PoT artefact missing at {}",
+            source_path.display()
+        )));
+    }
+
+    let destination = proof_dir.join(format!("{task_id}.pot.json"));
+    if source_path != destination {
+        fs::copy(&source_path, &destination)
+            .map_err(|err| CommandError::from_io(&err, "failed to export PoT file"))?;
+    } else {
+        // ensure file metadata accessible
+        fs::metadata(&destination)
+            .map_err(|err| CommandError::from_io(&err, "failed to access PoT file"))?;
+    }
+
+    if let Some(task) = maybe_task {
+        state
+            .set_pot_path(&task.task_id, destination.clone())
+            .await;
+    }
 
     Ok(ExportPotResponse {
         pot_path: destination.display().to_string(),
@@ -317,25 +353,42 @@ pub async fn export_pot(
 }
 
 #[tauri::command]
-pub async fn verify_pot(pot_path: String) -> Result<VerifyPotResponse, String> {
+pub async fn verify_pot(pot_path: String) -> Result<VerifyPotResponse, CommandError> {
     let path = PathBuf::from(&pot_path);
     if !path.exists() {
-        return Err(CommandError::invalid("PoT file not found").to_string());
+        return Err(CommandError::invalid("PoT file not found"));
     }
 
-    let file = fs::File::open(&path).map_err(|err| format!("failed to open PoT file: {err}"))?;
-    let proof: FileProof =
-        serde_json::from_reader(file).map_err(|err| format!("invalid PoT JSON: {err}"))?;
+    let file = fs::File::open(&path)
+        .map_err(|err| CommandError::from_io(&err, "failed to open PoT file"))?;
+    let proof: ProofOfTransition = serde_json::from_reader(file).map_err(|err| {
+        CommandError::verify_failed(format!("invalid PoT JSON payload: {err}"))
+    })?;
 
-    let valid = proof.version == "1" && !proof.files.is_empty();
+    let reason = validate_proof(&proof);
     Ok(VerifyPotResponse {
-        valid,
-        reason: if valid {
-            None
-        } else {
-            Some("Unsupported PoT version or empty file list".into())
-        },
+        valid: reason.is_none(),
+        reason,
     })
+}
+
+#[tauri::command]
+pub fn load_settings(config: State<'_, ConfigStore>) -> Result<SettingsPayload, CommandError> {
+    Ok(to_settings_payload(config.get()))
+}
+
+#[tauri::command]
+pub fn update_settings(
+    config: State<'_, ConfigStore>,
+    payload: SettingsPayload,
+) -> Result<SettingsPayload, CommandError> {
+    let runtime = RuntimeSettings {
+        preferred_routes: payload.preferred_routes.clone(),
+        code_expire_sec: payload.code_expire_sec,
+        relay_enabled: payload.relay_enabled,
+    };
+    let updated = config.update(runtime).map_err(CommandError::from)?;
+    Ok(to_settings_payload(updated))
 }
 
 #[tauri::command]
@@ -343,10 +396,10 @@ pub async fn list_transfers(
     state: State<'_, SharedState>,
     store: State<'_, TransferStore>,
     limit: Option<usize>,
-) -> Result<Vec<TransferSummary>, String> {
+) -> Result<Vec<TransferSummary>, CommandError> {
     let mut persisted: Vec<TransferSummary> = store
         .list_transfers(limit, None)
-        .map_err(|err| err.to_string())?
+        .map_err(CommandError::from)?
         .into_iter()
         .map(|record| TransferStore::to_summary(&record))
         .collect();
@@ -365,10 +418,137 @@ pub async fn list_transfers(
     Ok(persisted)
 }
 
-#[derive(serde::Deserialize)]
-struct FileProof {
-    version: String,
-    files: Vec<FileAttestation>,
+fn to_settings_payload(settings: RuntimeSettings) -> SettingsPayload {
+    SettingsPayload {
+        preferred_routes: settings.preferred_routes,
+        code_expire_sec: settings.code_expire_sec,
+        relay_enabled: settings.relay_enabled,
+    }
+}
+
+fn validate_proof(proof: &ProofOfTransition) -> Option<String> {
+    if proof.version.trim() != "1" {
+        return Some("Unsupported PoT version".into());
+    }
+    if proof.files.is_empty() {
+        return Some("No attested files in proof".into());
+    }
+    if chrono::DateTime::parse_from_rfc3339(&proof.timestamp).is_err() {
+        return Some("Timestamp invalid".into());
+    }
+    if proof.route.trim().is_empty() {
+        return Some("Route missing from PoT".into());
+    }
+    if proof.attest.receiver_signature.trim().is_empty() {
+        return Some("Missing receiver signature".into());
+    }
+    if proof.attest.algo.trim().is_empty() {
+        return Some("Missing signature algorithm".into());
+    }
+    if proof
+        .files
+        .iter()
+        .any(|file| file.cid.trim().is_empty() || file.chunk_hashes_sample.is_empty())
+    {
+        return Some("Attestation missing Merkle sample".into());
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::attestation::{pot::ProofSignature, FileAttestation};
+    use crate::commands::types::ErrorCode;
+    use serde_json::json;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn sample_attestation() -> FileAttestation {
+        FileAttestation {
+            name: "artifact.bin".into(),
+            size: 1024,
+            cid: "b3:abcdef".into(),
+            merkle_root: "sha256:deadbeef".into(),
+            chunks: 1,
+            chunk_hashes_sample: vec!["sha256:deadbeef".into()],
+        }
+    }
+
+    fn sample_proof() -> ProofOfTransition {
+        ProofOfTransition {
+            version: "1".into(),
+            task_id: "task_123".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            sender_fingerprint: "ed25519:sender".into(),
+            receiver_fingerprint: "ed25519:receiver".into(),
+            route: "relay".into(),
+            files: vec![sample_attestation()],
+            attest: ProofSignature {
+                receiver_signature: "ed25519:sig".into(),
+                algo: "ed25519".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn validate_proof_accepts_valid_payload() {
+        let proof = sample_proof();
+        assert!(validate_proof(&proof).is_none());
+    }
+
+    #[test]
+    fn validate_proof_rejects_missing_files() {
+        let mut proof = sample_proof();
+        proof.files.clear();
+        let error = validate_proof(&proof);
+        assert!(error.is_some());
+        assert!(error.unwrap().contains("No attested files"));
+    }
+
+    #[test]
+    fn verify_pot_command_validates_success() {
+        let proof = sample_proof();
+        let mut temp = NamedTempFile::new().expect("temp file");
+        serde_json::to_writer(&mut temp, &proof).expect("write proof");
+        let path = temp.path().display().to_string();
+        let result = tauri::async_runtime::block_on(verify_pot(path));
+        let response = result.expect("command response");
+        assert!(response.valid);
+        assert!(response.reason.is_none());
+    }
+
+    #[test]
+    fn verify_pot_command_flags_invalid_json() {
+        let mut temp = NamedTempFile::new().expect("temp file");
+        write!(temp, "{}").expect("write invalid json");
+        let path = temp.path().display().to_string();
+        let result = tauri::async_runtime::block_on(verify_pot(path));
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(err.code, ErrorCode::E_VERIFY_FAIL);
+    }
+
+    #[test]
+    fn verify_pot_command_reports_invalid_structure() {
+        let mut temp = NamedTempFile::new().expect("temp file");
+        let payload = json!({
+            "version": "1",
+            "files": [],
+            "route": "lan",
+            "attest": { "receiver_signature": "", "algo": "" },
+            "task_id": "task",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "sender_fingerprint": "sender",
+            "receiver_fingerprint": "receiver"
+        });
+        serde_json::to_writer(&mut temp, &payload).expect("write payload");
+        let path = temp.path().display().to_string();
+        let result = tauri::async_runtime::block_on(verify_pot(path));
+        let response = result.expect("command response");
+        assert!(!response.valid);
+        assert!(response.reason.unwrap_or_default().contains("No attested files"));
+    }
 }
 
 fn spawn_transfer_runner(app: &AppHandle, state: SharedState, task_id: String) {

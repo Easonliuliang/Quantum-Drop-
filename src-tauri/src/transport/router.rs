@@ -1,5 +1,4 @@
 use std::fs;
-
 use std::sync::Arc;
 
 use log::warn;
@@ -7,6 +6,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use tokio::time::{timeout, Duration};
+
+use crate::config::ConfigStore;
 
 #[cfg(feature = "transport-webrtc")]
 use super::webrtc::WebRtcAdapter;
@@ -290,6 +291,28 @@ fn default_local_relay_hint() -> RelayHint {
 }
 
 fn read_transport_preferences(app: &AppHandle) -> TransportPreferences {
+    if let Some(store) = app.try_state::<ConfigStore>() {
+        let settings = store.get();
+        let mut prefs = TransportPreferences::default();
+        for value in settings.preferred_routes {
+            if let Some(route) = parse_route(&value) {
+                #[cfg(feature = "transport-relay")]
+                if route == RouteKind::Relay && !settings.relay_enabled {
+                    continue;
+                }
+                prefs.routes.push(route);
+            }
+        }
+        #[cfg(feature = "transport-relay")]
+        {
+            if !settings.relay_enabled {
+                prefs.relay = None;
+            }
+        }
+        if !prefs.routes.is_empty() {
+            return prefs;
+        }
+    }
     if let Some(prefs) = read_transport_from_app_yaml(app) {
         return prefs;
     }

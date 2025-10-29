@@ -1,4 +1,4 @@
-export type TransferTab = "send" | "receive" | "history";
+export type TransferTab = "send" | "receive" | "history" | "settings";
 
 export type TransferDirection = "send" | "receive";
 export type TransferStatus =
@@ -117,6 +117,22 @@ export interface P2pSmokeTestResponse {
   bytesEchoed: number;
 }
 
+export type ErrorCode =
+  | "E_UNKNOWN"
+  | "E_INVALID_INPUT"
+  | "E_NOT_FOUND"
+  | "E_CODE_EXPIRED"
+  | "E_ROUTE_UNREACH"
+  | "E_DISK_FULL"
+  | "E_VERIFY_FAIL"
+  | "E_PERM_DENIED";
+
+export interface SettingsPayload {
+  preferredRoutes: string[];
+  codeExpireSec: number;
+  relayEnabled: boolean;
+}
+
 export type CourierGenerateCodeCommand = (
   paths: string[],
   expireSec?: number
@@ -134,12 +150,14 @@ export type CourierReceiveCommand = (
 
 export type CourierCancelCommand = (taskId: string) => Promise<void>;
 
-export type ExportPotCommand = (
-  taskId: string,
-  outDir: string
-) => Promise<ExportPotResponse>;
+export type ExportPotCommand = (taskId: string) => Promise<ExportPotResponse>;
 
 export type VerifyPotCommand = (potPath: string) => Promise<VerifyPotResponse>;
+
+export type LoadSettingsCommand = () => Promise<SettingsPayload>;
+export type UpdateSettingsCommand = (
+  payload: SettingsPayload
+) => Promise<SettingsPayload>;
 
 export type ListTransfersCommand = (
   limit?: number
@@ -158,4 +176,6 @@ export interface CourierCommands {
   listTransfers: ListTransfersCommand;
   courierP2pSmokeTest: CourierP2pSmokeTestCommand;
   courierRelaySmokeTest: CourierRelaySmokeTestCommand;
+  loadSettings: LoadSettingsCommand;
+  updateSettings: UpdateSettingsCommand;
 }

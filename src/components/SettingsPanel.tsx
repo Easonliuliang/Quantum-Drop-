@@ -1,0 +1,245 @@
+import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+import type { SettingsPayload } from "../lib/types";
+import { describeError } from "../lib/errors";
+
+type RouteOption = {
+  id: string;
+  label: string;
+  description: string;
+};
+
+const ROUTE_ORDER = ["lan", "p2p", "relay"] as const;
+const ROUTES: RouteOption[] = [
+  {
+    id: "lan",
+    label: "LAN",
+    description: "Prefer local QUIC paths when peers share the same network.",
+  },
+  {
+    id: "p2p",
+    label: "P2P",
+    description: "Use direct WebRTC channels when traversal is possible.",
+  },
+  {
+    id: "relay",
+    label: "Relay",
+    description: "Fallback TURN relay for difficult network topologies.",
+  },
+];
+
+const normaliseRoutes = (routes: string[]): string[] => {
+  const set = new Set(routes);
+  return ROUTE_ORDER.filter((route) => set.has(route));
+};
+
+const cloneSettings = (settings: SettingsPayload | null): SettingsPayload | null =>
+  settings ? { ...settings, preferredRoutes: [...settings.preferredRoutes] } : null;
+
+export default function SettingsPanel(): JSX.Element {
+  const [settings, setSettings] = useState<SettingsPayload | null>(null);
+  const [initial, setInitial] = useState<SettingsPayload | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const payload = await invoke<SettingsPayload>("load_settings");
+        if (!cancelled) {
+          setSettings(payload);
+          setInitial(cloneSettings(payload));
+        }
+      } catch (caught: unknown) {
+        if (!cancelled) {
+          setError(describeError(caught));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const isDirty = useMemo(() => {
+    if (!settings || !initial) {
+      return false;
+    }
+    const serialised = JSON.stringify(settings);
+    const baseline = JSON.stringify(initial);
+    return serialised !== baseline;
+  }, [settings, initial]);
+
+  const toggleRoute = (routeId: string) => {
+    setSettings((current) => {
+      if (!current) {
+        return current;
+      }
+      const selected = new Set(current.preferredRoutes);
+      if (selected.has(routeId)) {
+        if (selected.size === 1) {
+          return current; // keep at least one route selected
+        }
+        selected.delete(routeId);
+      } else {
+        selected.add(routeId);
+      }
+      const preferredRoutes = normaliseRoutes(Array.from(selected));
+      return {
+        ...current,
+        preferredRoutes,
+      };
+    });
+  };
+
+  const toggleRelay = (enabled: boolean) => {
+    setSettings((current) => {
+      if (!current) {
+        return current;
+      }
+      let preferredRoutes = [...current.preferredRoutes];
+      if (!enabled) {
+        preferredRoutes = preferredRoutes.filter((route) => route !== "relay");
+      } else if (!preferredRoutes.includes("relay")) {
+        preferredRoutes = normaliseRoutes([...preferredRoutes, "relay"]);
+      }
+      return {
+        ...current,
+        relayEnabled: enabled,
+        preferredRoutes,
+      };
+    });
+  };
+
+  const handleTtlChange = (value: number) => {
+    setSettings((current) =>
+      current
+        ? {
+            ...current,
+            codeExpireSec: Number.isNaN(value) ? current.codeExpireSec : Math.max(60, Math.round(value)),
+          }
+        : current
+    );
+  };
+
+  const handleSave = async () => {
+    if (!settings || saving || !isDirty) {
+      return;
+    }
+    setSaving(true);
+    setFeedback(null);
+    setError(null);
+    try {
+      const payload = await invoke<SettingsPayload>("update_settings", {
+        payload: settings,
+      });
+      setSettings(payload);
+      setInitial(cloneSettings(payload));
+      setFeedback("Settings saved successfully");
+    } catch (caught: unknown) {
+      setError(describeError(caught));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading || !settings) {
+    return (
+      <section className="panel-content" aria-label="Runtime settings">
+        <div className="panel-section">
+          <h2>Settings</h2>
+          <p className="panel-subtitle">Loading runtime configuration…</p>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="panel-content" aria-label="Runtime settings">
+      <div className="panel-section">
+        <h2>Settings</h2>
+        <p className="panel-subtitle">
+          Adjust the native runtime routing preferences and code expiry policy.
+        </p>
+        {feedback && <div className="toast toast-success">{feedback}</div>}
+        {error && <div className="error-inline">{error}</div>}
+
+        <fieldset className="form-group">
+          <legend>Preferred Routes</legend>
+          <p className="form-hint">
+            Courier will attempt routes in the order below. At least one route must remain enabled.
+          </p>
+          <div className="route-options">
+            {ROUTES.map((route) => {
+              const checked = settings.preferredRoutes.includes(route.id);
+              const disabled = route.id === "relay" && !settings.relayEnabled;
+              return (
+                <label key={route.id} className={disabled ? "checkbox disabled" : "checkbox"}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={disabled}
+                    onChange={() => toggleRoute(route.id)}
+                  />
+                  <span className="checkbox-label">{route.label}</span>
+                  <span className="checkbox-description">{route.description}</span>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+
+        <div className="form-group">
+          <label htmlFor="relay-toggle">Relay transport</label>
+          <div className="input-row">
+            <input
+              id="relay-toggle"
+              type="checkbox"
+              checked={settings.relayEnabled}
+              onChange={(event) => toggleRelay(event.target.checked)}
+            />
+            <span className="checkbox-description">
+              Enable TURN relay fallback. Required for the relay route toggle above.
+            </span>
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="code-ttl">Code expiry (seconds)</label>
+          <input
+            id="code-ttl"
+            type="number"
+            min={60}
+            step={30}
+            value={settings.codeExpireSec}
+            onChange={(event) => handleTtlChange(Number(event.target.value))}
+          />
+          <p className="form-hint">
+            Defines the default lifetime for generated courier codes (minimum 60 seconds).
+          </p>
+        </div>
+
+        <div className="form-actions">
+          <button
+            className="primary"
+            onClick={() => {
+              void handleSave();
+            }}
+            disabled={!isDirty || saving}
+          >
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}

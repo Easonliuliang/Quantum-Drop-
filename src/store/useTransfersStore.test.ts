@@ -107,6 +107,7 @@ describe("useTransfersStore", () => {
           },
           logs: [],
           progress: undefined,
+          speedHistory: [],
         },
       },
     }));
@@ -127,5 +128,57 @@ describe("useTransfersStore", () => {
     expect(record.progress?.route).toBe("lan");
     expect(record.progress?.progress).toBeCloseTo(0.42);
     expect(record.summary.route).toBe("lan");
+    expect(record.metrics?.averageSpeed).toBeCloseTo(2048, 4);
+    expect(record.metrics?.etaSeconds).toBe(3);
+  });
+
+  it("surfaces verify_pot failures with a user-facing error", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "verify_pot") {
+        return Promise.resolve({ valid: false, reason: "checksum mismatch" });
+      }
+      return Promise.resolve({});
+    });
+
+    const response = await useTransfersStore.getState().verifyPot("/tmp/proof.pot.json");
+    expect(response.valid).toBe(false);
+    const state = useTransfersStore.getState();
+    expect(state.lastError?.code).toBe("E_VERIFY_FAIL");
+    expect(state.lastError?.detail).toBe("checksum mismatch");
+  });
+
+  it("updates summary pot path after export", async () => {
+    useTransfersStore.setState((state) => ({
+      ...state,
+      transfers: {
+        task_export: {
+          summary: {
+            taskId: "task_export",
+            direction: "send",
+            status: "completed",
+            code: "EXPORT1",
+            createdAt: "2024-01-01T00:00:00Z",
+            updatedAt: "2024-01-01T00:00:00Z",
+            files: [],
+            potPath: undefined,
+          },
+          logs: [],
+          progress: undefined,
+          speedHistory: [],
+        },
+      },
+    }));
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "export_pot") {
+        return Promise.resolve({ potPath: "/proofs/task_export.pot.json" });
+      }
+      return Promise.resolve({});
+    });
+
+    const path = await useTransfersStore.getState().exportPot("task_export");
+    expect(path).toBe("/proofs/task_export.pot.json");
+    const state = useTransfersStore.getState();
+    expect(state.transfers["task_export"].summary.potPath).toBe(path);
   });
 });

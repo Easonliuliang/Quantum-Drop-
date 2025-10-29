@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import SendPanel from "./components/SendPanel";
 import ReceivePanel from "./components/ReceivePanel";
 import HistoryPanel from "./components/HistoryPanel";
+import SettingsPanel from "./components/SettingsPanel";
 import { useTransfersStore } from "./store/useTransfersStore";
 import type { TransferTab } from "./lib/types";
 
@@ -15,7 +16,8 @@ type HealthCheck = {
 const tabs: Array<{ id: TransferTab; label: string }> = [
   { id: "send", label: "Send" },
   { id: "receive", label: "Receive" },
-  { id: "history", label: "History" }
+  { id: "history", label: "History" },
+  { id: "settings", label: "Settings" },
 ];
 
 export default function App(): JSX.Element {
@@ -59,6 +61,24 @@ export default function App(): JSX.Element {
     return `Runtime Healthy · v${health.version}`;
   }, [health, healthError]);
 
+  const handleErrorCta = () => {
+    if (!lastError) {
+      return;
+    }
+    switch (lastError.code) {
+      case "E_ROUTE_UNREACH":
+      case "E_PERM_DENIED":
+        setActiveTab("settings");
+        break;
+      case "E_CODE_EXPIRED":
+        setActiveTab("send");
+        break;
+      default:
+        break;
+    }
+    resetError();
+  };
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -90,10 +110,26 @@ export default function App(): JSX.Element {
 
       {lastError && (
         <div className="error-banner" role="alert">
-          <span>{lastError}</span>
-          <button className="plain" onClick={resetError} type="button">
-            Dismiss
-          </button>
+          <div className="error-content">
+            <span>{lastError.summary}</span>
+            {lastError.detail && lastError.detail !== lastError.summary && (
+              <p className="error-detail">{lastError.detail}</p>
+            )}
+          </div>
+          <div className="error-actions">
+            {lastError.cta && (
+              <button
+                className="secondary"
+                onClick={handleErrorCta}
+                type="button"
+              >
+                {lastError.cta}
+              </button>
+            )}
+            <button className="plain" onClick={resetError} type="button">
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 
@@ -101,6 +137,7 @@ export default function App(): JSX.Element {
         {activeTab === "send" && <SendPanel />}
         {activeTab === "receive" && <ReceivePanel />}
         {activeTab === "history" && <HistoryPanel />}
+        {activeTab === "settings" && <SettingsPanel />}
       </main>
     </div>
   );

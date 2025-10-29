@@ -1,7 +1,7 @@
-use std::fmt;
+use std::{fmt, io};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerateCodeResponse {
@@ -16,11 +16,13 @@ pub struct TaskResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExportPotResponse {
     pub pot_path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerifyPotResponse {
     pub valid: bool,
     pub reason: Option<String>,
@@ -130,26 +132,94 @@ pub struct TransferLifecycleEvent {
     pub message: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum CommandError {
-    NotFound,
-    InvalidInput(String),
-    Internal(anyhow::Error),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsPayload {
+    pub preferred_routes: Vec<String>,
+    pub code_expire_sec: i64,
+    pub relay_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ErrorCode {
+    EUnknown,
+    EInvalidInput,
+    ENotFound,
+    ECodeExpired,
+    ERouteUnreach,
+    EDiskFull,
+    EVerifyFail,
+    EPermDenied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandError {
+    pub code: ErrorCode,
+    pub message: String,
 }
 
 impl CommandError {
-    pub fn invalid(msg: impl Into<String>) -> Self {
-        CommandError::InvalidInput(msg.into())
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::EInvalidInput, message)
+    }
+
+    pub fn not_found() -> Self {
+        Self::new(ErrorCode::ENotFound, "resource not found")
+    }
+
+    pub fn code_expired() -> Self {
+        Self::new(ErrorCode::ECodeExpired, "session code expired")
+    }
+
+    pub fn route_unreachable(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::ERouteUnreach, message)
+    }
+
+    pub fn disk_full(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::EDiskFull, message)
+    }
+
+    pub fn verify_failed(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::EVerifyFail, message)
+    }
+
+    pub fn permission_denied(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::EPermDenied, message)
+    }
+
+    pub fn unknown(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::EUnknown, message)
+    }
+
+    pub fn from_io(err: &io::Error, context: impl Into<String>) -> Self {
+        let context_str = context.into();
+        match err.kind() {
+            io::ErrorKind::PermissionDenied => {
+                Self::permission_denied(format!("{context_str}: {err}"))
+            }
+            io::ErrorKind::NotFound => {
+                Self::new(ErrorCode::ENotFound, format!("{context_str}: {err}"))
+            }
+            io::ErrorKind::StorageFull | io::ErrorKind::WriteZero => {
+                Self::disk_full(format!("{context_str}: {err}"))
+            }
+            _ => Self::unknown(format!("{context_str}: {err}")),
+        }
     }
 }
 
 impl fmt::Display for CommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CommandError::NotFound => write!(f, "resource not found"),
-            CommandError::InvalidInput(msg) => write!(f, "{msg}"),
-            CommandError::Internal(err) => write!(f, "{err}"),
-        }
+        write!(f, "{}", self.message)
     }
 }
 
@@ -158,7 +228,8 @@ where
     E: Into<anyhow::Error>,
 {
     fn from(value: E) -> Self {
-        CommandError::Internal(value.into())
+        let err = value.into();
+        CommandError::unknown(err.to_string())
     }
 }
 

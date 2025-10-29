@@ -35,10 +35,10 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
 ## Rust Modules
 
 - **`commands`** – primary façade exposed to the UI. Key responsibilities:
-  - Manage shared `AppState` (tasks, codes, Proof-of-Transition paths).
-  - Implement the S1 command contract `courier_generate_code`, `courier_send`, `courier_receive`, `courier_cancel`, `export_pot`, `verify_pot`, and `list_transfers`.
-  - Emit lifecycle, progress, log, and completion events (`transfer_started`, `transfer_progress`, `transfer_completed`, `transfer_failed`, `transfer_log`).
-  - Orchestrate the mock transfer via `MockLocalAdapter`, compute Merkle roots, and write `*.pot.json` files.
+  - Manage shared `AppState` (tasks, codes, Proof-of-Transition paths) and persisted configuration via `ConfigStore`.
+  - Implement the runtime command surface: `courier_generate_code`, `courier_send`, `courier_receive`, `courier_cancel`, `export_pot`, `verify_pot`, `list_transfers`, plus `load_settings`/`update_settings` for transport preferences.
+  - Emit lifecycle, progress, log, and completion events (`transfer_started`, `transfer_progress`, `transfer_completed`, `transfer_failed`, `transfer_log`) with enriched payloads (bytes, moving-average speed, ETA).
+  - Orchestrate the mock transfer via `MockLocalAdapter`, compute Merkle roots, write `*.pot.json` files, and attach actionable error codes for UI consumption.
 - **`store`** – light SQLite wrapper (`TransferStore`) responsible for creating the durable schema, upserting terminal transfer records, and serving paged history to the UI command.
 
 - **`transport`** – owns the `TransportAdapter` traits, runtime `Router` (reads preferred routes and enforces the LAN → P2P → relay fallback ladder with 3s/6s/8s timeouts), `QuicAdapter` (quinn-powered loopback with self-signed `localhost` certificates under the `transport-quic` feature), `RelayAdapter` (Tokio TCP loopback guarded by `transport-relay`), `MockLocalAdapter` fallback for headless runs, and a gated `WebRtcAdapter` skeleton.
@@ -112,13 +112,15 @@ The QUIC loopback spins up an in-process server/client pair bound to `127.0.0.1`
 
 - **Zustand Store (`src/store/useTransfersStore.ts`)**
   - Centralises command invocation and event subscription (`listen`), ensuring React components receive live transfer updates.
-  - Maintains transfer records, progress snapshots, PoT paths, log snippets, and pending codes.
-  - Wraps Tauri commands with typed helpers and exposes ergonomic actions (`startSend`, `startReceive`, `updateProgress`, `complete`, `fail`, `listRecent`, etc.).
+  - Maintains transfer records, progress snapshots (including moving-average throughput + ETA), PoT paths, log snippets, and pending codes.
+  - Normalises error payloads into `UserFacingError` objects so the shell can surface code-specific CTAs.
+  - Wraps Tauri commands with typed helpers and exposes ergonomic actions (`startSend`, `startReceive`, `updateProgress`, `complete`, `fail`, `listRecent`, `verifyPot`, `exportPot`, etc.).
 
 - **UI Panels**
   - `SendPanel` – file picker (via Tauri dialog), code share banner, active transfer cards with phase/progress/log views, and a P2P smoke test button.
   - `ReceivePanel` – input for courier code + destination directory, mirrored progress cards, plus a DEV-only relay smoke test toggle that exercises the relay adapter directly.
-  - `HistoryPanel` – chronological table of transfers with PoT export/verify actions.
+  - `HistoryPanel` – chronological table of transfers with PoT export/verify toasts and zero-click history hydration.
+  - `SettingsPanel` – toggles preferred routes, relay enable, and code expiry, persisting via `ConfigStore`.
 
 - **Event Flow**
   - Store initialises on app mount, listens to the command events, and rehydrates history via `list_transfers`.
@@ -134,9 +136,23 @@ Commands accept snake_case parameters and return camelCase objects conforming to
 | `courier_send(code, paths)` | Start mocked transport | Emits lifecycle + progress events, writes PoT |
 | `courier_receive(code, save_dir)` | Simulate incoming transfer | Materialises placeholder payload and proof |
 | `courier_cancel(task_id)` | Cancel active task | Emits failure lifecycle + error phase |
-| `export_pot(task_id, out_dir)` | Copy PoT to user-selected dir | Returns destination path as string |
-| `verify_pot(pot_path)` | Validate PoT JSON schema | Currently checks version + basic sanity |
+| `export_pot(task_id)` | Ensure PoT exists under `proofs/` and return the path | Replays persisted state if required |
+| `verify_pot(pot_path)` | Validate PoT JSON schema | Structural checks + actionable error messaging |
 | `list_transfers(limit?)` | Snapshot recent transfers | Drives UI history bootstrapping |
+| `load_settings()` | Fetch persisted transport preferences | Falls back to defaults on first run |
+| `update_settings(payload)` | Persist preferred routes, relay toggle, and code TTL | Updates `ConfigStore` and rehydrates Router preferences |
+
+### Error Codes
+
+`commands::types::ErrorCode` captures the user-facing failure taxonomy surfaced to the React shell:
+
+| Code | Semantics | CTA |
+| --- | --- | --- |
+| `E_CODE_EXPIRED` | Session ticket lifetime elapsed. | 重新生成后再试 |
+| `E_ROUTE_UNREACH` | Preferred route repeatedly timed out. | 切换到中继重试 |
+| `E_DISK_FULL` | File system rejected writes (payloads or proofs). | 清理空间后重试 |
+| `E_VERIFY_FAIL` | PoT artifact was structurally invalid. | 重新导出后再次验证 |
+| `E_PERM_DENIED` | OS permissions blocked the action. | 前往系统设置授权 |
 
 Events follow the blueprint contract with unchanged names. Payloads are snake_case at the bridge and mapped to camelCase within the store.
 

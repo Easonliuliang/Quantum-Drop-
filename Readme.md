@@ -25,6 +25,18 @@ Key design intents:
 - **Presence UI** – Vite + React surface emphasises “arrival-first” storytelling, with status cards driven by the Rust runtime.
 - **Composable Agents** – the runtime exposes hooks for additional AETHER cognitive agents to subscribe to transfer events and memory graphs.
 
+## Error Codes
+
+The native runtime maps error codes onto user-facing CTAs so operators always know what to do next.
+
+| Code | What it means | CTA |
+| --- | --- | --- |
+| `E_CODE_EXPIRED` | Pairing code lifetime elapsed before the peer connected. | 重新生成后再试 |
+| `E_ROUTE_UNREACH` | Preferred transport route is unreachable or timed out repeatedly. | 切换到中继重试 |
+| `E_DISK_FULL` | Storage refused further writes while materialising payloads or proofs. | 清理空间后重试 |
+| `E_VERIFY_FAIL` | Proof of Transition payload failed structural or cryptographic validation. | 重新导出后再次验证 |
+| `E_PERM_DENIED` | OS-level permissions prevented the operation (storage or network). | 前往系统设置授权 |
+
 ---
 
 ## Folder Structure
@@ -82,6 +94,12 @@ Additional commands:
 - `npm run tauri:build` – produce a distributable desktop bundle.
 - `cargo test --manifest-path src-tauri/Cargo.toml` – execute native tests when they are added.
 - `npm run preview` – open the compiled React bundle without the Tauri shell.
+
+### Proof of Transition workflow
+
+- Each completed transfer writes a deterministic `proofs/<taskId>.pot.json` receipt. Use the History tab’s **Export PoT** button to reveal the storage path again.
+- **Verify PoT** accepts any `.pot.json` artefact, validates its structure, and surfaces actionable messaging when verification fails.
+- Transfer cards surface transferred bytes, moving-average speed, and ETA so operators can correlate runtime activity with exported proofs.
 
 ---
 
