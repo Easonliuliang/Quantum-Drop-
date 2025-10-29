@@ -4,6 +4,7 @@ mod attestation;
 mod commands;
 mod crypto;
 mod signaling;
+mod store;
 mod transport;
 
 use commands::{
@@ -11,6 +12,8 @@ use commands::{
     list_transfers, verify_pot, SharedState,
 };
 use serde::Serialize;
+use store::TransferStore;
+use tauri::Manager;
 
 #[derive(Serialize)]
 struct HealthCheck {
@@ -30,6 +33,12 @@ fn health_check() -> HealthCheck {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let store = TransferStore::initialise(&app.handle())
+                .expect("failed to initialise transfer store");
+            app.manage(store);
+            Ok(())
+        })
         .manage(SharedState::new())
         .invoke_handler(tauri::generate_handler![
             health_check,

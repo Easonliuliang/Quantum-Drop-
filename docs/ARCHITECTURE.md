@@ -37,6 +37,7 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
   - Implement the S1 command contract `courier_generate_code`, `courier_send`, `courier_receive`, `courier_cancel`, `export_pot`, `verify_pot`, and `list_transfers`.
   - Emit lifecycle, progress, log, and completion events (`transfer_started`, `transfer_progress`, `transfer_completed`, `transfer_failed`, `transfer_log`).
   - Orchestrate the mock transfer via `MockLocalAdapter`, compute Merkle roots, and write `*.pot.json` files.
+- **`store`** – light SQLite wrapper (`TransferStore`) responsible for creating the durable schema, upserting terminal transfer records, and serving paged history to the UI command.
 
 - **`transport`** – defines the abstraction layer for future adapters and provides `MockLocalAdapter` + `MockLocalStream` loopback used for local simulation and unit testing.
 
@@ -84,6 +85,23 @@ Events follow the blueprint contract with unchanged names. Payloads are snake_ca
 
 - Proofs live under the app data directory inside `proofs/` with filenames `{task_id}.pot.json`.
 - Runtime logs go through Tauri emitters and are kept in-memory (future work: persist to disk as described in the blueprint).
+- Persistent history is stored under `<app_data_dir>/storage/transfers.sqlite3`, created on start if missing.
+
+```
+CREATE TABLE IF NOT EXISTS transfers (
+  id TEXT PRIMARY KEY,
+  code TEXT,
+  direction TEXT NOT NULL,
+  status TEXT NOT NULL,
+  bytes_total INTEGER,
+  bytes_sent INTEGER,
+  route TEXT,
+  pot_path TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_transfers_updated_at ON transfers(updated_at);
+```
 
 ## Tests
 

@@ -2,6 +2,7 @@ mod state;
 pub mod types;
 
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -15,6 +16,7 @@ use crate::{
     attestation::{compute_file_attestation, write_proof_of_transition, FileAttestation},
     crypto,
     signaling::SessionTicket,
+    store::{TransferRecord, TransferStore},
     transport::{Frame, MockLocalAdapter, SessionDesc, TransportAdapter, TransportStream},
 };
 
@@ -160,6 +162,7 @@ pub async fn courier_cancel(
 
     let direction = updated.direction.clone();
     let code = updated.code.clone();
+    persist_transfer_snapshot(&app, &updated, None, None, None);
 
     emit_event(
         &app,
@@ -229,9 +232,28 @@ pub async fn verify_pot(pot_path: String) -> Result<VerifyPotResponse, String> {
 #[tauri::command]
 pub async fn list_transfers(
     state: State<'_, SharedState>,
+    store: State<'_, TransferStore>,
     limit: Option<usize>,
 ) -> Result<Vec<TransferSummary>, String> {
-    Ok(state.list_transfers(limit).await)
+    let mut persisted: Vec<TransferSummary> = store
+        .list_transfers(limit, None)
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|record| TransferStore::to_summary(&record))
+        .collect();
+
+    let mut current = state.list_transfers(None).await;
+    let known_ids: HashSet<String> = persisted
+        .iter()
+        .map(|summary| summary.task_id.clone())
+        .collect();
+    current.retain(|summary| !known_ids.contains(&summary.task_id));
+    persisted.extend(current.into_iter());
+    persisted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    if let Some(limit) = limit {
+        persisted.truncate(limit);
+    }
+    Ok(persisted)
 }
 
 #[derive(serde::Deserialize)]
@@ -254,14 +276,19 @@ fn spawn_transfer_runner(app: &AppHandle, state: SharedState, task_id: String) {
         .await
         {
             let error_message = err.to_string();
-            let _ = state_clone
+            let updated = state_clone
                 .set_status(&task_id_clone, TransferStatus::Failed)
                 .await;
-            let direction = state_clone
-                .get_task(&task_id_clone)
-                .await
-                .map(|task| task.direction)
-                .unwrap_or(TransferDirection::Send);
+            let direction = if let Some(task_snapshot) = updated.clone() {
+                persist_transfer_snapshot(&app_handle, &task_snapshot, None, None, None);
+                task_snapshot.direction.clone()
+            } else {
+                state_clone
+                    .get_task(&task_id_clone)
+                    .await
+                    .map(|task| task.direction)
+                    .unwrap_or(TransferDirection::Send)
+            };
             emit_progress(
                 &app_handle,
                 TransferProgressEvent {
@@ -449,10 +476,19 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
     }
 
     let proofs_dir = default_proofs_dir(&app)?;
+    let route_label_str = route_label(&route).to_string();
     let pot_path =
-        write_proof_of_transition(&task_id, &attestations, route_label(&route), &proofs_dir)?;
+        write_proof_of_transition(&task_id, &attestations, &route_label_str, &proofs_dir)?;
     state.set_pot_path(&task_id, pot_path.clone()).await;
-    state.set_status(&task_id, TransferStatus::Completed).await;
+    if let Some(task_snapshot) = state.set_status(&task_id, TransferStatus::Completed).await {
+        persist_transfer_snapshot(
+            &app,
+            &task_snapshot,
+            Some(total_bytes),
+            Some(total_bytes),
+            Some(route_label_str.clone()),
+        );
+    }
 
     emit_progress(
         &app,
@@ -494,6 +530,37 @@ where
 {
     if let Err(err) = app.emit_to(EventTarget::app(), event, payload.clone()) {
         eprintln!("failed to emit event {event}: {err}");
+    }
+}
+
+fn persist_transfer_snapshot(
+    app: &AppHandle,
+    task: &TransferTask,
+    bytes_sent: Option<u64>,
+    bytes_total: Option<u64>,
+    route: Option<String>,
+) {
+    let store = app.state::<TransferStore>();
+    let computed_total: u64 = task.files.iter().map(|file| file.size).sum();
+    let total = bytes_total.or_else(|| (computed_total > 0).then_some(computed_total));
+    let sent = bytes_sent.or(total);
+    let record = TransferRecord {
+        id: task.task_id.clone(),
+        code: task.code.clone(),
+        direction: task.direction.clone(),
+        status: task.status.clone(),
+        bytes_total: total,
+        bytes_sent: sent,
+        route,
+        pot_path: task
+            .pot_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        created_at: task.created_at.timestamp_millis(),
+        updated_at: task.updated_at.timestamp_millis(),
+    };
+    if let Err(err) = store.insert_or_update(&record) {
+        eprintln!("failed to persist transfer {}: {err}", task.task_id);
     }
 }
 
