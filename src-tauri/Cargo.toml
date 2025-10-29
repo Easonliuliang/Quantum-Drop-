@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.77"
 
+[features]
+default = ["transport-quic"]
+transport-quic = ["dep:quinn", "dep:rcgen"]
+transport-webrtc = ["dep:webrtc"]
+signaling-server = ["dep:axum"]
+
 [dependencies]
 tauri = { version = "2.9.1", features = ["devtools"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -14,12 +20,19 @@ sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 rand = "0.8"
 thiserror = "1.0"
-tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
+tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "io-util", "net"] }
 uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
 hex = "0.4"
 anyhow = "1.0"
 tauri-plugin-dialog = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
+quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-tokio"], optional = true }
+rcgen = { version = "0.13", optional = true }
+webrtc = { version = "0.11", default-features = false, optional = true }
+futures = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+serde_yaml = "0.9"
+axum = { version = "0.7", features = ["ws"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"

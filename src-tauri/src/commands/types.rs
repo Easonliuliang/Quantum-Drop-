@@ -133,3 +133,14 @@ where
         CommandError::Internal(value.into())
     }
 }
+
+impl From<crate::transport::RouteKind> for TransferRoute {
+    fn from(value: crate::transport::RouteKind) -> Self {
+        match value {
+            crate::transport::RouteKind::Lan => TransferRoute::Lan,
+            crate::transport::RouteKind::P2p => TransferRoute::P2p,
+            crate::transport::RouteKind::Relay => TransferRoute::Relay,
+            crate::transport::RouteKind::MockLocal => TransferRoute::Cache,
+        }
+    }
+}

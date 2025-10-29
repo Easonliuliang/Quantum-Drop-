@@ -16,7 +16,7 @@ Welcome! Courier Agent is the data-plane intelligence for the AETHER OS ecosyste
    ```
 5. **Validate before pushing**  
    ```bash
-   ./scripts/check.sh
+   ./scripts/check.sh          # build-only validation (npm run build + cargo build --release)
    ```
 
 ## Commit & PR Guidelines

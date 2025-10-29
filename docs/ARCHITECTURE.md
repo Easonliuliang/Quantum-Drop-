@@ -16,15 +16,17 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
 ┌───────────────────────────────┐
 │ Tauri 2 Runtime (Rust)        │
 │  • commands::courier_*        │
+│  • transport::Router (lan/p2p/relay)
 │  • event emitters (progress)  │
 │  • AppState (in-memory)       │
 └──────────────┬────────────────┘
                │ async tasks (Tokio)
                ▼
 ┌───────────────────────────────┐
-│ transport::adapter            │
-│  • MockLocalAdapter loopback  │
-│  • Traits for future QUIC etc │
+│ transport::adapters           │
+│  • QuicAdapter (quinn loopback│
+│    w/ dev TLS)                │
+│  • MockLocalAdapter fallback  │
 │ attestation::{merkle,pot}     │
 │  • SHA-256 Merkle + PoT writer│
 └───────────────────────────────┘
@@ -39,13 +41,33 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
   - Orchestrate the mock transfer via `MockLocalAdapter`, compute Merkle roots, and write `*.pot.json` files.
 - **`store`** – light SQLite wrapper (`TransferStore`) responsible for creating the durable schema, upserting terminal transfer records, and serving paged history to the UI command.
 
-- **`transport`** – defines the abstraction layer for future adapters and provides `MockLocalAdapter` + `MockLocalStream` loopback used for local simulation and unit testing.
+- **`transport`** – owns the `TransportAdapter` traits, runtime `Router` (reads preferred routes, selects LAN/P2P/relay order), `QuicAdapter` (quinn-powered loopback with self-signed `localhost` certificates under the `transport-quic` feature), `MockLocalAdapter` fallback for headless runs, and a gated `WebRtcAdapter` skeleton.
 
 - **`attestation`** – Merkle helpers hashing chunks/root with SHA-256 (CID salted via Blake3) and a PoT writer that materialises JSON receipts aligned with the blueprint schema.
 
 - **`crypto`** – lightweight helpers for generating share codes and mock session keys (placeholder for upcoming PAKE / Noise integration).
 
-- **`signaling`** – session ticket scaffolding that encodes expiry and identifiers (real signaling server to follow in later milestones).
+- **`signaling`** – session ticket scaffolding, WebRTC `SessionDescription`/ICE types, and an optional Axum `/ws` echo stub (`signaling-server` feature) for future signaling experiments.
+
+## Feature Flags & Configuration
+
+- `transport-quic` *(enabled by default)* – spins up the quinn-based `QuicAdapter`, wiring the router to emit `route="lan"` when the LAN hop succeeds.
+- `transport-webrtc` *(opt-in)* – compiles the `WebRtcAdapter` skeleton backed by `webrtc-rs` types; currently returns a stub error until the data channel flow lands.
+- `signaling-server` *(opt-in)* – exposes an Axum router with a placeholder `/ws` endpoint for future signaling integration tests.
+
+The router reads its preferred route ordering from `app.yaml` under the app config directory. If the file is absent, the default order (`lan`, `p2p`, `relay`, then mock fallback) is used.
+
+```yaml
+# app.yaml
+s2:
+  transport:
+    preferredRoutes:
+      - lan
+      - p2p
+      - relay
+```
+
+The QUIC loopback spins up an in-process server/client pair bound to `127.0.0.1`, exchanges a self-signed `localhost` certificate, and echoes frames so tests can assert byte-for-byte delivery.
 
 - **`main.rs`** – wires the modules into Tauri, manages state with `.manage(SharedState::new())`, and registers the expanded command handler list alongside `health_check`.
 
@@ -108,6 +130,8 @@ CREATE INDEX IF NOT EXISTS idx_transfers_updated_at ON transfers(updated_at);
 - **Rust**
   - `attestation::merkle` tests cover empty-file handling and deterministic hashing for known payloads.
   - `transport::adapter` exercises `MockLocalAdapter` loopback send/recv.
+  - `transport::quic` validates the QUIC loopback echo path and self-signed TLS wiring.
+  - `transport::router` confirms the LAN preference selects the QUIC adapter when available.
 
 - **Vitest**
   - `App.test.tsx` validates the shell renders and tab navigation swaps panels.

@@ -1,7 +1,7 @@
 //! Signaling façade for the minimum viable wormhole.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Clone)]
@@ -24,3 +24,36 @@ impl SessionTicket {
         }
     }
 }
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionDescriptionType {
+    Offer,
+    Answer,
+    Pranswer,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDescription {
+    #[serde(rename = "type")]
+    pub kind: SessionDescriptionType,
+    pub sdp: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IceCandidate {
+    pub candidate: String,
+    #[serde(rename = "sdpMLineIndex", default)]
+    pub sdp_mline_index: Option<u32>,
+    #[serde(rename = "sdpMid", default)]
+    pub sdp_mid: Option<String>,
+}
+
+#[cfg(feature = "signaling-server")]
+mod server;
+
+#[cfg(feature = "signaling-server")]
+pub use server::router as signaling_router;

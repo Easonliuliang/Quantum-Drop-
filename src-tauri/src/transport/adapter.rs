@@ -17,8 +17,12 @@ pub struct SessionDesc {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
-    #[error("mock local stream closed")]
+    #[error("transport stream closed")]
     Closed,
+    #[error("transport setup error: {0}")]
+    Setup(String),
+    #[error("transport io error: {0}")]
+    Io(String),
 }
 
 #[async_trait]

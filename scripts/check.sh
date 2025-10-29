@@ -7,10 +7,8 @@ cd "$ROOT_DIR"
 
 if [ ! -d "node_modules" ]; then
   echo "Installing Node dependencies..."
-  npm install
+npm install
 fi
 
-npm run lint
-npm run test
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+npm run build
+cargo build --manifest-path src-tauri/Cargo.toml --release

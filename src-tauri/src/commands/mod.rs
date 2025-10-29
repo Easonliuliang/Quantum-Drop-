@@ -17,7 +17,7 @@ use crate::{
     crypto,
     signaling::SessionTicket,
     store::{TransferRecord, TransferStore},
-    transport::{Frame, MockLocalAdapter, SessionDesc, TransportAdapter, TransportStream},
+    transport::{Frame, Router, SelectedRoute, SessionDesc},
 };
 
 use state::{TrackedFile, TransferTask};
@@ -328,18 +328,16 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
         format!("Transfer session key {}", task.session_key),
     );
 
+    let router = Router::from_app(&app);
+    let candidate_labels: Vec<String> = router
+        .preferred_routes()
+        .iter()
+        .map(|route| route.label().to_string())
+        .collect();
     emit_log(
         &app,
         &task_id,
-        format!(
-            "Route candidates: {:?}",
-            [
-                TransferRoute::Lan,
-                TransferRoute::P2p,
-                TransferRoute::Relay,
-                TransferRoute::Cache,
-            ]
-        ),
+        format!("Route candidates: {:?}", candidate_labels),
     );
 
     emit_event(
@@ -378,19 +376,33 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
             bytes_sent: None,
             bytes_total: None,
             speed_bps: None,
-            route: Some(TransferRoute::Lan),
+            route: None,
             message: Some("Exchanging pairing code".into()),
         },
     );
     sleep(Duration::from_millis(200)).await;
 
-    let route = TransferRoute::Lan;
+    let session = SessionDesc {
+        session_id: task_id.clone(),
+    };
+    let SelectedRoute {
+        route: selected_route,
+        mut stream,
+    } = router
+        .connect(&session)
+        .await
+        .map_err(|err| anyhow!("transport selection failed: {err}"))?;
+    emit_log(
+        &app,
+        &task_id,
+        format!("Selected transport route {}", selected_route.label()),
+    );
+    let route = TransferRoute::from(selected_route.clone());
 
-    let mut stream = establish_loopback_stream(&task_id).await?;
     stream
         .send(Frame::Control("handshake".into()))
         .await
-        .map_err(|err| anyhow!("mock transport handshake failed: {err}"))?;
+        .map_err(|err| anyhow!("transport handshake failed: {err}"))?;
     if let Ok(frame) = stream.recv().await {
         emit_log(&app, &task_id, format!("Control frame echo: {:?}", frame));
     }
@@ -405,7 +417,10 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
             bytes_total: None,
             speed_bps: None,
             route: Some(route.clone()),
-            message: Some("LAN route established".into()),
+            message: Some(format!(
+                "{} route established",
+                route_label(&route).to_uppercase()
+            )),
         },
     );
 
@@ -426,7 +441,7 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
         stream
             .send(Frame::Data(vec![idx as u8; 256]))
             .await
-            .map_err(|err| anyhow!("mock transport failed: {err}"))?;
+            .map_err(|err| anyhow!("transport failed: {err}"))?;
         emit_progress(
             &app,
             TransferProgressEvent {
@@ -583,17 +598,6 @@ fn emit_log(app: &AppHandle, task_id: &str, message: String) {
 struct LogPayload {
     task_id: String,
     message: String,
-}
-
-async fn establish_loopback_stream(session_id: &str) -> Result<Box<dyn TransportStream>> {
-    let adapter = MockLocalAdapter::new();
-    let session = SessionDesc {
-        session_id: session_id.to_string(),
-    };
-    adapter
-        .connect(&session)
-        .await
-        .map_err(|err| anyhow!("mock local adapter failed: {err}"))
 }
 
 fn collect_files(paths: &[String]) -> Result<Vec<TrackedFile>> {

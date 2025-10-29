@@ -74,7 +74,7 @@ npm run tauri:dev
 
 # 4. Quality gate before merging
 ./scripts/check.sh
-# (runs lint, unit tests, rustfmt, and cargo clippy)
+# (executes build-only validation: npm run build, cargo build --release)
 ```
 
 Additional commands:
