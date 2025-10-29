@@ -62,6 +62,7 @@ const mapSummary = (raw: TransferSummaryRaw): TransferSummary => ({
   status: raw.status,
   createdAt: raw.created_at,
   updatedAt: raw.updated_at,
+  route: raw.route ?? undefined,
   files: raw.files ?? [],
   potPath: raw.pot_path ?? undefined,
 });
@@ -101,6 +102,7 @@ const createPlaceholderSummary = (
   status: "pending",
   createdAt: nowIso(),
   updatedAt: nowIso(),
+  route: undefined,
   files: [],
 });
 
@@ -379,13 +381,20 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
       const transfers = { ...state.transfers };
       const existing = transfers[progress.taskId];
       if (!existing) {
+        const summary = createPlaceholderSummary(progress.taskId, "send");
+        if (progress.route) {
+          summary.route = progress.route;
+        }
         transfers[progress.taskId] = {
-          summary: createPlaceholderSummary(progress.taskId, "send"),
+          summary,
           progress,
           logs: [],
         };
       } else {
-        transfers[progress.taskId] = { ...existing, progress };
+        const summary = progress.route
+          ? { ...existing.summary, route: progress.route }
+          : existing.summary;
+        transfers[progress.taskId] = { summary, progress, logs: existing.logs };
       }
       return { transfers };
     }),

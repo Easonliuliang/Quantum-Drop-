@@ -126,5 +126,6 @@ describe("useTransfersStore", () => {
     expect(record.progress?.phase).toBe("transferring");
     expect(record.progress?.route).toBe("lan");
     expect(record.progress?.progress).toBeCloseTo(0.42);
+    expect(record.summary.route).toBe("lan");
   });
 });

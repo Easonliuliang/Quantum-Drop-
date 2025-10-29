@@ -158,6 +158,10 @@ impl TransferStore {
             status: record.status.clone(),
             created_at: created,
             updated_at: updated,
+            route: record
+                .route
+                .as_deref()
+                .and_then(crate::commands::types::TransferRoute::from_label),
             files: Vec::new(),
             pot_path: record.pot_path.clone(),
         }
@@ -255,6 +259,7 @@ fn status_from_str(value: &str) -> Option<TransferStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::types::TransferRoute;
     use tempfile::TempDir;
 
     #[test]
@@ -286,5 +291,8 @@ mod tests {
         let fetched = fetched.unwrap();
         assert_eq!(fetched.route.as_deref(), Some("lan"));
         assert_eq!(fetched.bytes_sent, Some(10));
+
+        let summary = TransferStore::to_summary(&listed[0]);
+        assert_eq!(summary.route, Some(TransferRoute::Lan));
     }
 }

@@ -17,7 +17,7 @@ use crate::{
     crypto,
     signaling::SessionTicket,
     store::{TransferRecord, TransferStore},
-    transport::{Frame, Router, SelectedRoute, SessionDesc},
+    transport::{Frame, RouteKind, Router, SelectedRoute, SessionDesc},
 };
 
 use state::{TrackedFile, TransferTask};
@@ -223,6 +223,67 @@ pub async fn courier_p2p_smoke_test(app: AppHandle) -> Result<P2pSmokeTestRespon
         route: route.label().to_string(),
         bytes_echoed: echoed,
     })
+}
+
+#[tauri::command]
+pub async fn courier_relay_smoke_test(_app: AppHandle) -> Result<P2pSmokeTestResponse, String> {
+    #[cfg(not(feature = "transport-relay"))]
+    {
+        return Err("relay transport disabled at build time".into());
+    }
+
+    #[cfg(feature = "transport-relay")]
+    {
+        let router = Router::new(vec![RouteKind::Relay]);
+        let session = SessionDesc::new("relay-smoke-test");
+
+        let SelectedRoute { route, mut stream } = router
+            .connect(&session)
+            .await
+            .map_err(|err| format!("relay connect failed: {err}"))?;
+
+        if route != RouteKind::Relay {
+            stream.close().await.ok();
+            return Err("relay route unavailable (fallback engaged)".into());
+        }
+
+        let payload = vec![0_u8; 32 * 1024];
+        stream
+            .send(Frame::Data(payload.clone()))
+            .await
+            .map_err(|err| format!("relay send failed: {err}"))?;
+
+        let mut echoed: Option<u64> = None;
+        for _ in 0..3 {
+            let frame = match timeout(Duration::from_secs(5), stream.recv()).await {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(err)) => {
+                    stream.close().await.ok();
+                    return Err(format!("relay recv failed: {err}"));
+                }
+                Err(_) => {
+                    stream.close().await.ok();
+                    return Err("relay echo timed out".into());
+                }
+            };
+
+            match frame {
+                Frame::Data(bytes) => {
+                    echoed = Some(bytes.len() as u64);
+                    break;
+                }
+                Frame::Control(_) => continue,
+            }
+        }
+
+        stream.close().await.ok();
+        let echoed = echoed.ok_or_else(|| "relay echo missing".to_string())?;
+
+        Ok(P2pSmokeTestResponse {
+            route: route.label().to_string(),
+            bytes_echoed: echoed,
+        })
+    }
 }
 
 #[tauri::command]
@@ -685,12 +746,7 @@ fn default_proofs_dir(app: &AppHandle) -> Result<PathBuf> {
 }
 
 fn route_label(route: &TransferRoute) -> &'static str {
-    match route {
-        TransferRoute::Lan => "lan",
-        TransferRoute::P2p => "p2p",
-        TransferRoute::Relay => "relay",
-        TransferRoute::Cache => "cache",
-    }
+    route.label()
 }
 
 async fn materialise_mock_payload(files: &[TrackedFile]) -> Result<Vec<TrackedFile>> {

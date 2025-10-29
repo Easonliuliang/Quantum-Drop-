@@ -17,6 +17,9 @@ pub struct SessionDesc {
     #[cfg(feature = "transport-webrtc")]
     #[serde(default)]
     pub webrtc: Option<crate::signaling::SessionDesc>,
+    #[cfg(feature = "transport-relay")]
+    #[serde(default)]
+    pub relay: Option<RelayHint>,
 }
 
 impl SessionDesc {
@@ -25,8 +28,17 @@ impl SessionDesc {
             session_id: session_id.into(),
             #[cfg(feature = "transport-webrtc")]
             webrtc: None,
+            #[cfg(feature = "transport-relay")]
+            relay: None,
         }
     }
+}
+
+#[cfg(feature = "transport-relay")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayHint {
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Error)]
@@ -37,6 +49,8 @@ pub enum TransportError {
     Setup(String),
     #[error("transport io error: {0}")]
     Io(String),
+    #[error("transport timeout: {0}")]
+    Timeout(String),
 }
 
 #[async_trait]

@@ -41,7 +41,7 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
   - Orchestrate the mock transfer via `MockLocalAdapter`, compute Merkle roots, and write `*.pot.json` files.
 - **`store`** – light SQLite wrapper (`TransferStore`) responsible for creating the durable schema, upserting terminal transfer records, and serving paged history to the UI command.
 
-- **`transport`** – owns the `TransportAdapter` traits, runtime `Router` (reads preferred routes, selects LAN/P2P/relay order), `QuicAdapter` (quinn-powered loopback with self-signed `localhost` certificates under the `transport-quic` feature), `MockLocalAdapter` fallback for headless runs, and a gated `WebRtcAdapter` skeleton.
+- **`transport`** – owns the `TransportAdapter` traits, runtime `Router` (reads preferred routes and enforces the LAN → P2P → relay fallback ladder with 3s/6s/8s timeouts), `QuicAdapter` (quinn-powered loopback with self-signed `localhost` certificates under the `transport-quic` feature), `RelayAdapter` (Tokio TCP loopback guarded by `transport-relay`), `MockLocalAdapter` fallback for headless runs, and a gated `WebRtcAdapter` skeleton.
 
 - **`attestation`** – Merkle helpers hashing chunks/root with SHA-256 (CID salted via Blake3) and a PoT writer that materialises JSON receipts aligned with the blueprint schema.
 
@@ -83,22 +83,26 @@ SendPanel "P2P Smoke Test"
 
 - `transport-quic` *(enabled by default)* – spins up the quinn-based `QuicAdapter`, wiring the router to emit `route="lan"` when the LAN hop succeeds.
 - `transport-webrtc` *(enabled by default in dev builds)* – powers the in-process WebRTC data channel loopback, exchanging frames over a `courier` channel with connection state logs.
+- `transport-relay` *(enabled by default in dev builds)* – turns on the Tokio TCP relay loopback adapter and `/relay` registry endpoint for the signaling server.
 - `signaling-server` *(opt-in)* – exposes an Axum router with a placeholder `/ws` endpoint for future signaling integration tests.
 
-The router reads its preferred route ordering from `app.yaml` under the app config directory. If the file is absent, the default order (`p2p`, `lan`, `relay`, then mock fallback) is used.
+The router reads its preferred route ordering from `app.yaml` under the app config directory. If the file is absent, the default order (`lan`, `p2p`, `relay`, then mock fallback) is used. Each probe has a dedicated timeout window (3s for LAN, 6s for P2P, 8s for relay) and the first successful hop cancels the rest.
 
 ```yaml
 # app.yaml
 s2:
   transport:
     preferredRoutes:
-      - p2p
       - lan
+      - p2p
       - relay
+    relayEndpoint: tcp://127.0.0.1:6200
     stun:
       - stun:stun.l.google.com:19302
-      - stun:stun1.l.google.com:19302
+      - turn:turn.relay.example:3478?transport=udp
 ```
+
+A ready-to-copy sample lives in `docs/app.sample.yaml`.
 
 The QUIC loopback spins up an in-process server/client pair bound to `127.0.0.1`, exchanges a self-signed `localhost` certificate, and echoes frames so tests can assert byte-for-byte delivery.
 
@@ -112,8 +116,8 @@ The QUIC loopback spins up an in-process server/client pair bound to `127.0.0.1`
   - Wraps Tauri commands with typed helpers and exposes ergonomic actions (`startSend`, `startReceive`, `updateProgress`, `complete`, `fail`, `listRecent`, etc.).
 
 - **UI Panels**
-  - `SendPanel` – file picker (via Tauri dialog), code share banner, active transfer cards with phase/progress/log views.
-  - `ReceivePanel` – input for courier code + destination directory, mirrored progress cards.
+  - `SendPanel` – file picker (via Tauri dialog), code share banner, active transfer cards with phase/progress/log views, and a P2P smoke test button.
+  - `ReceivePanel` – input for courier code + destination directory, mirrored progress cards, plus a DEV-only relay smoke test toggle that exercises the relay adapter directly.
   - `HistoryPanel` – chronological table of transfers with PoT export/verify actions.
 
 - **Event Flow**

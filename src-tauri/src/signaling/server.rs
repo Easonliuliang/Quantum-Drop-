@@ -4,6 +4,8 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
+#[cfg(feature = "transport-relay")]
+use axum::Json;
 use axum::{routing::get, Router};
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
@@ -100,9 +102,14 @@ struct SessionQuery {
 }
 
 pub fn router() -> Router<SharedRegistry> {
-    Router::new()
+    let router = Router::new()
         .route("/ws", get(upgrade))
-        .with_state(Arc::new(SessionRegistry::new()))
+        .with_state(Arc::new(SessionRegistry::new()));
+
+    #[cfg(feature = "transport-relay")]
+    let router = router.route("/relay", get(relay_registry));
+
+    router
 }
 
 async fn upgrade(
@@ -172,4 +179,19 @@ async fn send_snapshot(
 ) -> Result<(), axum::Error> {
     let text = serde_json::to_string(snapshot).unwrap_or_default();
     sender.send(Message::Text(text)).await
+}
+
+#[cfg(feature = "transport-relay")]
+#[derive(Debug, serde::Serialize)]
+struct RelayRegistryResponse {
+    host: String,
+    port: u16,
+}
+
+#[cfg(feature = "transport-relay")]
+async fn relay_registry() -> Json<RelayRegistryResponse> {
+    Json(RelayRegistryResponse {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
 }

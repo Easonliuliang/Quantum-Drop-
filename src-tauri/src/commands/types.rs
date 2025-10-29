@@ -40,6 +40,7 @@ pub struct TransferSummary {
     pub status: TransferStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub route: Option<TransferRoute>,
     pub files: Vec<TransferFileSummary>,
     pub pot_path: Option<String>,
 }
@@ -86,6 +87,27 @@ pub enum TransferRoute {
     P2p,
     Relay,
     Cache,
+}
+
+impl TransferRoute {
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.to_ascii_lowercase().as_str() {
+            "lan" => Some(TransferRoute::Lan),
+            "p2p" => Some(TransferRoute::P2p),
+            "relay" => Some(TransferRoute::Relay),
+            "cache" => Some(TransferRoute::Cache),
+            _ => None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            TransferRoute::Lan => "lan",
+            TransferRoute::P2p => "p2p",
+            TransferRoute::Relay => "relay",
+            TransferRoute::Cache => "cache",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

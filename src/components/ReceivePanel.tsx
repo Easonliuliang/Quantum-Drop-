@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import { useTransfersStore } from "../store/useTransfersStore";
 import type { TransferStatus } from "../lib/types";
@@ -27,6 +28,7 @@ const shortId = (id: string) => `${id.slice(0, 6)}…${id.slice(-4)}`;
 export default function ReceivePanel(): JSX.Element {
   const [code, setCode] = useState("");
   const [saveDir, setSaveDir] = useState("");
+  const [relayFeedback, setRelayFeedback] = useState<string | null>(null);
   const isReceiving = useTransfersStore((state) => state.isReceiving);
   const startReceive = useTransfersStore((state) => state.startReceive);
   const transfersMap = useTransfersStore((state) => state.transfers);
@@ -65,6 +67,23 @@ export default function ReceivePanel(): JSX.Element {
     } catch (caught: unknown) {
       const message = describeError(caught);
       console.error("receive start failed", message);
+    }
+  };
+
+  const handleRelaySmokeTest = async () => {
+    try {
+      const raw = await invoke<{ route: string; bytes_echoed: number }>(
+        "courier_relay_smoke_test"
+      );
+      const resultRoute = raw.route ?? "relay";
+      const bytes = raw.bytes_echoed ?? 0;
+      setRelayFeedback(
+        `Relay echoed ${bytes.toLocaleString()} bytes via ${resultRoute.toUpperCase()}`
+      );
+    } catch (caught: unknown) {
+      const message = describeError(caught);
+      console.error("relay smoke test failed", message);
+      setRelayFeedback(`Relay smoke test failed: ${message}`);
     }
   };
 
@@ -114,6 +133,23 @@ export default function ReceivePanel(): JSX.Element {
         >
           {isReceiving ? "Preparing…" : "Start receive"}
         </button>
+        {import.meta.env.DEV && (
+          <div className="form-group">
+            <button
+              className="secondary"
+              onClick={() => {
+                void handleRelaySmokeTest();
+              }}
+            >
+              Relay Smoke Test
+            </button>
+            {relayFeedback && (
+              <p className="panel-subtitle" role="status">
+                {relayFeedback}
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="panel-section">

@@ -29,6 +29,7 @@ export interface TransferSummaryRaw {
   status: TransferStatus;
   created_at: string;
   updated_at: string;
+  route?: TransferRoute | null;
   files: TransferFileSummary[];
   pot_path?: string | null;
 }
@@ -40,6 +41,7 @@ export interface TransferSummary {
   status: TransferStatus;
   createdAt: string;
   updatedAt: string;
+  route?: TransferRoute;
   files: TransferFileSummary[];
   potPath?: string;
 }
@@ -144,6 +146,7 @@ export type ListTransfersCommand = (
 ) => Promise<TransferSummaryRaw[]>;
 
 export type CourierP2pSmokeTestCommand = () => Promise<P2pSmokeTestResponse>;
+export type CourierRelaySmokeTestCommand = () => Promise<P2pSmokeTestResponse>;
 
 export interface CourierCommands {
   courierGenerateCode: CourierGenerateCodeCommand;
@@ -154,4 +157,5 @@ export interface CourierCommands {
   verifyPot: VerifyPotCommand;
   listTransfers: ListTransfersCommand;
   courierP2pSmokeTest: CourierP2pSmokeTestCommand;
+  courierRelaySmokeTest: CourierRelaySmokeTestCommand;
 }

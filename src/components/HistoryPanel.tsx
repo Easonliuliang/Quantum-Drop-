@@ -45,6 +45,7 @@ const mapSummary = (raw: TransferSummaryRaw): TransferSummary => ({
   status: raw.status,
   createdAt: raw.created_at,
   updatedAt: raw.updated_at,
+  route: raw.route ?? undefined,
   files: raw.files ?? [],
   potPath: raw.pot_path ?? undefined,
 });
@@ -157,6 +158,7 @@ export default function HistoryPanel(): JSX.Element {
                   <th>Task</th>
                   <th>Direction</th>
                   <th>Status</th>
+                  <th>Route</th>
                   <th>Code</th>
                   <th>Updated</th>
                   <th>PoT</th>
@@ -170,6 +172,9 @@ export default function HistoryPanel(): JSX.Element {
                     <td className="cell-cap">{summary.direction}</td>
                     <td className={`status status-${summary.status}`}>
                       {statusLabel(summary.status)}
+                    </td>
+                    <td className="cell-cap">
+                      {summary.route ? summary.route.toUpperCase() : "—"}
                     </td>
                     <td>{summary.code ?? "—"}</td>
                     <td>{formatDate(summary.updatedAt)}</td>

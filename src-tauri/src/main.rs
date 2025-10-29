@@ -8,8 +8,8 @@ mod store;
 mod transport;
 
 use commands::{
-    courier_cancel, courier_generate_code, courier_p2p_smoke_test, courier_receive, courier_send,
-    export_pot, list_transfers, verify_pot, SharedState,
+    courier_cancel, courier_generate_code, courier_p2p_smoke_test, courier_receive,
+    courier_relay_smoke_test, courier_send, export_pot, list_transfers, verify_pot, SharedState,
 };
 use serde::Serialize;
 use store::TransferStore;
@@ -47,6 +47,7 @@ fn main() {
             courier_receive,
             courier_cancel,
             courier_p2p_smoke_test,
+            courier_relay_smoke_test,
             export_pot,
             verify_pot,
             list_transfers
