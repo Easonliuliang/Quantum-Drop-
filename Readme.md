@@ -88,7 +88,7 @@ Additional commands:
 ## Troubleshooting
 
 - **`cargo clippy` fails with linker errors** – ensure Xcode Command Line Tools (macOS) or the appropriate Visual Studio Build Tools (Windows) are installed; re-run `rustup target add` for the desired target triple.
-- **Tauri dev server cannot reach Vite (`Failed to connect to http://localhost:5173`)** – check that `npm run dev:ui` is running or bump the port in `vite.config.ts` and `src-tauri/tauri.conf.json` to a free slot.
+- **Tauri dev server cannot reach Vite (`Failed to connect to http://localhost:5174`)** – check that `npm run dev:ui` is running or bump the port in `vite.config.ts` and `src-tauri/tauri.conf.json` to a free slot.
 - **`npm run test` exits with missing jsdom** – delete `node_modules`, reinstall dependencies, and verify that the correct Node version (>=18.17) is active via `nvm` or `fnm`.
 - **PoT attestation files unsynchronised** – copy the receipt payloads stored by the receiving agent; they remain valid even if the UI process crashes.
 
