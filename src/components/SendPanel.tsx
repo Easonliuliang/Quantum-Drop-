@@ -6,6 +6,7 @@ import type { P2pSmokeTestResponse, TransferStatus } from "../lib/types";
 import { describeError } from "../lib/errors";
 import { pickFiles } from "../lib/dialog";
 import QuantumTunnel from "./QuantumTunnel";
+import QuantumDropzone from "./QuantumDropzone";
 import QuantumDragZone from "./QuantumDragZone";
 import { quantumHintForPhase } from "../lib/quantumPhases";
 
@@ -65,6 +66,14 @@ export default function SendPanel(): JSX.Element {
   const resumeTransfer = useTransfersStore((state) => state.resumeTransfer);
   const transfersMap = useTransfersStore((state) => state.transfers);
   const quantumMode = useTransfersStore((state) => state.quantumMode);
+  const minimalQuantumUI = useTransfersStore((state) => state.minimalQuantumUI);
+  const currentSendTask = useTransfersStore((state) => state.getCurrentTask("send"));
+  const dropzonePhase = currentSendTask?.phase ?? "preparing";
+  const taskRoute = currentSendTask?.route;
+  const dropzoneRoute: "lan" | "p2p" | "relay" =
+    taskRoute === "lan" || taskRoute === "relay" || taskRoute === "p2p"
+      ? taskRoute
+      : "p2p";
 
   const sendTransfers = useMemo(
     () =>
@@ -169,55 +178,81 @@ export default function SendPanel(): JSX.Element {
     <section className="panel-content" aria-label="Send files">
       <div className="panel-section">
         <h2>Send</h2>
-        <p className="panel-subtitle">
-          Generate a courier code and stream your files over the mock transport.
-        </p>
+        {!minimalQuantumUI && (
+          <p className="panel-subtitle">
+            Generate a courier code and stream your files over the mock transport.
+          </p>
+        )}
         {toast && (
           <div className={`toast toast-${toast.kind}`}>
             {toast.message}
           </div>
         )}
-        <div className="form-row">
-          <button
-            className="primary"
-            onClick={() => {
-              void handleSelectFiles();
-            }}
-          >
-            Select files
-          </button>
-          <button
-            className="secondary"
-            onClick={() => {
-              void handleSend();
-            }}
-            disabled={!selectedFiles.length || isSending}
-          >
-            {isSending ? "Starting…" : "Start send"}
-          </button>
-        </div>
-        <div className="form-row">
-          <button
-            className="secondary smoke-test-button"
-            onClick={() => {
-              void handleSmokeTest();
-            }}
-          >
-            P2P Smoke Test
-          </button>
-        </div>
-        <QuantumDragZone onDropFiles={handleDropFiles} disabled={isSending}>
-          <p className="quantum-drag-title">拖拽文件激活量子隧道</p>
-          <p className="quantum-drag-hint">
-            {isSending ? "正在准备下一次跃迁…" : "释放即可建立纠缠连接"}
-          </p>
-        </QuantumDragZone>
-        {selectedFiles.length > 0 && (
-          <ul className="file-list">
-            {selectedFiles.map((file) => (
-              <li key={file}>{file}</li>
-            ))}
-          </ul>
+        {minimalQuantumUI ? (
+          <div className="qdz-shell">
+            <QuantumDropzone
+              onFiles={handleDropFiles}
+              phase={dropzonePhase}
+              route={dropzoneRoute}
+              disabled={isSending}
+            />
+            <button
+              type="button"
+              className="qdz-icon-button"
+              aria-label="Run P2P smoke test"
+              onClick={() => {
+                void handleSmokeTest();
+              }}
+              disabled={isSending}
+            >
+              <span className="qdz-icon-dot" aria-hidden="true" />
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="form-row">
+              <button
+                className="primary"
+                onClick={() => {
+                  void handleSelectFiles();
+                }}
+              >
+                Select files
+              </button>
+              <button
+                className="secondary"
+                onClick={() => {
+                  void handleSend();
+                }}
+                disabled={!selectedFiles.length || isSending}
+              >
+                {isSending ? "Starting…" : "Start send"}
+              </button>
+            </div>
+            <div className="form-row">
+              <button
+                className="secondary smoke-test-button"
+                onClick={() => {
+                  void handleSmokeTest();
+                }}
+              >
+                P2P Smoke Test
+              </button>
+            </div>
+            <QuantumDragZone onDropFiles={handleDropFiles} disabled={isSending}>
+              <p className="quantum-drag-title">拖拽文件激活量子隧道</p>
+              <p className="quantum-drag-hint">
+                {isSending ? "正在准备下一次跃迁…" : "释放即可建立纠缠连接"}
+              </p>
+            </QuantumDragZone>
+            {selectedFiles.length > 0 && (
+              <ul className="file-list">
+                {selectedFiles.map((file) => (
+                  <li key={file}>{file}</li>
+                ))}
+              </ul>
+            )}
+          </>
         )}
         {pendingCode && (
           <div className="code-banner">

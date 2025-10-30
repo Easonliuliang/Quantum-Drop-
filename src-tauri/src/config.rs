@@ -44,6 +44,8 @@ pub struct RuntimeSettings {
     pub relay_enabled: bool,
     #[serde(default = "default_true")]
     pub quantum_mode: bool,
+    #[serde(default = "default_true")]
+    pub minimal_quantum_ui: bool,
     #[serde(default)]
     pub chunk_policy: AdaptiveChunkPolicy,
 }
@@ -55,6 +57,7 @@ impl Default for RuntimeSettings {
             code_expire_sec: DEFAULT_CODE_TTL,
             relay_enabled: true,
             quantum_mode: true,
+            minimal_quantum_ui: true,
             chunk_policy: AdaptiveChunkPolicy::default(),
         }
     }

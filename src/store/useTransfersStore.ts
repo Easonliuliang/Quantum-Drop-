@@ -19,9 +19,11 @@ import type {
   TransferTab,
   TransferDirection,
   TransferStatus,
+  TransferRoute,
   VerifyPotResponse,
 } from "../lib/types";
 import { resolveUserError, type UserFacingError } from "../lib/errors";
+import { derivePhase, mapStatusToPhase } from "../lib/quantumPhases";
 
 type TransferMetrics = {
   averageSpeed?: number;
@@ -38,6 +40,12 @@ type TransferRecord = {
   uiPhase: TransferPhase;
 };
 
+type CurrentTaskSnapshot = {
+  status: TransferStatus;
+  phase: TransferPhase;
+  route?: TransferRoute;
+};
+
 type TransfersState = {
   activeTab: TransferTab;
   transfers: Record<string, TransferRecord>;
@@ -47,6 +55,7 @@ type TransfersState = {
   isReceiving: boolean;
   lastError?: UserFacingError | null;
   quantumMode: boolean;
+  minimalQuantumUI: boolean;
   teardown?: () => void;
   initialize: () => Promise<void>;
   shutdown: () => void;
@@ -67,25 +76,14 @@ type TransfersState = {
   resetError: () => void;
   clearPending: () => void;
   setQuantumMode: (value: boolean) => void;
+  setMinimalQuantumUI: (value: boolean) => void;
+  getCurrentTask: (direction: TransferDirection) => CurrentTaskSnapshot | null;
 };
 
 const nowIso = () => new Date().toISOString();
 
-export const statusToPhase = (status: TransferStatus): TransferPhase => {
-  switch (status) {
-    case "pending":
-      return "preparing";
-    case "inprogress":
-      return "transferring";
-    case "completed":
-      return "done";
-    case "cancelled":
-    case "failed":
-      return "error";
-    default:
-      return "preparing";
-  }
-};
+export const statusToPhase = (status: TransferStatus): TransferPhase =>
+  mapStatusToPhase(status);
 
 const resolveUiPhase = (
   progress: TransferProgress | undefined,
@@ -222,6 +220,7 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
   isReceiving: false,
   lastError: null,
   quantumMode: true,
+  minimalQuantumUI: true,
 
   initialize: async () => {
     if (get().ready) {
@@ -615,4 +614,27 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
   resetError: () => set({ lastError: null }),
   clearPending: () => set({ pendingCode: null }),
   setQuantumMode: (value: boolean) => set({ quantumMode: value }),
+  setMinimalQuantumUI: (value: boolean) => set({ minimalQuantumUI: value }),
+  getCurrentTask: (direction) => {
+    const { transfers } = get();
+    const candidates = Object.values(transfers)
+      .filter((record) => record.summary.direction === direction)
+      .sort(
+        (a, b) =>
+          new Date(b.summary.updatedAt).getTime() -
+          new Date(a.summary.updatedAt).getTime()
+      );
+    if (candidates.length === 0) {
+      return null;
+    }
+    const active =
+      candidates.find((record) =>
+        record.summary.status === "inprogress" || record.summary.status === "pending"
+      ) ?? candidates[0];
+    const status = active.summary.status;
+    const phaseCandidate = active.progress?.phase ?? active.uiPhase;
+    const phase = derivePhase(phaseCandidate, status);
+    const route = active.progress?.route ?? active.summary.route;
+    return { status, phase, route };
+  },
 }));

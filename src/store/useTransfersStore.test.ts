@@ -25,6 +25,7 @@ const resetStore = () => {
     isReceiving: false,
     lastError: null,
     quantumMode: true,
+    minimalQuantumUI: true,
     teardown: undefined,
   });
 };
@@ -314,5 +315,50 @@ describe("useTransfersStore", () => {
     expect(statusToPhase("completed")).toBe("done");
     expect(statusToPhase("cancelled")).toBe("error");
     expect(statusToPhase("failed")).toBe("error");
+  });
+
+  it("returns current task snapshot with derived phase and route", () => {
+    useTransfersStore.setState((state) => ({
+      ...state,
+      transfers: {
+        send_finished: {
+          summary: {
+            taskId: "send_finished",
+            direction: "send",
+            status: "completed",
+            code: "FIN123",
+            createdAt: "2024-01-01T00:00:00Z",
+            updatedAt: "2024-01-01T02:00:00Z",
+            files: [],
+            route: "p2p",
+          },
+          logs: [],
+          progress: undefined,
+          speedHistory: [],
+          uiPhase: "done",
+        },
+        send_active: {
+          summary: {
+            taskId: "send_active",
+            direction: "send",
+            status: "inprogress",
+            code: "ACT123",
+            createdAt: "2024-01-01T01:00:00Z",
+            updatedAt: "2024-01-01T03:00:00Z",
+            files: [],
+            route: "lan",
+          },
+          logs: [],
+          progress: undefined,
+          speedHistory: [],
+          uiPhase: "preparing",
+        },
+      },
+    }));
+
+    const snapshot = useTransfersStore.getState().getCurrentTask("send");
+    expect(snapshot?.status).toBe("inprogress");
+    expect(snapshot?.phase).toBe("preparing"); // uses stored uiPhase when present
+    expect(snapshot?.route).toBe("lan");
   });
 });

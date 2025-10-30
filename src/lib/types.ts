@@ -141,6 +141,7 @@ export interface SettingsPayload {
   relayEnabled: boolean;
   chunkPolicy: ChunkPolicySettings;
   quantumMode: boolean;
+  minimalQuantumUI: boolean;
 }
 
 export interface ChunkPolicySettings {

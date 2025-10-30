@@ -25,6 +25,7 @@ Key design intents:
 - **Proof of Transition Ledger** – Merkle-authenticated receipts exportable for offline verification and audit trails.
 - **Presence UI** – Vite + React surface emphasises “arrival-first” storytelling, with status cards driven by the Rust runtime.
 - **Quantum tunnel UI** – [docs/QUANTUM_UI.md](docs/QUANTUM_UI.md) details the observer/timeless/spaceless visuals and copy system.
+- **Immersive quantum dropzone** – zero-copy drag surface with dynamic route skins and reduced-motion support (see [Immersive Dropzone](docs/QUANTUM_UI.md#immersive-dropzone-zero-copy-ui)).
 - **Composable Agents** – the runtime exposes hooks for additional AETHER cognitive agents to subscribe to transfer events and memory graphs.
 
 ## Error Codes

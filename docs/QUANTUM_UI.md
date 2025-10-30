@@ -43,6 +43,15 @@ Hints prefer transport messages, otherwise they use copy derived from the table 
 - `settings.quantumMode` defaults to `true` and persists alongside existing runtime settings.
 - The Settings panel exposes a "Quantum tunnel interface" toggle and synchronises the Zustand store so panels switch instantly.
 - When the toggle is off, the legacy progress bar, route chips, and numeric ETA return.
+- `settings.minimalQuantumUI` defaults to `true` and enables the textless quantum dropzone for send/receive; toggling it reverts to the original form-driven UI.
+
+## Immersive Dropzone (zero-copy UI)
+
+- `QuantumDropzone` renders a full-bleed, text-free surface for initiating transfers. It layers a singularity core, rotating rings, particle field, and drag orbit sensor to express each phase (`cloud`, `tunnel`, `collapse`, `decohere`).
+- Route skins (`qdz--lan`, `qdz--p2p`, `qdz--relay`) adjust gradients, particle colours, and motion speed so the lane is recognisable at a glance without labels.
+- The send panel binds `onFiles` to the existing `startSend` workflow; the receive panel reuses the component in a disabled state to visualise “awaiting files”.
+- Icon-only buttons keep the P2P and relay smoke tests accessible without introducing visible copy. Each button exposes descriptive `aria-label`s for assistive tech.
+- CSS honours `prefers-reduced-motion` by disabling all keyframe animations while retaining the layered visuals, ensuring the experience remains functional for users who opt out of motion.
 
 ## Reduced Motion & Audio
 
@@ -51,7 +60,7 @@ Hints prefer transport messages, otherwise they use copy derived from the table 
 
 ## Drag & Resume
 
-- `QuantumDragZone` visualises entanglement for drag-and-drop sends. Dropping files immediately invokes the existing send flow.
+- `QuantumDropzone` now powers drag-and-drop sends when the immersive mode is active; the legacy `QuantumDragZone` appears when `minimalQuantumUI` is disabled.
 - All panels consume the shared status-to-phase helper so every task always presents a phase, even when the backend only reports a high-level status.
 
 Refer to `src/components/QuantumTunnel.tsx` for the stage layout and to `src/lib/quantumPhases.ts` for the shared copy map.

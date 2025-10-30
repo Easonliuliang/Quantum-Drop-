@@ -47,6 +47,7 @@ const cloneSettings = (settings: SettingsPayload | null): SettingsPayload | null
 const withDefaults = (settings: SettingsPayload): SettingsPayload => ({
   ...settings,
   quantumMode: settings.quantumMode ?? true,
+  minimalQuantumUI: settings.minimalQuantumUI ?? true,
 });
 
 export default function SettingsPanel(): JSX.Element {
@@ -57,6 +58,7 @@ export default function SettingsPanel(): JSX.Element {
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const setQuantumMode = useTransfersStore((state) => state.setQuantumMode);
+  const setMinimalQuantumUI = useTransfersStore((state) => state.setMinimalQuantumUI);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,6 +70,7 @@ export default function SettingsPanel(): JSX.Element {
           setSettings(hydrated);
           setInitial(cloneSettings(hydrated));
           setQuantumMode(hydrated.quantumMode);
+          setMinimalQuantumUI(hydrated.minimalQuantumUI);
         }
       } catch (caught: unknown) {
         if (!cancelled) {
@@ -83,7 +86,7 @@ export default function SettingsPanel(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [setQuantumMode]);
+  }, [setQuantumMode, setMinimalQuantumUI]);
 
   const isDirty = useMemo(() => {
     if (!settings || !initial) {
@@ -156,6 +159,18 @@ export default function SettingsPanel(): JSX.Element {
         : current
     );
     setQuantumMode(enabled);
+  };
+
+  const toggleMinimalUi = (enabled: boolean) => {
+    setSettings((current) =>
+      current
+        ? {
+            ...current,
+            minimalQuantumUI: enabled,
+          }
+        : current
+    );
+    setMinimalQuantumUI(enabled);
   };
 
   const handleChunkBoundChange = (field: "minBytes" | "maxBytes", value: number) => {
@@ -310,6 +325,21 @@ export default function SettingsPanel(): JSX.Element {
             />
             <span className="checkbox-description">
               Replace legacy progress bars with the quantum tunnel visuals.
+            </span>
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="minimal-quantum-toggle">Immersive dropzone</label>
+          <div className="input-row">
+            <input
+              id="minimal-quantum-toggle"
+              type="checkbox"
+              checked={settings.minimalQuantumUI}
+              onChange={(event) => toggleMinimalUi(event.target.checked)}
+            />
+            <span className="checkbox-description">
+              Present the textless quantum tunnel dropzone on send and receive panels.
             </span>
           </div>
         </div>

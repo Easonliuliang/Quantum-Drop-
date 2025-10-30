@@ -154,6 +154,8 @@ pub struct SettingsPayload {
     pub chunk_policy: ChunkPolicyPayload,
     #[serde(default = "default_true")]
     pub quantum_mode: bool,
+    #[serde(default = "default_true")]
+    pub minimal_quantum_ui: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

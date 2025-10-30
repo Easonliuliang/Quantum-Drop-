@@ -1,4 +1,43 @@
-import type { TransferPhase, TransferStatus } from "./types";
+import type { TransferPhase, TransferRoute, TransferStatus } from "./types";
+
+const STATUS_PHASE_MAP: Record<TransferStatus, TransferPhase> = {
+  pending: "preparing",
+  inprogress: "transferring",
+  completed: "done",
+  cancelled: "error",
+  failed: "error",
+};
+
+export const mapStatusToPhase = (
+  status?: TransferStatus,
+  fallback: TransferPhase = "preparing"
+): TransferPhase => {
+  if (!status) {
+    return fallback;
+  }
+  return STATUS_PHASE_MAP[status] ?? fallback;
+};
+
+export const derivePhase = (
+  phase: TransferPhase | undefined,
+  status: TransferStatus | undefined,
+  fallback: TransferPhase = "preparing"
+): TransferPhase => {
+  return phase ?? mapStatusToPhase(status, fallback);
+};
+
+export const routeSkin = (route?: TransferRoute | null): string => {
+  switch (route) {
+    case "lan":
+      return "qdz--lan";
+    case "p2p":
+      return "qdz--p2p";
+    case "relay":
+      return "qdz--relay";
+    default:
+      return "qdz--p2p";
+  }
+};
 
 export const QUANTUM_PHASE_COPY: Record<
   TransferPhase,

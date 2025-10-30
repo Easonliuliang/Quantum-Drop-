@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useTransfersStore } from "../store/useTransfersStore";
@@ -6,6 +6,7 @@ import type { TransferStatus } from "../lib/types";
 import { describeError } from "../lib/errors";
 import { pickDirectory } from "../lib/dialog";
 import QuantumTunnel from "./QuantumTunnel";
+import QuantumDropzone from "./QuantumDropzone";
 import { quantumHintForPhase } from "../lib/quantumPhases";
 
 const statusLabel = (status: TransferStatus) => {
@@ -62,6 +63,14 @@ export default function ReceivePanel(): JSX.Element {
   const transfersMap = useTransfersStore((state) => state.transfers);
   const resumeTransfer = useTransfersStore((state) => state.resumeTransfer);
   const quantumMode = useTransfersStore((state) => state.quantumMode);
+  const minimalQuantumUI = useTransfersStore((state) => state.minimalQuantumUI);
+  const currentReceiveTask = useTransfersStore((state) => state.getCurrentTask("receive"));
+  const dropzonePhase = currentReceiveTask?.phase ?? "preparing";
+  const receiveRoute = currentReceiveTask?.route;
+  const dropzoneRoute: "lan" | "p2p" | "relay" =
+    receiveRoute === "lan" || receiveRoute === "relay" || receiveRoute === "p2p"
+      ? receiveRoute
+      : "p2p";
 
   const receiveTransfers = useMemo(
     () =>
@@ -117,6 +126,10 @@ export default function ReceivePanel(): JSX.Element {
     }
   };
 
+  const ignoreDrop = useCallback((_files: File[]) => {
+    // Receive dropzone operates as a visual status indicator only.
+  }, []);
+
   return (
     <section className="panel-content" aria-label="Receive files">
       <div className="panel-section">
@@ -163,7 +176,7 @@ export default function ReceivePanel(): JSX.Element {
         >
           {isReceiving ? "Preparing…" : "Start receive"}
         </button>
-        {import.meta.env.DEV && (
+        {import.meta.env.DEV && !minimalQuantumUI && (
           <div className="form-group">
             <button
               className="secondary"
@@ -180,12 +193,41 @@ export default function ReceivePanel(): JSX.Element {
             )}
           </div>
         )}
+        {import.meta.env.DEV && minimalQuantumUI && relayFeedback && (
+          <span className="sr-only" role="status">
+            {relayFeedback}
+          </span>
+        )}
       </div>
 
       <div className="panel-section">
         <h3>Incoming Transfers</h3>
         {receiveTransfers.length === 0 ? (
-          <p className="empty-state">No receive tasks yet.</p>
+          minimalQuantumUI ? (
+            <div className="qdz-shell">
+              <QuantumDropzone
+                onFiles={ignoreDrop}
+                phase={dropzonePhase}
+                route={dropzoneRoute}
+                disabled
+              />
+              {import.meta.env.DEV && (
+                <button
+                  type="button"
+                  className="qdz-icon-button"
+                  aria-label="Run relay smoke test"
+                  onClick={() => {
+                    void handleRelaySmokeTest();
+                  }}
+                  disabled={isReceiving}
+                >
+                  <span className="qdz-icon-dot" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <p className="empty-state">No receive tasks yet.</p>
+          )
         ) : (
           <div className="transfers-grid">
             {receiveTransfers.map((record) => {

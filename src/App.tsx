@@ -31,6 +31,7 @@ export default function App(): JSX.Element {
   const resetError = useTransfersStore((state) => state.resetError);
   const resumeTransfer = useTransfersStore((state) => state.resumeTransfer);
   const setQuantumMode = useTransfersStore((state) => state.setQuantumMode);
+  const setMinimalQuantumUI = useTransfersStore((state) => state.setMinimalQuantumUI);
 
   useEffect(() => {
     initialize().catch((error) => {
@@ -45,12 +46,14 @@ export default function App(): JSX.Element {
     invoke<SettingsPayload>("load_settings")
       .then((settings) => {
         setQuantumMode(settings.quantumMode ?? true);
+        setMinimalQuantumUI(settings.minimalQuantumUI ?? true);
       })
       .catch((error: unknown) => {
         console.warn("failed to load settings for quantum mode", error);
         setQuantumMode(true);
+        setMinimalQuantumUI(true);
       });
-  }, [setQuantumMode]);
+  }, [setQuantumMode, setMinimalQuantumUI]);
 
   useEffect(() => {
     invoke<HealthCheck>("health_check")
