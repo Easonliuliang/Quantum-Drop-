@@ -3,6 +3,10 @@ use std::{fmt, io};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerateCodeResponse {
     pub task_id: String,
@@ -148,6 +152,8 @@ pub struct SettingsPayload {
     pub code_expire_sec: i64,
     pub relay_enabled: bool,
     pub chunk_policy: ChunkPolicyPayload,
+    #[serde(default = "default_true")]
+    pub quantum_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

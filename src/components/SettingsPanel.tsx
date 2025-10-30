@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { SettingsPayload } from "../lib/types";
 import { describeError } from "../lib/errors";
+import { useTransfersStore } from "../store/useTransfersStore";
 
 type RouteOption = {
   id: string;
@@ -43,6 +44,11 @@ const cloneSettings = (settings: SettingsPayload | null): SettingsPayload | null
       }
     : null;
 
+const withDefaults = (settings: SettingsPayload): SettingsPayload => ({
+  ...settings,
+  quantumMode: settings.quantumMode ?? true,
+});
+
 export default function SettingsPanel(): JSX.Element {
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [initial, setInitial] = useState<SettingsPayload | null>(null);
@@ -50,6 +56,7 @@ export default function SettingsPanel(): JSX.Element {
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const setQuantumMode = useTransfersStore((state) => state.setQuantumMode);
 
   useEffect(() => {
     let cancelled = false;
@@ -57,8 +64,10 @@ export default function SettingsPanel(): JSX.Element {
       try {
         const payload = await invoke<SettingsPayload>("load_settings");
         if (!cancelled) {
-          setSettings(payload);
-          setInitial(cloneSettings(payload));
+          const hydrated = withDefaults(payload);
+          setSettings(hydrated);
+          setInitial(cloneSettings(hydrated));
+          setQuantumMode(hydrated.quantumMode);
         }
       } catch (caught: unknown) {
         if (!cancelled) {
@@ -74,7 +83,7 @@ export default function SettingsPanel(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [setQuantumMode]);
 
   const isDirty = useMemo(() => {
     if (!settings || !initial) {
@@ -137,6 +146,18 @@ export default function SettingsPanel(): JSX.Element {
     );
   };
 
+  const toggleQuantumUi = (enabled: boolean) => {
+    setSettings((current) =>
+      current
+        ? {
+            ...current,
+            quantumMode: enabled,
+          }
+        : current
+    );
+    setQuantumMode(enabled);
+  };
+
   const handleChunkBoundChange = (field: "minBytes" | "maxBytes", value: number) => {
     setSettings((current) => {
       if (!current) {
@@ -187,8 +208,10 @@ export default function SettingsPanel(): JSX.Element {
       const payload = await invoke<SettingsPayload>("update_settings", {
         payload: settings,
       });
-      setSettings(payload);
-      setInitial(cloneSettings(payload));
+      const hydrated = withDefaults(payload);
+      setSettings(hydrated);
+      setInitial(cloneSettings(hydrated));
+      setQuantumMode(hydrated.quantumMode);
       setFeedback("Settings saved successfully");
     } catch (caught: unknown) {
       setError(describeError(caught));
@@ -274,6 +297,21 @@ export default function SettingsPanel(): JSX.Element {
           <p className="form-hint">
             Defines the default lifetime for generated courier codes (minimum 60 seconds).
           </p>
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="quantum-ui-toggle">Quantum tunnel interface</label>
+          <div className="input-row">
+            <input
+              id="quantum-ui-toggle"
+              type="checkbox"
+              checked={settings.quantumMode}
+              onChange={(event) => toggleQuantumUi(event.target.checked)}
+            />
+            <span className="checkbox-description">
+              Replace legacy progress bars with the quantum tunnel visuals.
+            </span>
+          </div>
         </div>
 
         <details className="form-group advanced">

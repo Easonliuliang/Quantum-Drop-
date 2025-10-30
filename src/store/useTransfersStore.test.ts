@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useTransfersStore } from "./useTransfersStore";
+import { useTransfersStore, statusToPhase } from "./useTransfersStore";
 
 const invokeMock = vi.fn<(command: string, payload?: unknown) => Promise<unknown>>();
 const listenMock = vi.fn<(event: string, handler: unknown) => Promise<() => void>>(
@@ -24,6 +24,7 @@ const resetStore = () => {
     isSending: false,
     isReceiving: false,
     lastError: null,
+    quantumMode: true,
     teardown: undefined,
   });
 };
@@ -108,6 +109,7 @@ describe("useTransfersStore", () => {
           logs: [],
           progress: undefined,
           speedHistory: [],
+          uiPhase: "preparing",
         },
       },
     }));
@@ -165,6 +167,7 @@ describe("useTransfersStore", () => {
           logs: [],
           progress: undefined,
           speedHistory: [],
+          uiPhase: "done",
         },
       },
     }));
@@ -249,6 +252,7 @@ describe("useTransfersStore", () => {
             totalChunks: 2,
             receivedChunks: [true, false],
           },
+          uiPhase: "error",
         },
       },
       lastError: {
@@ -287,6 +291,7 @@ describe("useTransfersStore", () => {
             totalChunks: 3,
             receivedChunks: [true, false, false],
           },
+          uiPhase: "transferring",
         },
       },
     }));
@@ -301,5 +306,13 @@ describe("useTransfersStore", () => {
     expect(state.lastError?.cta).toBe("继续传输");
     expect(state.lastError?.taskId).toBe("tsk_fail");
     expect(state.transfers["tsk_fail"].summary.status).toBe("failed");
+  });
+
+  it("maps transfer status to quantum phases", () => {
+    expect(statusToPhase("pending")).toBe("preparing");
+    expect(statusToPhase("inprogress")).toBe("transferring");
+    expect(statusToPhase("completed")).toBe("done");
+    expect(statusToPhase("cancelled")).toBe("error");
+    expect(statusToPhase("failed")).toBe("error");
   });
 });

@@ -140,6 +140,7 @@ export interface SettingsPayload {
   codeExpireSec: number;
   relayEnabled: boolean;
   chunkPolicy: ChunkPolicySettings;
+  quantumMode: boolean;
 }
 
 export interface ChunkPolicySettings {

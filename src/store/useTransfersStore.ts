@@ -10,6 +10,7 @@ import type {
   TransferLifecycleEventPayload,
   TransferLogEvent,
   TransferLogEventPayload,
+  TransferPhase,
   TransferProgress,
   TransferProgressPayload,
   TransferResumeState,
@@ -17,6 +18,7 @@ import type {
   TransferSummaryRaw,
   TransferTab,
   TransferDirection,
+  TransferStatus,
   VerifyPotResponse,
 } from "../lib/types";
 import { resolveUserError, type UserFacingError } from "../lib/errors";
@@ -33,6 +35,7 @@ type TransferRecord = {
   speedHistory: number[];
   metrics?: TransferMetrics;
   resume?: TransferResumeState;
+  uiPhase: TransferPhase;
 };
 
 type TransfersState = {
@@ -43,6 +46,7 @@ type TransfersState = {
   isSending: boolean;
   isReceiving: boolean;
   lastError?: UserFacingError | null;
+  quantumMode: boolean;
   teardown?: () => void;
   initialize: () => Promise<void>;
   shutdown: () => void;
@@ -62,9 +66,40 @@ type TransfersState = {
   listRecent: () => TransferRecord[];
   resetError: () => void;
   clearPending: () => void;
+  setQuantumMode: (value: boolean) => void;
 };
 
 const nowIso = () => new Date().toISOString();
+
+export const statusToPhase = (status: TransferStatus): TransferPhase => {
+  switch (status) {
+    case "pending":
+      return "preparing";
+    case "inprogress":
+      return "transferring";
+    case "completed":
+      return "done";
+    case "cancelled":
+    case "failed":
+      return "error";
+    default:
+      return "preparing";
+  }
+};
+
+const resolveUiPhase = (
+  progress: TransferProgress | undefined,
+  summary: TransferSummary,
+  previous?: TransferPhase
+): TransferPhase => {
+  if (progress?.phase) {
+    return progress.phase;
+  }
+  if (previous) {
+    return previous;
+  }
+  return statusToPhase(summary.status);
+};
 
 const mapSummary = (raw: TransferSummaryRaw): TransferSummary => ({
   taskId: raw.task_id,
@@ -125,15 +160,20 @@ const ensureRecord = (
   const existing = transfers[summary.taskId];
   if (existing) {
     return {
+      ...existing,
       summary,
-      progress: existing.progress,
-      logs: existing.logs,
-      speedHistory: existing.speedHistory,
-      metrics: existing.metrics,
-      resume: existing.resume,
+      uiPhase: resolveUiPhase(existing.progress, summary, existing.uiPhase),
     };
   }
-  return { summary, logs: [], speedHistory: [] };
+  return {
+    summary,
+    progress: undefined,
+    logs: [],
+    speedHistory: [],
+    metrics: undefined,
+    resume: undefined,
+    uiPhase: resolveUiPhase(undefined, summary),
+  };
 };
 
 const appendLog = (
@@ -143,10 +183,15 @@ const appendLog = (
 ) => {
   const existing = transfers[log.taskId];
   if (!existing) {
+    const summary = createPlaceholderSummary(log.taskId, fallbackDirection);
     transfers[log.taskId] = {
-      summary: createPlaceholderSummary(log.taskId, fallbackDirection),
+      summary,
       logs: [log],
       speedHistory: [],
+      progress: undefined,
+      metrics: undefined,
+      resume: undefined,
+      uiPhase: resolveUiPhase(undefined, summary),
     };
     return;
   }
@@ -176,6 +221,7 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
   isSending: false,
   isReceiving: false,
   lastError: null,
+  quantumMode: true,
 
   initialize: async () => {
     if (get().ready) {
@@ -459,6 +505,7 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
         speedHistory,
         metrics,
         resume: resumeState ?? undefined,
+        uiPhase: resolveUiPhase(nextProgress, summary, existing?.uiPhase),
       };
       return { transfers };
     }),
@@ -490,6 +537,7 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
         ...mergedRecord,
         progress: nextProgress,
         resume: undefined,
+        uiPhase: resolveUiPhase(nextProgress, summary, mergedRecord.uiPhase),
       };
       return { transfers };
     }),
@@ -507,7 +555,10 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
         updatedAt: nowIso(),
       };
       const record = ensureRecord(transfers, summary);
-      transfers[event.taskId] = record;
+      transfers[event.taskId] = {
+        ...record,
+        uiPhase: resolveUiPhase(record.progress, summary, record.uiPhase),
+      };
       let nextError = state.lastError ?? null;
       if (event.message) {
         nextError = {
@@ -547,6 +598,7 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
         transfers[taskId] = {
           ...record,
           summary,
+          uiPhase: resolveUiPhase(record.progress, summary),
         };
         return { transfers, lastError: null };
       });
@@ -562,4 +614,5 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
 
   resetError: () => set({ lastError: null }),
   clearPending: () => set({ pendingCode: null }),
+  setQuantumMode: (value: boolean) => set({ quantumMode: value }),
 }));

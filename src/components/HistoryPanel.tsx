@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-import { useTransfersStore } from "../store/useTransfersStore";
+import { useTransfersStore, statusToPhase } from "../store/useTransfersStore";
 import type {
   TransferStatus,
   TransferSummary,
@@ -9,6 +9,8 @@ import type {
 } from "../lib/types";
 import { describeError } from "../lib/errors";
 import { pickPotFile } from "../lib/dialog";
+import QuantumTunnel from "./QuantumTunnel";
+import { quantumHintForPhase } from "../lib/quantumPhases";
 
 const statusLabel = (status: TransferStatus) => {
   switch (status) {
@@ -60,6 +62,8 @@ export default function HistoryPanel(): JSX.Element {
   const listRecent = useTransfersStore((state) => state.listRecent);
   const exportPot = useTransfersStore((state) => state.exportPot);
   const verifyPot = useTransfersStore((state) => state.verifyPot);
+  const resumeTransfer = useTransfersStore((state) => state.resumeTransfer);
+  const quantumMode = useTransfersStore((state) => state.quantumMode);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,45 +183,86 @@ export default function HistoryPanel(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {transfers.map((summary) => (
-                  <tr key={summary.taskId}>
-                    <td>{shortId(summary.taskId)}</td>
-                    <td className="cell-cap">{summary.direction}</td>
-                    <td className={`status status-${summary.status}`}>
-                      {statusLabel(summary.status)}
-                    </td>
-                    <td className="cell-cap">
-                      {summary.route ? summary.route.toUpperCase() : "—"}
-                    </td>
-                    <td>{summary.code ?? "—"}</td>
-                    <td>{formatDate(summary.updatedAt)}</td>
-                    <td>{summary.potPath ? "Yes" : "—"}</td>
-                    <td className="table-actions">
-                      <button
-                        className="plain"
-                        onClick={() => {
-                          void handleExport(summary.taskId);
-                        }}
-                      >
-                        Export PoT
-                      </button>
-                      <button
-                        className="plain"
-                        onClick={() => {
-                          void handleVerify(summary.potPath);
-                        }}
-                        disabled={!summary.potPath}
-                        title={
-                          summary.potPath
-                            ? "Verify proof file"
-                            : "Generate PoT first"
-                        }
-                      >
-                        Verify PoT
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {transfers.map((summary) => {
+                  const record = transfersMap[summary.taskId];
+                  const resumeState = record?.resume;
+                  const missingChunks = resumeState
+                    ? resumeState.receivedChunks.filter((flag) => !flag).length
+                    : 0;
+                  const resumable = Boolean(resumeState && missingChunks > 0);
+                  const canResume =
+                    resumable &&
+                    (summary.status === "failed" || summary.status === "cancelled");
+                  const phase = record?.uiPhase ?? statusToPhase(summary.status);
+                  const route =
+                    record?.progress?.route ??
+                    record?.summary.route ??
+                    summary.route;
+                  const progressMessage = record?.progress?.message;
+                  const hint = quantumHintForPhase(phase, summary.status, progressMessage);
+                  const handleResume = () => {
+                    void resumeTransfer(summary.taskId);
+                  };
+                  return (
+                    <Fragment key={summary.taskId}>
+                      <tr>
+                        <td>{shortId(summary.taskId)}</td>
+                        <td className="cell-cap">{summary.direction}</td>
+                        <td className={`status status-${summary.status}`}>
+                          {statusLabel(summary.status)}
+                        </td>
+                        <td className="cell-cap">
+                          {summary.route ? summary.route.toUpperCase() : "—"}
+                        </td>
+                        <td>{summary.code ?? "—"}</td>
+                        <td>{formatDate(summary.updatedAt)}</td>
+                        <td>{summary.potPath ? "Yes" : "—"}</td>
+                        <td className="table-actions">
+                          <button
+                            className="plain"
+                            onClick={() => {
+                              void handleExport(summary.taskId);
+                            }}
+                          >
+                            Export PoT
+                          </button>
+                          <button
+                            className="plain"
+                            onClick={() => {
+                              void handleVerify(summary.potPath);
+                            }}
+                            disabled={!summary.potPath}
+                            title={
+                              summary.potPath
+                                ? "Verify proof file"
+                                : "Generate PoT first"
+                            }
+                          >
+                            Verify PoT
+                          </button>
+                        </td>
+                      </tr>
+                      {quantumMode && (
+                        <tr>
+                          <td colSpan={8} className="history-quantum-cell">
+                            <QuantumTunnel
+                              phase={phase}
+                              route={route}
+                              canResume={canResume}
+                              onResume={handleResume}
+                              hint={hint}
+                            />
+                            {resumable && (
+                              <div className="resume-hint">
+                                剩余 {missingChunks} 段待续传
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

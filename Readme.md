@@ -24,6 +24,7 @@ Key design intents:
 - **End-to-End Secrecy** – Noise/XChaCha20-Poly1305 encrypted tunnels with ephemeral identity material; signalling remains blind to payloads.
 - **Proof of Transition Ledger** – Merkle-authenticated receipts exportable for offline verification and audit trails.
 - **Presence UI** – Vite + React surface emphasises “arrival-first” storytelling, with status cards driven by the Rust runtime.
+- **Quantum tunnel UI** – [docs/QUANTUM_UI.md](docs/QUANTUM_UI.md) details the observer/timeless/spaceless visuals and copy system.
 - **Composable Agents** – the runtime exposes hooks for additional AETHER cognitive agents to subscribe to transfer events and memory graphs.
 
 ## Error Codes

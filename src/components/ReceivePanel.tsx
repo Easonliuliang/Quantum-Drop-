@@ -5,6 +5,8 @@ import { useTransfersStore } from "../store/useTransfersStore";
 import type { TransferStatus } from "../lib/types";
 import { describeError } from "../lib/errors";
 import { pickDirectory } from "../lib/dialog";
+import QuantumTunnel from "./QuantumTunnel";
+import { quantumHintForPhase } from "../lib/quantumPhases";
 
 const statusLabel = (status: TransferStatus) => {
   switch (status) {
@@ -59,6 +61,7 @@ export default function ReceivePanel(): JSX.Element {
   const startReceive = useTransfersStore((state) => state.startReceive);
   const transfersMap = useTransfersStore((state) => state.transfers);
   const resumeTransfer = useTransfersStore((state) => state.resumeTransfer);
+  const quantumMode = useTransfersStore((state) => state.quantumMode);
 
   const receiveTransfers = useMemo(
     () =>
@@ -208,6 +211,14 @@ export default function ReceivePanel(): JSX.Element {
               const showResumeButton =
                 resumable &&
                 (summary.status === "failed" || summary.status === "cancelled");
+              const phase = progress?.phase ?? record.uiPhase;
+              const route = progress?.route ?? summary.route;
+              const progressMessage = progress?.message;
+              const hint = quantumHintForPhase(phase, summary.status, progressMessage);
+              const showProgressMessage = !quantumMode && Boolean(progressMessage);
+              const handleResume = () => {
+                void resumeTransfer(summary.taskId);
+              };
               return (
                 <article className="transfer-card" key={summary.taskId}>
                   <header className="transfer-header">
@@ -220,26 +231,38 @@ export default function ReceivePanel(): JSX.Element {
                     </div>
                   </header>
                   <div className="transfer-body">
-                    <div className="progress-line">
-                      <span className="label">Phase</span>
-                      <span className="value">
-                        {progress?.phase ?? "waiting"}
-                        {percent !== undefined ? ` · ${percent}%` : ""}
-                      </span>
-                    </div>
-                    {percent !== undefined && (
-                      <div
-                        className="progress-bar"
-                        role="progressbar"
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={percent}
-                      >
-                        <div
-                          className="progress-bar-fill"
-                          style={{ width: `${percent}%` }}
-                        />
-                      </div>
+                    {quantumMode ? (
+                      <QuantumTunnel
+                        phase={phase}
+                        route={route}
+                        canResume={showResumeButton}
+                        onResume={handleResume}
+                        hint={hint}
+                      />
+                    ) : (
+                      <>
+                        <div className="progress-line">
+                          <span className="label">Phase</span>
+                          <span className="value">
+                            {phase}
+                            {percent !== undefined ? ` · ${percent}%` : ""}
+                          </span>
+                        </div>
+                        {percent !== undefined && (
+                          <div
+                            className="progress-bar"
+                            role="progressbar"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={percent}
+                          >
+                            <div
+                              className="progress-bar-fill"
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
+                        )}
+                      </>
                     )}
                     {bytesSent !== undefined && bytesTotal !== undefined && (
                       <div className="progress-line">
@@ -263,27 +286,25 @@ export default function ReceivePanel(): JSX.Element {
                         <span className="value">{formatDuration(etaSeconds)}</span>
                       </div>
                     )}
-                    {progress?.route && (
+                    {!quantumMode && route && (
                       <div className="route-line">
                         <span className="label">Route</span>
-                        <span className={`route-chip route-${progress.route}`}>
-                          {progress.route.toUpperCase()}
+                        <span className={`route-chip route-${route}`}>
+                          {route.toUpperCase()}
                         </span>
                       </div>
                     )}
-                    {progress?.message && (
-                      <div className="progress-message">{progress.message}</div>
+                    {showProgressMessage && (
+                      <div className="progress-message">{progressMessage}</div>
                     )}
                     {resumable && (
                       <div className="resume-hint">
                         <span>剩余 {missingChunks} 段待续传</span>
-                        {showResumeButton && (
+                        {!quantumMode && showResumeButton && (
                           <button
                             type="button"
                             className="secondary"
-                            onClick={() => {
-                              void resumeTransfer(summary.taskId);
-                            }}
+                            onClick={handleResume}
                           >
                             继续
                           </button>

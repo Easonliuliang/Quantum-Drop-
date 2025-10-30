@@ -5,6 +5,9 @@ import { useTransfersStore } from "../store/useTransfersStore";
 import type { P2pSmokeTestResponse, TransferStatus } from "../lib/types";
 import { describeError } from "../lib/errors";
 import { pickFiles } from "../lib/dialog";
+import QuantumTunnel from "./QuantumTunnel";
+import QuantumDragZone from "./QuantumDragZone";
+import { quantumHintForPhase } from "../lib/quantumPhases";
 
 const formatBytes = (size: number) => {
   if (!size) {
@@ -61,6 +64,7 @@ export default function SendPanel(): JSX.Element {
   const startSend = useTransfersStore((state) => state.startSend);
   const resumeTransfer = useTransfersStore((state) => state.resumeTransfer);
   const transfersMap = useTransfersStore((state) => state.transfers);
+  const quantumMode = useTransfersStore((state) => state.quantumMode);
 
   const sendTransfers = useMemo(
     () =>
@@ -93,6 +97,26 @@ export default function SendPanel(): JSX.Element {
     } catch (caught: unknown) {
       const message = describeError(caught);
       console.error("failed to initiate send", message);
+    }
+  };
+
+  const handleDropFiles = async (dropped: File[]) => {
+    if (isSending) {
+      return;
+    }
+    const filePaths = dropped
+      .map((file) => (file as unknown as { path?: string }).path)
+      .filter((path): path is string => Boolean(path));
+    if (filePaths.length === 0) {
+      console.warn("dropped files missing filesystem path metadata");
+      return;
+    }
+    setSelectedFiles(filePaths);
+    try {
+      await startSend(filePaths);
+    } catch (caught: unknown) {
+      const message = describeError(caught);
+      console.error("failed to initiate send via drag", message);
     }
   };
 
@@ -182,6 +206,12 @@ export default function SendPanel(): JSX.Element {
             P2P Smoke Test
           </button>
         </div>
+        <QuantumDragZone onDropFiles={handleDropFiles} disabled={isSending}>
+          <p className="quantum-drag-title">拖拽文件激活量子隧道</p>
+          <p className="quantum-drag-hint">
+            {isSending ? "正在准备下一次跃迁…" : "释放即可建立纠缠连接"}
+          </p>
+        </QuantumDragZone>
         {selectedFiles.length > 0 && (
           <ul className="file-list">
             {selectedFiles.map((file) => (
@@ -240,6 +270,14 @@ export default function SendPanel(): JSX.Element {
               const showResumeButton =
                 resumable &&
                 (summary.status === "failed" || summary.status === "cancelled");
+              const phase = progress?.phase ?? record.uiPhase;
+              const route = progress?.route ?? summary.route;
+              const progressMessage = progress?.message;
+              const hint = quantumHintForPhase(phase, summary.status, progressMessage);
+              const showProgressMessage = !quantumMode && Boolean(progressMessage);
+              const handleResume = () => {
+                void resumeTransfer(summary.taskId);
+              };
               return (
                 <article className="transfer-card" key={summary.taskId}>
                   <header className="transfer-header">
@@ -252,26 +290,38 @@ export default function SendPanel(): JSX.Element {
                     </div>
                   </header>
                   <div className="transfer-body">
-                    <div className="progress-line">
-                      <span className="label">Phase</span>
-                      <span className="value">
-                        {progress?.phase ?? "waiting"}
-                        {percent !== undefined ? ` · ${percent}%` : ""}
-                      </span>
-                    </div>
-                    {percent !== undefined && (
-                      <div
-                        className="progress-bar"
-                        role="progressbar"
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={percent}
-                      >
-                        <div
-                          className="progress-bar-fill"
-                          style={{ width: `${percent}%` }}
-                        />
-                      </div>
+                    {quantumMode ? (
+                      <QuantumTunnel
+                        phase={phase}
+                        route={route}
+                        canResume={showResumeButton}
+                        onResume={handleResume}
+                        hint={hint}
+                      />
+                    ) : (
+                      <>
+                        <div className="progress-line">
+                          <span className="label">Phase</span>
+                          <span className="value">
+                            {phase}
+                            {percent !== undefined ? ` · ${percent}%` : ""}
+                          </span>
+                        </div>
+                        {percent !== undefined && (
+                          <div
+                            className="progress-bar"
+                            role="progressbar"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={percent}
+                          >
+                            <div
+                              className="progress-bar-fill"
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
+                        )}
+                      </>
                     )}
                     {bytesSent !== undefined && bytesTotal !== undefined && (
                       <div className="progress-line">
@@ -295,16 +345,16 @@ export default function SendPanel(): JSX.Element {
                         <span className="value">{formatDuration(etaSeconds)}</span>
                       </div>
                     )}
-                    {progress?.route && (
+                    {!quantumMode && route && (
                       <div className="route-line">
                         <span className="label">Route</span>
-                        <span className={`route-chip route-${progress.route}`}>
-                          {progress.route.toUpperCase()}
+                        <span className={`route-chip route-${route}`}>
+                          {route.toUpperCase()}
                         </span>
                       </div>
                     )}
-                    {progress?.message && (
-                      <div className="progress-message">{progress.message}</div>
+                    {showProgressMessage && (
+                      <div className="progress-message">{progressMessage}</div>
                     )}
                     {summary.files.length > 0 && (
                       <ul className="transfer-files">
@@ -319,13 +369,11 @@ export default function SendPanel(): JSX.Element {
                     {resumable && (
                       <div className="resume-hint">
                         <span>剩余 {missingChunks} 段待续传</span>
-                        {showResumeButton && (
+                        {!quantumMode && showResumeButton && (
                           <button
                             type="button"
                             className="secondary"
-                            onClick={() => {
-                              void resumeTransfer(summary.taskId);
-                            }}
+                            onClick={handleResume}
                           >
                             继续
                           </button>

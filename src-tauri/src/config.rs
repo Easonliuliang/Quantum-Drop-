@@ -14,6 +14,10 @@ const DEFAULT_CODE_TTL: i64 = 900;
 const MIN_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CHUNK_BYTES: u64 = 16 * 1024 * 1024;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdaptiveChunkPolicy {
@@ -38,6 +42,8 @@ pub struct RuntimeSettings {
     pub preferred_routes: Vec<String>,
     pub code_expire_sec: i64,
     pub relay_enabled: bool,
+    #[serde(default = "default_true")]
+    pub quantum_mode: bool,
     #[serde(default)]
     pub chunk_policy: AdaptiveChunkPolicy,
 }
@@ -48,6 +54,7 @@ impl Default for RuntimeSettings {
             preferred_routes: ROUTE_ORDER.iter().map(|value| value.to_string()).collect(),
             code_expire_sec: DEFAULT_CODE_TTL,
             relay_enabled: true,
+            quantum_mode: true,
             chunk_policy: AdaptiveChunkPolicy::default(),
         }
     }

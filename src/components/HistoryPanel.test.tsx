@@ -31,7 +31,7 @@ describe("HistoryPanel", () => {
         pot_path: "/tmp/task_abcdef0123.pot.json",
       },
     ]);
-    useTransfersStore.setState({ transfers: {} });
+    useTransfersStore.setState({ transfers: {}, quantumMode: true });
   });
 
   it("renders persisted history rows from the native bridge", async () => {
@@ -40,5 +40,25 @@ describe("HistoryPanel", () => {
     expect(await screen.findByText("HIST42")).toBeVisible();
     expect(screen.getByText("Completed")).toBeVisible();
     expect(screen.getByText("Yes")).toBeVisible();
+  });
+
+  it("renders quantum tunnel context when quantum mode is enabled", async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        task_id: "task_quantum",
+        code: "QTM42",
+        direction: "receive",
+        status: "inprogress",
+        created_at: "2024-01-02T00:00:00Z",
+        updated_at: "2024-01-02T00:05:00Z",
+        files: [],
+        pot_path: null,
+        route: "lan",
+      },
+    ]);
+
+    render(<HistoryPanel />);
+
+    expect(await screen.findByText("量子隧穿中")).toBeVisible();
   });
 });

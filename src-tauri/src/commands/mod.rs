@@ -424,6 +424,7 @@ pub fn update_settings(
             min_bytes: payload.chunk_policy.min_bytes,
             max_bytes: payload.chunk_policy.max_bytes,
         },
+        quantum_mode: payload.quantum_mode,
     };
     let updated = config.update(runtime).map_err(CommandError::from)?;
     Ok(to_settings_payload(updated))
@@ -466,6 +467,7 @@ fn to_settings_payload(settings: RuntimeSettings) -> SettingsPayload {
             min_bytes: settings.chunk_policy.min_bytes,
             max_bytes: settings.chunk_policy.max_bytes,
         },
+        quantum_mode: settings.quantum_mode,
     }
 }
 

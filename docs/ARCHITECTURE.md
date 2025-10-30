@@ -126,10 +126,11 @@ The QUIC loopback spins up an in-process server/client pair bound to `127.0.0.1`
   - Wraps Tauri commands with typed helpers and exposes ergonomic actions (`startSend`, `startReceive`, `updateProgress`, `complete`, `fail`, `listRecent`, `verifyPot`, `exportPot`, etc.).
 
 - **UI Panels**
-  - `SendPanel` – file picker (via Tauri dialog), code share banner, active transfer cards with phase/progress/log views, and a P2P smoke test button.
-  - `ReceivePanel` – input for courier code + destination directory, mirrored progress cards, plus a DEV-only relay smoke test toggle that exercises the relay adapter directly.
-  - `HistoryPanel` – chronological table of transfers with PoT export/verify toasts and zero-click history hydration.
-  - `SettingsPanel` – toggles preferred routes, relay enable, and code expiry, persisting via `ConfigStore`.
+  - `SendPanel` – file picker (via Tauri dialog), drag-and-drop entanglement zone, quantum tunnel cards (with resumable CTA) and a P2P smoke test button.
+  - `ReceivePanel` – input for courier code + destination directory, mirrored quantum tunnel visuals, plus a DEV-only relay smoke test toggle that exercises the relay adapter directly.
+  - `HistoryPanel` – chronological table of transfers with PoT export/verify toasts, supplemented with a quantum tunnel strip per row when the mode is enabled.
+  - `SettingsPanel` – toggles preferred routes, relay enable, code expiry, and the quantum tunnel experience, persisting via `ConfigStore`.
+  - See [docs/QUANTUM_UI.md](./QUANTUM_UI.md) for the full quantum tunnel copy and motion spec.
 
 - **Event Flow**
   - Store initialises on app mount, listens to the command events, and rehydrates history via `list_transfers`.
