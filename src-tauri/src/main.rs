@@ -4,14 +4,15 @@ mod attestation;
 mod config;
 mod commands;
 mod crypto;
+mod resume;
 mod signaling;
 mod store;
 mod transport;
 
 use commands::{
     courier_cancel, courier_generate_code, courier_p2p_smoke_test, courier_receive,
-    courier_relay_smoke_test, courier_send, export_pot, list_transfers, load_settings,
-    update_settings, verify_pot, SharedState,
+    courier_relay_smoke_test, courier_resume, courier_send, export_pot, list_transfers,
+    load_settings, update_settings, verify_pot, SharedState,
 };
 use config::ConfigStore;
 use serde::Serialize;
@@ -54,6 +55,7 @@ fn main() {
             courier_cancel,
             courier_p2p_smoke_test,
             courier_relay_smoke_test,
+            courier_resume,
             export_pot,
             verify_pot,
             list_transfers,

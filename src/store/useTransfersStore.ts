@@ -12,6 +12,7 @@ import type {
   TransferLogEventPayload,
   TransferProgress,
   TransferProgressPayload,
+  TransferResumeState,
   TransferSummary,
   TransferSummaryRaw,
   TransferTab,
@@ -31,6 +32,7 @@ type TransferRecord = {
   logs: TransferLogEvent[];
   speedHistory: number[];
   metrics?: TransferMetrics;
+  resume?: TransferResumeState;
 };
 
 type TransfersState = {
@@ -56,6 +58,7 @@ type TransfersState = {
   updateProgress: (progress: TransferProgress) => void;
   complete: (event: TransferLifecycleEvent) => void;
   fail: (event: TransferLifecycleEvent) => void;
+  resumeTransfer: (taskId: string) => Promise<void>;
   listRecent: () => TransferRecord[];
   resetError: () => void;
   clearPending: () => void;
@@ -93,6 +96,7 @@ const mapProgress = (payload: TransferProgressPayload): TransferProgress => ({
   speedBps: payload.speed_bps ?? undefined,
   route: payload.route ?? undefined,
   message: payload.message ?? undefined,
+  resume: payload.resume ?? undefined,
 });
 
 const mapLog = (payload: TransferLogEventPayload): TransferLogEvent => ({
@@ -126,6 +130,7 @@ const ensureRecord = (
       logs: existing.logs,
       speedHistory: existing.speedHistory,
       metrics: existing.metrics,
+      resume: existing.resume,
     };
   }
   return { summary, logs: [], speedHistory: [] };
@@ -439,12 +444,21 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
         };
       }
 
+      const resumeState = progress.resume ?? existing?.resume;
+      const nextProgress = resumeState
+        ? {
+            ...progress,
+            resume: resumeState,
+          }
+        : progress;
+
       transfers[progress.taskId] = {
         summary,
-        progress,
+        progress: nextProgress,
         logs: existing ? existing.logs : [],
         speedHistory,
         metrics,
+        resume: resumeState ?? undefined,
       };
       return { transfers };
     }),
@@ -463,12 +477,20 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
         potPath: event.message ?? existing.potPath,
       };
       const record = ensureRecord(transfers, summary);
-      transfers[event.taskId] = record.metrics
+      const mergedRecord = record.metrics
         ? {
             ...record,
             metrics: { ...record.metrics, etaSeconds: 0 },
           }
         : record;
+      const nextProgress = mergedRecord.progress
+        ? { ...mergedRecord.progress, resume: undefined }
+        : mergedRecord.progress;
+      transfers[event.taskId] = {
+        ...mergedRecord,
+        progress: nextProgress,
+        resume: undefined,
+      };
       return { transfers };
     }),
 
@@ -486,13 +508,52 @@ export const useTransfersStore = create<TransfersState>((set, get) => ({
       };
       const record = ensureRecord(transfers, summary);
       transfers[event.taskId] = record;
+      let nextError = state.lastError ?? null;
+      if (event.message) {
+        nextError = {
+          ...resolveUserError({ message: event.message }),
+          cta: "继续传输",
+          taskId: event.taskId,
+        };
+      } else if (state.lastError) {
+        nextError = {
+          ...state.lastError,
+          cta: "继续传输",
+          taskId: event.taskId,
+        };
+      }
       return {
         transfers,
-        lastError: event.message
-          ? resolveUserError({ message: event.message })
-          : state.lastError,
+        lastError: nextError,
       };
     }),
+
+  resumeTransfer: async (taskId) => {
+    try {
+      await invoke<TaskResponse>("courier_resume", {
+        task_id: taskId,
+      });
+      set((state) => {
+        const record = state.transfers[taskId];
+        if (!record) {
+          return { lastError: null };
+        }
+        const transfers = { ...state.transfers };
+        const summary: TransferSummary = {
+          ...record.summary,
+          status: "pending",
+          updatedAt: nowIso(),
+        };
+        transfers[taskId] = {
+          ...record,
+          summary,
+        };
+        return { transfers, lastError: null };
+      });
+    } catch (error) {
+      set({ lastError: resolveUserError(error) });
+    }
+  },
 
   listRecent: () => {
     const { transfers } = get();

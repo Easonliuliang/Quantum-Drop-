@@ -59,6 +59,7 @@ export default function SendPanel(): JSX.Element {
   const pendingCode = useTransfersStore((state) => state.pendingCode);
   const clearPending = useTransfersStore((state) => state.clearPending);
   const startSend = useTransfersStore((state) => state.startSend);
+  const resumeTransfer = useTransfersStore((state) => state.resumeTransfer);
   const transfersMap = useTransfersStore((state) => state.transfers);
 
   const sendTransfers = useMemo(
@@ -231,13 +232,24 @@ export default function SendPanel(): JSX.Element {
                   : undefined;
               const averageSpeed = record.metrics?.averageSpeed;
               const etaSeconds = record.metrics?.etaSeconds;
+              const resumeState = record.resume;
+              const missingChunks = resumeState
+                ? resumeState.receivedChunks.filter((flag) => !flag).length
+                : 0;
+              const resumable = Boolean(resumeState && missingChunks > 0);
+              const showResumeButton =
+                resumable &&
+                (summary.status === "failed" || summary.status === "cancelled");
               return (
                 <article className="transfer-card" key={summary.taskId}>
                   <header className="transfer-header">
                     <span className="task-id">{shortId(summary.taskId)}</span>
-                    <span className={`status status-${summary.status}`}>
-                      {statusLabel(summary.status)}
-                    </span>
+                    <div className="status-group">
+                      <span className={`status status-${summary.status}`}>
+                        {statusLabel(summary.status)}
+                      </span>
+                      {resumable && <span className="resume-chip">可续传</span>}
+                    </div>
                   </header>
                   <div className="transfer-body">
                     <div className="progress-line">
@@ -303,6 +315,22 @@ export default function SendPanel(): JSX.Element {
                           </li>
                         ))}
                       </ul>
+                    )}
+                    {resumable && (
+                      <div className="resume-hint">
+                        <span>剩余 {missingChunks} 段待续传</span>
+                        {showResumeButton && (
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => {
+                              void resumeTransfer(summary.taskId);
+                            }}
+                          >
+                            继续
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                   {logs.length > 0 && (

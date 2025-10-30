@@ -67,6 +67,7 @@ export type UserFacingError = {
   summary: string;
   detail?: string;
   cta?: string;
+  taskId?: string;
 };
 
 type CommandErrorShape = {

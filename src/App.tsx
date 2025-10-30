@@ -29,6 +29,7 @@ export default function App(): JSX.Element {
   const shutdown = useTransfersStore((state) => state.shutdown);
   const lastError = useTransfersStore((state) => state.lastError);
   const resetError = useTransfersStore((state) => state.resetError);
+  const resumeTransfer = useTransfersStore((state) => state.resumeTransfer);
 
   useEffect(() => {
     initialize().catch((error) => {
@@ -63,6 +64,11 @@ export default function App(): JSX.Element {
 
   const handleErrorCta = () => {
     if (!lastError) {
+      return;
+    }
+    if (lastError.taskId) {
+      void resumeTransfer(lastError.taskId);
+      resetError();
       return;
     }
     switch (lastError.code) {

@@ -42,12 +42,21 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
 - **`store`** – light SQLite wrapper (`TransferStore`) responsible for creating the durable schema, upserting terminal transfer records, and serving paged history to the UI command.
 
 - **`transport`** – owns the `TransportAdapter` traits, runtime `Router` (reads preferred routes and enforces the LAN → P2P → relay fallback ladder with 3s/6s/8s timeouts), `QuicAdapter` (quinn-powered loopback with self-signed `localhost` certificates under the `transport-quic` feature), `RelayAdapter` (Tokio TCP loopback guarded by `transport-relay`), `MockLocalAdapter` fallback for headless runs, and a gated `WebRtcAdapter` skeleton.
+- **`resume`** – manages transfer chunk catalogs (size, count, bitmap), enforces adaptive sizing policy driven by RTT, persists `{task}-index.json` snapshots under `app_data_dir/cache/`, and exposes helpers for querying missing segments on reconnect.
 
 - **`attestation`** – Merkle helpers hashing chunks/root with SHA-256 (CID salted via Blake3) and a PoT writer that materialises JSON receipts aligned with the blueprint schema.
 
 - **`crypto`** – lightweight helpers for generating share codes and mock session keys (placeholder for upcoming PAKE / Noise integration).
 
 - **`signaling`** – session ticket scaffolding, WebRTC `SessionDescription`/ICE types, and a lightweight Axum `/ws` hub (`signaling-server` feature) that merges `SessionDesc` updates for minimal WebRTC experiments.
+
+## Resumable Chunk Flow
+
+1. When a task starts, `resume::ResumeStore` loads an existing chunk catalog or creates a new one with the policy-selected chunk size (default 4 MiB).
+2. Round-trip latency captured during the transport handshake feeds `resume::derive_chunk_size`, bumping chunk payloads to 8 MiB / 16 MiB for high RTT paths and shrinking them to 2 MiB on weak networks or relay hops.
+3. Each `transfer_progress` event now includes a `resume` payload so the UI can surface the “可续传” badge, outstanding chunk count, and “继续” action.
+4. After every acknowledged chunk the bitmap is persisted to `cache/{task_id}-index.json`; failures leave the snapshot intact so retries only stream missing segments.
+5. Successful completion or explicit cancellation removes the cached catalog, keeping the cache directory tidy.
 
 ## S2 WebRTC DataChannel – Minimal Flow
 
@@ -140,7 +149,7 @@ Commands accept snake_case parameters and return camelCase objects conforming to
 | `verify_pot(pot_path)` | Validate PoT JSON schema | Structural checks + actionable error messaging |
 | `list_transfers(limit?)` | Snapshot recent transfers | Drives UI history bootstrapping |
 | `load_settings()` | Fetch persisted transport preferences | Falls back to defaults on first run |
-| `update_settings(payload)` | Persist preferred routes, relay toggle, and code TTL | Updates `ConfigStore` and rehydrates Router preferences |
+| `update_settings(payload)` | Persist preferred routes, relay toggle, code TTL, and chunk policy | Updates `ConfigStore`, refreshes Router preferences, and rehydrates the resume policy |
 
 ### Error Codes
 
@@ -159,6 +168,7 @@ Events follow the blueprint contract with unchanged names. Payloads are snake_ca
 ## File System Footprint
 
 - Proofs live under the app data directory inside `proofs/` with filenames `{task_id}.pot.json`.
+- Resume metadata persists next to proofs under `cache/{task_id}-index.json` (deleted automatically once a transfer finalises or is cancelled).
 - Runtime logs go through Tauri emitters and are kept in-memory (future work: persist to disk as described in the blueprint).
 - Persistent history is stored under `<app_data_dir>/storage/transfers.sqlite3`, created on start if missing.
 
@@ -185,6 +195,7 @@ CREATE INDEX IF NOT EXISTS idx_transfers_updated_at ON transfers(updated_at);
   - `transport::adapter` exercises `MockLocalAdapter` loopback send/recv.
   - `transport::quic` validates the QUIC loopback echo path and self-signed TLS wiring.
   - `transport::router` confirms the LAN preference selects the QUIC adapter when available.
+  - `resume` module covers bitmap diffing, store round-trips, and an ignored `MockLocalAdapter` retry flow.
 
 - **Vitest**
   - `App.test.tsx` validates the shell renders and tab navigation swaps panels.

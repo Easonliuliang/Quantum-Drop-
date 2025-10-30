@@ -69,6 +69,7 @@ export interface TransferProgressPayload {
   speed_bps?: number | null;
   route?: TransferRoute | null;
   message?: string | null;
+  resume?: TransferResumeState | null;
 }
 
 export interface TransferProgress {
@@ -80,6 +81,13 @@ export interface TransferProgress {
   speedBps?: number;
   route?: TransferRoute;
   message?: string;
+  resume?: TransferResumeState;
+}
+
+export interface TransferResumeState {
+  chunkSize: number;
+  totalChunks: number;
+  receivedChunks: boolean[];
 }
 
 export interface TransferLogEventPayload {
@@ -131,6 +139,13 @@ export interface SettingsPayload {
   preferredRoutes: string[];
   codeExpireSec: number;
   relayEnabled: boolean;
+  chunkPolicy: ChunkPolicySettings;
+}
+
+export interface ChunkPolicySettings {
+  adaptive: boolean;
+  minBytes: number;
+  maxBytes: number;
 }
 
 export type CourierGenerateCodeCommand = (

@@ -35,7 +35,13 @@ const normaliseRoutes = (routes: string[]): string[] => {
 };
 
 const cloneSettings = (settings: SettingsPayload | null): SettingsPayload | null =>
-  settings ? { ...settings, preferredRoutes: [...settings.preferredRoutes] } : null;
+  settings
+    ? {
+        ...settings,
+        preferredRoutes: [...settings.preferredRoutes],
+        chunkPolicy: { ...settings.chunkPolicy },
+      }
+    : null;
 
 export default function SettingsPanel(): JSX.Element {
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
@@ -120,6 +126,45 @@ export default function SettingsPanel(): JSX.Element {
     });
   };
 
+  const toggleAdaptiveChunks = (enabled: boolean) => {
+    setSettings((current) =>
+      current
+        ? {
+            ...current,
+            chunkPolicy: { ...current.chunkPolicy, adaptive: enabled },
+          }
+        : current
+    );
+  };
+
+  const handleChunkBoundChange = (field: "minBytes" | "maxBytes", value: number) => {
+    setSettings((current) => {
+      if (!current) {
+        return current;
+      }
+      const clampMiB = (input: number, fallbackBytes: number) => {
+        if (Number.isNaN(input)) {
+          return Math.round(fallbackBytes / (1024 * 1024));
+        }
+        const rounded = Math.round(input);
+        return Math.min(16, Math.max(2, rounded));
+      };
+      const targetMiB = clampMiB(value, current.chunkPolicy[field]);
+      const nextBytes = targetMiB * 1024 * 1024;
+      const policy = { ...current.chunkPolicy, [field]: nextBytes };
+      if (field === "minBytes" && policy.minBytes > policy.maxBytes) {
+        policy.maxBytes = policy.minBytes;
+      }
+      if (field === "maxBytes" && policy.maxBytes < policy.minBytes) {
+        policy.minBytes = policy.maxBytes;
+      }
+      return {
+        ...current,
+        chunkPolicy: policy,
+      };
+    });
+  };
+
   const handleTtlChange = (value: number) => {
     setSettings((current) =>
       current
@@ -162,6 +207,9 @@ export default function SettingsPanel(): JSX.Element {
       </section>
     );
   }
+
+  const minChunkMiB = Math.round(settings.chunkPolicy.minBytes / (1024 * 1024));
+  const maxChunkMiB = Math.round(settings.chunkPolicy.maxBytes / (1024 * 1024));
 
   return (
     <section className="panel-content" aria-label="Runtime settings">
@@ -227,6 +275,50 @@ export default function SettingsPanel(): JSX.Element {
             Defines the default lifetime for generated courier codes (minimum 60 seconds).
           </p>
         </div>
+
+        <details className="form-group advanced">
+          <summary>Advanced chunk sizing</summary>
+          <p className="form-hint">
+            Adaptive sizing raises chunk payloads when latency is high and shrinks them on weak links. Values are stored in MiB.
+          </p>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={settings.chunkPolicy.adaptive}
+              onChange={(event) => toggleAdaptiveChunks(event.target.checked)}
+            />
+            <span className="checkbox-label">Enable adaptive chunk policy</span>
+            <span className="checkbox-description">
+              RTT &gt; 80ms expands up to the max size, unreliable routes fall back to the minimum.
+            </span>
+          </label>
+          <div className="input-row chunk-range">
+            <label htmlFor="chunk-min">Min chunk (MiB)</label>
+            <input
+              id="chunk-min"
+              type="number"
+              min={2}
+              max={maxChunkMiB}
+              value={minChunkMiB}
+              disabled={!settings.chunkPolicy.adaptive}
+              onChange={(event) =>
+                handleChunkBoundChange("minBytes", Number(event.target.value))
+              }
+            />
+            <label htmlFor="chunk-max">Max chunk (MiB)</label>
+            <input
+              id="chunk-max"
+              type="number"
+              min={minChunkMiB}
+              max={16}
+              value={maxChunkMiB}
+              disabled={!settings.chunkPolicy.adaptive}
+              onChange={(event) =>
+                handleChunkBoundChange("maxBytes", Number(event.target.value))
+              }
+            />
+          </div>
+        </details>
 
         <div className="form-actions">
           <button

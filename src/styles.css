@@ -209,6 +209,25 @@ body {
   gap: 0.45rem;
 }
 
+details.form-group.advanced {
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 16px;
+  padding: 0.75rem 1rem;
+  background: rgba(15, 23, 42, 0.45);
+  color: #e2e8f0;
+}
+
+details.form-group.advanced summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #f8fafc;
+  outline: none;
+}
+
+details.form-group.advanced[open] summary {
+  margin-bottom: 0.5rem;
+}
+
 .form-group label {
   font-size: 0.85rem;
   text-transform: uppercase;
@@ -226,6 +245,23 @@ body {
 .input-row {
   display: flex;
   gap: 0.75rem;
+}
+
+.chunk-range {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.chunk-range label {
+  font-size: 0.85rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #cbd5f5;
+  min-width: 120px;
+}
+
+.chunk-range input[type="number"] {
+  max-width: 120px;
 }
 
 input[type="text"],
@@ -378,6 +414,23 @@ input[type="text"]::placeholder {
   align-items: center;
 }
 
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.resume-chip {
+  margin-left: 0.5rem;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.18);
+  color: #bfdbfe;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  font-weight: 600;
+}
+
 .task-id {
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   font-size: 0.85rem;
@@ -423,6 +476,23 @@ input[type="text"]::placeholder {
   gap: 0.4rem;
   color: #cbd5f5;
   font-size: 0.9rem;
+}
+
+.resume-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+  background: rgba(59, 130, 246, 0.08);
+  color: #cbd5f5;
+  font-size: 0.85rem;
+}
+
+.resume-hint .secondary {
+  min-width: 4.5rem;
 }
 
 .progress-line {

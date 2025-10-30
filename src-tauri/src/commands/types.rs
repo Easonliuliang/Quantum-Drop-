@@ -113,6 +113,14 @@ impl TransferRoute {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeProgressDto {
+    pub chunk_size: u64,
+    pub total_chunks: u64,
+    pub received_chunks: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TransferProgressEvent {
     pub task_id: String,
     pub phase: TransferPhase,
@@ -122,6 +130,7 @@ pub struct TransferProgressEvent {
     pub speed_bps: Option<u64>,
     pub route: Option<TransferRoute>,
     pub message: Option<String>,
+    pub resume: Option<ResumeProgressDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,6 +147,15 @@ pub struct SettingsPayload {
     pub preferred_routes: Vec<String>,
     pub code_expire_sec: i64,
     pub relay_enabled: bool,
+    pub chunk_policy: ChunkPolicyPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkPolicyPayload {
+    pub adaptive: bool,
+    pub min_bytes: u64,
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

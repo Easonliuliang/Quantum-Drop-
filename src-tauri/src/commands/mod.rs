@@ -5,10 +5,11 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
 use tokio::time::{sleep, timeout};
 
@@ -16,8 +17,9 @@ use crate::{
     attestation::{
         compute_file_attestation, write_proof_of_transition, ProofOfTransition,
     },
-    config::{ConfigStore, RuntimeSettings},
+    config::{AdaptiveChunkPolicy, ConfigStore, RuntimeSettings},
     crypto,
+    resume::{derive_chunk_size, ChunkCatalog, ResumeStore},
     signaling::SessionTicket,
     store::{TransferRecord, TransferStore},
     transport::{Frame, RouteKind, Router, SelectedRoute, SessionDesc},
@@ -25,9 +27,10 @@ use crate::{
 
 use state::{TrackedFile, TransferTask};
 use types::{
-    CommandError, ExportPotResponse, GenerateCodeResponse, P2pSmokeTestResponse,
-    SettingsPayload, TaskResponse, TransferDirection, TransferLifecycleEvent, TransferPhase,
-    TransferProgressEvent, TransferRoute, TransferStatus, TransferSummary, VerifyPotResponse,
+    ChunkPolicyPayload, CommandError, ExportPotResponse, GenerateCodeResponse,
+    P2pSmokeTestResponse, ResumeProgressDto, SettingsPayload, TaskResponse, TransferDirection,
+    TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute, TransferStatus,
+    TransferSummary, VerifyPotResponse,
 };
 
 const MOCK_RECEIVE_FILE_SIZE: u64 = 2 * 1024 * 1024;
@@ -169,7 +172,37 @@ pub async fn courier_cancel(
             message: Some("Transfer cancelled by user".into()),
         },
     );
+    if let Ok(store) = ResumeStore::from_app(&app) {
+        if let Err(err) = store.remove(&task_id) {
+            eprintln!("failed to cleanup resume catalog for {task_id}: {err}");
+        }
+    }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn courier_resume(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    task_id: String,
+) -> Result<TaskResponse, CommandError> {
+    let existing = state
+        .get_task(&task_id)
+        .await
+        .ok_or_else(CommandError::not_found)?;
+    if matches!(
+        existing.status,
+        TransferStatus::Completed | TransferStatus::Cancelled
+    ) {
+        return Err(CommandError::invalid(
+            "Transfer already finalised",
+        ));
+    }
+    state
+        .set_status(&task_id, TransferStatus::Pending)
+        .await;
+    spawn_transfer_runner(&app, state.inner().clone(), task_id.clone());
+    Ok(TaskResponse { task_id })
 }
 
 #[tauri::command]
@@ -386,6 +419,11 @@ pub fn update_settings(
         preferred_routes: payload.preferred_routes.clone(),
         code_expire_sec: payload.code_expire_sec,
         relay_enabled: payload.relay_enabled,
+        chunk_policy: AdaptiveChunkPolicy {
+            enabled: payload.chunk_policy.adaptive,
+            min_bytes: payload.chunk_policy.min_bytes,
+            max_bytes: payload.chunk_policy.max_bytes,
+        },
     };
     let updated = config.update(runtime).map_err(CommandError::from)?;
     Ok(to_settings_payload(updated))
@@ -423,6 +461,11 @@ fn to_settings_payload(settings: RuntimeSettings) -> SettingsPayload {
         preferred_routes: settings.preferred_routes,
         code_expire_sec: settings.code_expire_sec,
         relay_enabled: settings.relay_enabled,
+        chunk_policy: ChunkPolicyPayload {
+            adaptive: settings.chunk_policy.enabled,
+            min_bytes: settings.chunk_policy.min_bytes,
+            max_bytes: settings.chunk_policy.max_bytes,
+        },
     }
 }
 
@@ -589,6 +632,7 @@ fn spawn_transfer_runner(app: &AppHandle, state: SharedState, task_id: String) {
                     speed_bps: None,
                     route: None,
                     message: Some(error_message.clone()),
+                    resume: None,
                 },
             );
             emit_event(
@@ -652,6 +696,7 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
             speed_bps: None,
             route: None,
             message: Some("Preparing transfer context".into()),
+            resume: None,
         },
     );
     sleep(Duration::from_millis(200)).await;
@@ -667,6 +712,7 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
             speed_bps: None,
             route: None,
             message: Some("Exchanging pairing code".into()),
+            resume: None,
         },
     );
     sleep(Duration::from_millis(200)).await;
@@ -686,13 +732,27 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
     );
     let route = TransferRoute::from(selected_route.clone());
 
+    let handshake_start = Instant::now();
     stream
         .send(Frame::Control("handshake".into()))
         .await
         .map_err(|err| anyhow!("transport handshake failed: {err}"))?;
-    if let Ok(frame) = stream.recv().await {
-        emit_log(&app, &task_id, format!("Control frame echo: {:?}", frame));
-    }
+    let handshake_elapsed = match stream.recv().await {
+        Ok(frame) => {
+            let elapsed = handshake_start.elapsed();
+            emit_log(&app, &task_id, format!("Control frame echo: {:?}", frame));
+            elapsed
+        }
+        Err(err) => {
+            let elapsed = handshake_start.elapsed();
+            emit_log(
+                &app,
+                &task_id,
+                format!("Handshake acknowledgement missing: {err}"),
+            );
+            elapsed
+        }
+    };
 
     emit_progress(
         &app,
@@ -708,39 +768,161 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
                 "{} route established",
                 route_label(&route).to_uppercase()
             )),
+            resume: None,
         },
     );
 
     let mut tracked_files = task.files.clone();
 
-    let total_bytes: u64 = tracked_files.iter().map(|f| f.size).sum();
-    let total_bytes = if total_bytes == 0 {
-        MOCK_RECEIVE_FILE_SIZE
-    } else {
-        total_bytes
+    let mut total_bytes: u64 = tracked_files.iter().map(|f| f.size).sum();
+    if total_bytes == 0 {
+        total_bytes = MOCK_RECEIVE_FILE_SIZE;
+    }
+    let settings = app.state::<ConfigStore>().get();
+    let weak_network =
+        matches!(selected_route, RouteKind::Relay) || handshake_elapsed > Duration::from_millis(250);
+    let suggested_chunk =
+        derive_chunk_size(&settings.chunk_policy, &selected_route, handshake_elapsed, weak_network);
+    let resume_store = ResumeStore::from_app(&app)?;
+    let mut catalog = match resume_store.load(&task_id)? {
+        Some(mut existing) => {
+            existing.reconcile_total_bytes(total_bytes);
+            if existing.chunk_size != suggested_chunk {
+                emit_log(
+                    &app,
+                    &task_id,
+                    format!(
+                        "Resuming with stored chunk size {} MiB",
+                        existing.chunk_size / (1024 * 1024)
+                    ),
+                );
+            }
+            existing
+        }
+        None => {
+            let created = ChunkCatalog::new(total_bytes, suggested_chunk);
+            resume_store.store(&task_id, &created)?;
+            emit_log(
+                &app,
+                &task_id,
+                format!(
+                    "Initial chunk catalog: {} chunks at {} MiB",
+                    created.total_chunks,
+                    created.chunk_size / (1024 * 1024)
+                ),
+            );
+            created
+        }
     };
 
-    let steps = 4;
-    for idx in 1..=steps {
-        sleep(Duration::from_millis(350)).await;
-        let sent_fraction = idx as f32 / steps as f32;
-        let sent_bytes = (total_bytes as f32 * sent_fraction) as u64;
-        stream
-            .send(Frame::Data(vec![idx as u8; 256]))
-            .await
-            .map_err(|err| anyhow!("transport failed: {err}"))?;
+    let mut acknowledged_bytes = catalog
+        .received_chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, flag)| **flag)
+        .map(|(idx, _)| catalog.chunk_length(idx as u64))
+        .sum::<u64>();
+    if acknowledged_bytes > catalog.total_bytes {
+        acknowledged_bytes = catalog.total_bytes;
+    }
+    let pending_indices = catalog.missing_indices();
+    emit_log(
+        &app,
+        &task_id,
+        format!(
+            "{} chunks pending out of {}",
+            pending_indices.len(),
+            catalog.total_chunks
+        ),
+    );
+
+    let total_chunks = catalog.total_chunks;
+    let bytes_total = catalog.total_bytes;
+
+    if !pending_indices.is_empty() {
         emit_progress(
             &app,
             TransferProgressEvent {
                 task_id: task_id.clone(),
                 phase: TransferPhase::Transferring,
-                progress: Some(0.25 + sent_fraction * 0.5),
-                bytes_sent: Some(sent_bytes),
-                bytes_total: Some(total_bytes),
+                progress: Some(
+                    (0.25 + (acknowledged_bytes as f32 / bytes_total as f32) * 0.5)
+                        .min(0.75),
+                ),
+                bytes_sent: Some(acknowledged_bytes),
+                bytes_total: Some(bytes_total),
                 speed_bps: Some(8 * 1024 * 1024),
                 route: Some(route.clone()),
-                message: Some("Streaming payload".into()),
+                message: Some(format!(
+                    "Resuming transfer · {} remaining chunks",
+                    pending_indices.len()
+                )),
+                resume: Some(resume_snapshot(&catalog)),
             },
+        );
+    }
+
+    for chunk_index in pending_indices.iter() {
+        let chunk_len = catalog.chunk_length(*chunk_index);
+        let mut payload = vec![0u8; chunk_len as usize];
+        for (offset, byte) in payload.iter_mut().enumerate() {
+            *byte = ((*chunk_index as usize + offset) % 251) as u8;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(&payload);
+        let digest = hasher.finalize();
+        let digest_hex = hex::encode(digest);
+        stream
+            .send(Frame::Data(payload))
+            .await
+            .map_err(|err| anyhow!("transport failed: {err}"))?;
+        catalog.mark_received(*chunk_index);
+        resume_store.store(&task_id, &catalog)?;
+        acknowledged_bytes = acknowledged_bytes
+            .saturating_add(chunk_len)
+            .min(bytes_total);
+        emit_log(
+            &app,
+            &task_id,
+            format!(
+                "Chunk {}/{} confirmed ({} bytes, sha256:{})",
+                *chunk_index + 1,
+                total_chunks,
+                chunk_len,
+                digest_hex
+            ),
+        );
+        let fraction = if bytes_total == 0 {
+            0.0
+        } else {
+            acknowledged_bytes as f32 / bytes_total as f32
+        };
+        emit_progress(
+            &app,
+            TransferProgressEvent {
+                task_id: task_id.clone(),
+                phase: TransferPhase::Transferring,
+                progress: Some((0.25 + fraction * 0.5).min(0.75)),
+                bytes_sent: Some(acknowledged_bytes),
+                bytes_total: Some(bytes_total),
+                speed_bps: Some(8 * 1024 * 1024),
+                route: Some(route.clone()),
+                message: Some(format!(
+                    "Streaming payload · chunk {}/{}",
+                    *chunk_index + 1,
+                    total_chunks
+                )),
+                resume: Some(resume_snapshot(&catalog)),
+            },
+        );
+        sleep(Duration::from_millis(180)).await;
+    }
+
+    if catalog.is_complete() {
+        emit_log(
+            &app,
+            &task_id,
+            "All chunks acknowledged; ready to finalise".into(),
         );
     }
 
@@ -762,11 +944,12 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
             task_id: task_id.clone(),
             phase: TransferPhase::Finalizing,
             progress: Some(0.85),
-            bytes_sent: Some(total_bytes),
-            bytes_total: Some(total_bytes),
+            bytes_sent: Some(bytes_total),
+            bytes_total: Some(bytes_total),
             speed_bps: Some(4 * 1024 * 1024),
             route: Some(route.clone()),
             message: Some("Finalising transfer & generating proof".into()),
+            resume: Some(resume_snapshot(&catalog)),
         },
     );
 
@@ -786,10 +969,13 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
         persist_transfer_snapshot(
             &app,
             &task_snapshot,
-            Some(total_bytes),
-            Some(total_bytes),
+            Some(bytes_total),
+            Some(bytes_total),
             Some(route_label_str.clone()),
         );
+    }
+    if let Err(err) = resume_store.remove(&task_id) {
+        eprintln!("failed to cleanup resume catalog for {task_id}: {err}");
     }
 
     emit_progress(
@@ -798,11 +984,12 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
             task_id: task_id.clone(),
             phase: TransferPhase::Done,
             progress: Some(1.0),
-            bytes_sent: Some(total_bytes),
-            bytes_total: Some(total_bytes),
+            bytes_sent: Some(bytes_total),
+            bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(route.clone()),
             message: Some("Transfer completed".into()),
+            resume: Some(resume_snapshot(&catalog)),
         },
     );
 
@@ -927,6 +1114,14 @@ fn default_proofs_dir(app: &AppHandle) -> Result<PathBuf> {
 
 fn route_label(route: &TransferRoute) -> &'static str {
     route.label()
+}
+
+fn resume_snapshot(catalog: &ChunkCatalog) -> ResumeProgressDto {
+    ResumeProgressDto {
+        chunk_size: catalog.chunk_size,
+        total_chunks: catalog.total_chunks,
+        received_chunks: catalog.received_chunks.clone(),
+    }
 }
 
 async fn materialise_mock_payload(files: &[TrackedFile]) -> Result<Vec<TrackedFile>> {

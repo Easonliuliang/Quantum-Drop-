@@ -20,6 +20,7 @@ Key design intents:
 ## Features
 
 - **Aether-Grade Transport Pipeline** – automatic route selection across LAN QUIC, peer-to-peer WebRTC, relay TURN, and optional caching layers.
+- **Resumable Chunks + Adaptive Sizing** – chunk catalogues persist on disk, resume missing segments only, and widen/shrink chunk payloads based on RTT.
 - **End-to-End Secrecy** – Noise/XChaCha20-Poly1305 encrypted tunnels with ephemeral identity material; signalling remains blind to payloads.
 - **Proof of Transition Ledger** – Merkle-authenticated receipts exportable for offline verification and audit trails.
 - **Presence UI** – Vite + React surface emphasises “arrival-first” storytelling, with status cards driven by the Rust runtime.
@@ -101,6 +102,12 @@ Additional commands:
 - **Verify PoT** accepts any `.pot.json` artefact, validates its structure, and surfaces actionable messaging when verification fails.
 - Transfer cards surface transferred bytes, moving-average speed, and ETA so operators can correlate runtime activity with exported proofs.
 
+### Resumable transfer workflow
+
+- Active cards display a “可续传” badge once the runtime reports chunk-state metadata. Dropped transfers expose a **继续** button that replays only the missing segments.
+- Resume metadata persists under `cache/{taskId}-index.json`; it is removed automatically after a successful completion or explicit cancellation.
+- The Settings tab exposes an “Advanced chunk sizing” panel where you can toggle adaptive sizing and clamp the min/max chunk size envelopes (expressed in MiB).
+
 ---
 
 ## Troubleshooting
@@ -109,6 +116,7 @@ Additional commands:
 - **Tauri dev server cannot reach Vite (`Failed to connect to http://localhost:5174`)** – check that `npm run dev:ui` is running or bump the port in `vite.config.ts` and `src-tauri/tauri.conf.json` to a free slot.
 - **`npm run test` exits with missing jsdom** – delete `node_modules`, reinstall dependencies, and verify that the correct Node version (>=18.17) is active via `nvm` or `fnm`.
 - **PoT attestation files unsynchronised** – copy the receipt payloads stored by the receiving agent; they remain valid even if the UI process crashes.
+- **Resume state appears stale** – delete the cached `cache/*.json` files under the app data directory; the runtime will rebuild them on the next transfer.
 
 ---
 

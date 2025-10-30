@@ -11,6 +11,26 @@ use tauri::{AppHandle, Manager};
 const ROUTE_ORDER: &[&str] = &["lan", "p2p", "relay"];
 const MIN_CODE_TTL: i64 = 60;
 const DEFAULT_CODE_TTL: i64 = 900;
+const MIN_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_CHUNK_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptiveChunkPolicy {
+    pub enabled: bool,
+    pub min_bytes: u64,
+    pub max_bytes: u64,
+}
+
+impl Default for AdaptiveChunkPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_bytes: MIN_CHUNK_BYTES,
+            max_bytes: MAX_CHUNK_BYTES,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +38,8 @@ pub struct RuntimeSettings {
     pub preferred_routes: Vec<String>,
     pub code_expire_sec: i64,
     pub relay_enabled: bool,
+    #[serde(default)]
+    pub chunk_policy: AdaptiveChunkPolicy,
 }
 
 impl Default for RuntimeSettings {
@@ -26,6 +48,7 @@ impl Default for RuntimeSettings {
             preferred_routes: ROUTE_ORDER.iter().map(|value| value.to_string()).collect(),
             code_expire_sec: DEFAULT_CODE_TTL,
             relay_enabled: true,
+            chunk_policy: AdaptiveChunkPolicy::default(),
         }
     }
 }
@@ -66,7 +89,21 @@ impl RuntimeSettings {
         if self.code_expire_sec < MIN_CODE_TTL {
             self.code_expire_sec = MIN_CODE_TTL;
         }
+        let min_bytes = Self::clamp_chunk_bytes(self.chunk_policy.min_bytes);
+        let mut max_bytes = Self::clamp_chunk_bytes(self.chunk_policy.max_bytes);
+        if max_bytes < min_bytes {
+            max_bytes = min_bytes;
+        }
+        self.chunk_policy.min_bytes = min_bytes;
+        self.chunk_policy.max_bytes = max_bytes;
         self
+    }
+
+    fn clamp_chunk_bytes(value: u64) -> u64 {
+        let clamped = value.clamp(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES);
+        let unit = 1024 * 1024;
+        let multiples = (clamped + unit - 1) / unit;
+        (multiples * unit).clamp(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES)
     }
 }
 
