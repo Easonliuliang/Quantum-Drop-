@@ -1,154 +1,216 @@
 :root {
+  color-scheme: dark;
   font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #f8fafc;
-  background: radial-gradient(circle at top, #1f2937, #030712 65%);
+  --quantum-blue: #38bdf8;
+  --quantum-blue-soft: rgba(56, 189, 248, 0.4);
+  --quantum-blue-strong: rgba(56, 189, 248, 0.75);
+  background: radial-gradient(circle at 20% 20%, #0ea5e9 0%, #020617 60%);
 }
 
 * {
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
 body {
-  margin: 0;
-  min-height: 100vh;
-  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4vh 5vw;
+  background: radial-gradient(circle at top, #0b1120 0%, #020617 70%);
+  color: #e2f3ff;
 }
 
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
+.app-surface {
+  width: min(960px, 90vw);
+  min-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2.5rem;
+  align-items: center;
+}
+
+.dropzone {
+  position: relative;
+  width: 100%;
+  min-height: 420px;
+  max-width: 880px;
+  padding: 4.25rem 3.5rem 3.75rem;
+  border-radius: 28px;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: rgba(15, 23, 42, 0.55);
+  box-shadow: 0 40px 90px rgba(14, 165, 233, 0.25);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
-.app-shell {
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 3rem 1.75rem 4rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1.75rem;
-}
-
-.app-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 2rem;
-  align-items: flex-start;
-}
-
-.app-header h1 {
-  margin: 0;
-  font-size: 2.5rem;
-  letter-spacing: -0.04em;
-}
-
-.tagline {
-  margin: 0.4rem 0 0;
-  color: #c7d2fe;
-  font-size: 1rem;
-  max-width: 38rem;
-}
-
-.runtime-status {
-  padding: 0.6rem 1.2rem;
-  border-radius: 999px;
-  background: rgba(99, 102, 241, 0.18);
-  color: #bfdbfe;
-  font-weight: 600;
-  box-shadow: 0 8px 24px rgba(59, 130, 246, 0.2);
-}
-
-.primary-nav {
-  display: flex;
-  gap: 0.75rem;
-  background: rgba(15, 23, 42, 0.6);
-  padding: 0.5rem;
-  border-radius: 16px;
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-}
-
-.nav-link {
-  border: none;
-  background: transparent;
-  color: #cbd5f5;
-  font-size: 0.95rem;
-  font-weight: 600;
-  padding: 0.6rem 1.4rem;
-  border-radius: 12px;
   cursor: pointer;
-  transition: background 0.2s ease, color 0.2s ease;
 }
 
-.nav-link:hover {
-  background: rgba(148, 163, 184, 0.12);
+.dropzone:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.7);
+  box-shadow: 0 50px 110px rgba(99, 102, 241, 0.35);
 }
 
-.nav-link.is-active {
-  color: #0f172a;
-  background: linear-gradient(135deg, #6366f1, #22d3ee);
-  box-shadow: 0 12px 24px rgba(79, 70, 229, 0.35);
+.dropzone.is-hovered {
+  transform: translateY(-6px);
+  border-color: rgba(56, 189, 248, 0.7);
+  box-shadow: 0 60px 140px rgba(56, 189, 248, 0.45);
 }
 
-.error-banner,
-.feedback-banner,
-.code-banner {
+.rings {
+  position: relative;
+  width: clamp(260px, 40vw, 320px);
+  height: clamp(260px, 40vw, 320px);
+  margin-bottom: 2rem;
+  pointer-events: none;
+}
+
+.ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--quantum-blue-soft);
+  box-shadow: 0 0 45px rgba(56, 189, 248, 0.35) inset, 0 0 60px rgba(56, 189, 248, 0.35);
+  animation: quantumPulse 4s ease-in-out infinite;
+}
+
+.ring-outer {
+  animation-duration: 5s;
+}
+
+.ring-middle {
+  inset: 18px;
+  animation-delay: 0.6s;
+  border-color: var(--quantum-blue);
+}
+
+.ring-inner {
+  inset: 36px;
+  animation-delay: 1.2s;
+  border-color: var(--quantum-blue-strong);
+}
+
+.cta h1 {
+  margin: 0 0 0.85rem;
+  font-size: clamp(2.4rem, 4.8vw, 3rem);
+  letter-spacing: 0.02em;
+}
+
+.cta p {
+  margin: 0 0 1.5rem;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: rgba(226, 243, 255, 0.72);
+}
+
+.browse {
+  appearance: none;
+  border: none;
+  border-radius: 999px;
+  padding: 0.75rem 1.9rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #021221;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.95), rgba(129, 140, 248, 0.95));
+  box-shadow: 0 20px 40px rgba(56, 189, 248, 0.4);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.browse:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 24px 50px rgba(56, 189, 248, 0.55);
+}
+
+.browse:active {
+  transform: translateY(0);
+}
+
+.file-input {
+  display: none;
+}
+
+.file-panel {
+  width: 100%;
+  max-width: 880px;
+  padding: 1.75rem 2rem;
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.4);
+}
+
+.file-panel h2 {
+  margin: 0 0 1.2rem;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+  color: rgba(226, 243, 255, 0.85);
+}
+
+.file-panel ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.file-panel li {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 1rem;
-  padding: 0.85rem 1.2rem;
-  border-radius: 14px;
   font-size: 0.95rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(56, 189, 248, 0.15);
 }
 
-.error-banner {
-  background: rgba(220, 38, 38, 0.2);
-  color: #fecaca;
-  border: 1px solid rgba(252, 165, 165, 0.3);
-}
-
-.feedback-banner {
-  background: rgba(59, 130, 246, 0.2);
-  color: #dbeafe;
-  border: 1px solid rgba(147, 197, 253, 0.3);
-  margin-bottom: 1rem;
-}
-
-.code-banner {
-  background: rgba(34, 211, 238, 0.2);
-  color: #ccfbf1;
-  border: 1px solid rgba(103, 232, 249, 0.35);
-  margin-top: 1.25rem;
-}
-
-.code-actions {
+.actions-row {
   display: flex;
-  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 1rem;
 }
 
-.error-content {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+.actions-row .primary {
+  min-width: 160px;
 }
 
-.error-detail {
-  margin: 0;
-  font-size: 0.85rem;
-  color: #fee2e2;
+.file-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 70%;
 }
 
-.error-actions {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
+.file-size {
+  font-variant-numeric: tabular-nums;
+  color: rgba(226, 243, 255, 0.6);
+}
+
+@keyframes quantumPulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
 }
 
 .error-inline {
@@ -257,6 +319,266 @@ details.form-group.advanced[open] summary {
 .input-row {
   display: flex;
   gap: 0.75rem;
+}
+
+.quantum-visual-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1rem;
+  padding: 0.75rem 0;
+}
+
+.quantum-slider,
+.quantum-animation-toggle,
+.quantum-3d-toggle {
+  position: relative;
+  padding: 1.1rem 0.75rem 0.9rem;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.quantum-slider input[type="range"] {
+  width: 100%;
+  margin: 0;
+  -webkit-appearance: none;
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.15));
+  height: 5px;
+  border-radius: 999px;
+  outline: none;
+}
+
+.quantum-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, rgba(129, 140, 248, 0.9), rgba(56, 189, 248, 0.9));
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.45);
+  border: none;
+  cursor: pointer;
+}
+
+.quantum-slider input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, rgba(129, 140, 248, 0.9), rgba(56, 189, 248, 0.9));
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.45);
+  border: none;
+  cursor: pointer;
+}
+
+.quantum-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.quantum-slider input[type="range"]::-moz-range-track {
+  height: 5px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.quantum-slider-dots {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: center;
+}
+
+.quantum-slider-dots span {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(203, 213, 225, 0.35);
+  box-shadow: 0 0 6px rgba(148, 163, 184, 0.3);
+  transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.quantum-slider-dots span[data-active="true"] {
+  background: rgba(96, 165, 250, 0.95);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.45);
+  transform: scale(1.2);
+}
+
+.quantum-3d-toggle {
+  align-items: center;
+  justify-content: center;
+}
+
+.quantum-3d-toggle input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.quantum-3d-toggle-indicator {
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 50%, rgba(148, 163, 184, 0.35), rgba(30, 41, 59, 0.45));
+  box-shadow: inset 0 0 18px rgba(15, 23, 42, 0.6);
+  transition: background 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+}
+
+.quantum-3d-toggle-indicator span {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, rgba(129, 140, 248, 0.75), rgba(56, 189, 248, 0.8));
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.55);
+  transform: scale(0.88);
+  transition: transform 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
+}
+
+.quantum-3d-toggle-indicator[data-active="true"] {
+  background: radial-gradient(circle at 50% 50%, rgba(96, 165, 250, 0.4), rgba(29, 78, 216, 0.45));
+  box-shadow: inset 0 0 24px rgba(30, 64, 175, 0.55);
+}
+
+.quantum-3d-toggle-indicator[data-active="true"] span {
+  transform: scale(1.08);
+  background: linear-gradient(145deg, rgba(56, 189, 248, 0.95), rgba(165, 180, 252, 0.95));
+}
+
+.quantum-3d-toggle-indicator[data-supported="false"] {
+  opacity: 0.45;
+  filter: grayscale(0.3);
+}
+
+.quantum-quality-dots {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0 0.3rem;
+  gap: 0.4rem;
+}
+
+.quantum-quality-dots span {
+  width: 14px;
+  height: 14px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.25);
+  box-shadow: 0 0 6px rgba(148, 163, 184, 0.25);
+  transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  position: relative;
+}
+
+.quantum-quality-dots span[data-level="medium"] {
+  border-radius: 50%;
+}
+
+.quantum-quality-dots span[data-level="high"] {
+  width: 18px;
+  height: 18px;
+}
+
+.quantum-quality-dots span[data-active="true"] {
+  background: rgba(96, 165, 250, 0.9);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.55);
+  transform: scale(1.1);
+}
+
+.quantum-fps-markers {
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+  width: 100%;
+  gap: 0.5rem;
+}
+
+.quantum-fps-markers span {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.28);
+  box-shadow: 0 0 8px rgba(148, 163, 184, 0.2);
+  transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.quantum-fps-markers span[data-active="true"] {
+  background: rgba(129, 140, 248, 0.95);
+  box-shadow: 0 0 14px rgba(129, 140, 248, 0.6);
+  transform: scale(1.15);
+}
+
+.quantum-slider.quantum-slider-speed {
+  gap: 0.75rem;
+}
+
+.quantum-speed-markers {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0 0.4rem;
+  gap: 0.4rem;
+}
+
+.quantum-speed-markers span {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.28);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.quantum-speed-markers span[data-active="true"] {
+  background: rgba(129, 140, 248, 0.9);
+  box-shadow: 0 0 14px rgba(129, 140, 248, 0.6);
+}
+
+.quantum-animation-toggle {
+  padding-bottom: 1rem;
+}
+
+.quantum-animation-toggle input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.quantum-animations-indicator {
+  width: 56px;
+  height: 28px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(148, 163, 184, 0.35), rgba(51, 65, 85, 0.35));
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  transition: background 0.25s ease;
+}
+
+.quantum-animations-indicator span {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.75);
+  box-shadow: 0 0 10px rgba(148, 163, 184, 0.45);
+  transform: translateX(0);
+  transition: transform 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
+}
+
+.quantum-animation-toggle input:checked + .quantum-animations-indicator {
+  background: linear-gradient(135deg, rgba(129, 140, 248, 0.4), rgba(56, 189, 248, 0.45));
+}
+
+.quantum-animation-toggle input:checked + .quantum-animations-indicator span {
+  transform: translateX(24px);
+  background: rgba(96, 165, 250, 0.95);
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.6);
 }
 
 .chunk-range {
@@ -717,6 +1039,30 @@ input[type="text"]::placeholder {
   background: linear-gradient(135deg, rgba(67, 20, 20, 0.8), rgba(127, 29, 29, 0.32));
 }
 
+.quantum-tunnel {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  overflow: hidden;
+  background: #000000;
+  box-shadow: none;
+}
+
+.quantum-tunnel canvas,
+.quantum-tunnel [data-wormhole-surface] {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.quantum-tunnel [data-wormhole-surface],
+.wormhole-surface,
+.quantum-tunnel canvas {
+  background: #000000;
+  box-shadow: none;
+}
+
 .qt-photon-stream {
   position: absolute;
   inset: -20%;
@@ -891,24 +1237,88 @@ input[type="text"]::placeholder {
 }
 
 .qdz {
-  --qdz-bg: radial-gradient(circle at 30% 20%, rgba(20, 184, 166, 0.35), transparent 62%),
-    radial-gradient(circle at 70% 72%, rgba(59, 130, 246, 0.28), transparent 60%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.95), rgba(2, 6, 23, 0.9));
-  --qdz-glow: rgba(94, 234, 212, 0.9);
-  --qdz-highlight: rgba(125, 211, 252, 0.55);
-  --qdz-ring-color: rgba(190, 242, 100, 0.24);
-  --qdz-particle: rgba(165, 243, 252, 0.85);
-  --qdz-orbit: rgba(125, 211, 252, 0.35);
+  --qdz-primary: #63f5ff;
+  --qdz-secondary: #6366f1;
+  --qdz-ambient: rgba(14, 23, 42, 0.78);
+  --qdz-border: rgba(148, 163, 184, 0.22);
+  --qdz-vignette: rgba(14, 22, 45, 0.65);
+  --qdz-halo-outer: rgba(99, 245, 255, 0.26);
+  --qdz-halo-inner: rgba(255, 255, 255, 0.35);
+  --qdz-grid: rgba(148, 163, 184, 0.18);
+  --qdz-focus: rgba(94, 234, 212, 0.6);
+  --qdz-halo-glow: rgba(99, 245, 255, 0.45);
+  --qt-ambient-h: 198;
+  --qt-ambient-s: 85%;
+  --qt-ambient-l: 64%;
+  --qt-ambient-alpha: 0.24;
   position: relative;
   width: 100%;
   min-height: 320px;
   border-radius: 28px;
   overflow: hidden;
-  background: var(--qdz-bg);
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  box-shadow: 0 30px 80px rgba(2, 6, 23, 0.65);
+  background:
+    radial-gradient(circle at 28% 18%, rgba(96, 165, 250, 0.28), transparent 58%),
+    radial-gradient(circle at 72% 72%, rgba(34, 211, 238, 0.24), transparent 60%),
+    linear-gradient(175deg, rgba(3, 9, 24, 0.98), rgba(1, 3, 9, 0.92));
+  border: 1px solid var(--qdz-border);
+  box-shadow: 0 30px 80px rgba(2, 6, 23, 0.6);
   cursor: pointer;
   transition: box-shadow 0.4s ease, transform 0.4s ease, filter 0.45s ease;
+}
+
+.qdz[data-route="lan"] {
+  --qt-ambient-h: 190;
+  --qt-ambient-s: 92%;
+  --qt-ambient-l: 70%;
+  --qt-ambient-alpha: 0.28;
+}
+
+.qdz[data-route="p2p"] {
+  --qt-ambient-h: 226;
+  --qt-ambient-s: 82%;
+  --qt-ambient-l: 65%;
+  --qt-ambient-alpha: 0.26;
+}
+
+.qdz[data-route="relay"] {
+  --qt-ambient-h: 170;
+  --qt-ambient-s: 88%;
+  --qt-ambient-l: 62%;
+  --qt-ambient-alpha: 0.3;
+}
+
+.qdz[data-phase="transferring"] {
+  --qt-ambient-alpha: 0.34;
+}
+
+.qdz[data-phase="finalizing"],
+.qdz[data-phase="done"] {
+  --qt-ambient-alpha: 0.4;
+}
+
+.qdz[data-phase="error"] {
+  --qt-ambient-alpha: 0.18;
+  filter: grayscale(0.2) brightness(0.9);
+}
+
+.wormhole-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  background: #000;
+}
+
+.qdz::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 26px;
+  background: radial-gradient(circle at 50% 12%, rgba(255, 255, 255, 0.16), transparent 70%);
+  opacity: 0.65;
+  pointer-events: none;
+  mix-blend-mode: screen;
 }
 
 .qdz:focus-visible {
@@ -921,415 +1331,230 @@ input[type="text"]::placeholder {
   filter: grayscale(0.45) opacity(0.75);
 }
 
-.qdz.qdz-drag-active:not(.is-disabled) {
-  box-shadow: 0 42px 120px rgba(56, 189, 248, 0.35);
-  transform: translateY(-6px) scale(1.01);
-  filter: saturate(1.35);
-}
-
 .qdz-input {
   display: none;
 }
 
-.qdz-surface {
+.qdz-stage {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.q3d-surface {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  border-radius: inherit;
+  overflow: hidden;
+  background: #000;
+  box-shadow: inset 0 0 120px rgba(152, 112, 255, 0.14), inset 0 0 32px rgba(0, 0, 0, 0.45);
+}
+
+.q3d-surface canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.qdz.qdz-drag-active .q3d-surface {
+  background: radial-gradient(
+    circle at 50% 60%,
+    hsla(var(--qt-ambient-h), var(--qt-ambient-s), 72%, calc(var(--qt-ambient-alpha) + 0.08)),
+    rgba(8, 11, 23, 0)
+  );
+}
+
+.qdz-dot-surface {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  pointer-events: none;
+  background: #000;
+  box-shadow: inset 0 0 120px rgba(255, 92, 164, 0.12), inset 0 0 36px rgba(0, 0, 0, 0.5);
+}
+
+.qdz-overlay {
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
 
-.qdz-singularity {
+.qdz-halo {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: clamp(160px, 28vw, 240px);
+  width: clamp(320px, 56%, 540px);
   aspect-ratio: 1;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.9), var(--qdz-glow) 55%, transparent 70%);
-  box-shadow: 0 0 45px var(--qdz-glow), 0 0 160px rgba(59, 130, 246, 0.35);
-  animation: singularity-pulse 5.5s ease-in-out infinite;
-  mix-blend-mode: screen;
+  transition: opacity 0.6s ease, transform 0.6s ease;
 }
 
-.qdz-tunnel .qdz-singularity {
-  animation-duration: 3.3s;
-  box-shadow: 0 0 80px var(--qdz-glow), 0 0 220px rgba(6, 182, 212, 0.45);
-}
-
-.qdz-collapse .qdz-singularity {
-  animation: collapse-spark 2s ease-in-out infinite;
-}
-
-.qdz-decohere .qdz-singularity {
-  filter: hue-rotate(-18deg) brightness(0.85);
-  box-shadow: 0 0 60px rgba(248, 113, 113, 0.55);
-}
-
-.qdz-wave-function {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-}
-
-.qdz-wave-function .probability-cloud {
-  width: 110%;
-  height: 110%;
-  border-radius: 38%;
-  background: radial-gradient(circle at center, rgba(14, 165, 233, 0.2), transparent 70%);
-  filter: blur(18px);
-  animation: cloud-pulse 7s ease-in-out infinite;
-  mix-blend-mode: screen;
-}
-
-.qdz-wave-function .interference-pattern {
-  position: absolute;
-  width: 140%;
-  height: 140%;
-  background: repeating-conic-gradient(
-      from 0deg,
-      rgba(59, 130, 246, 0.16) 0deg 12deg,
-      transparent 12deg 24deg
-    ),
-    radial-gradient(circle at center, transparent 35%, rgba(6, 182, 212, 0.22) 65%, transparent 80%);
-  opacity: 0.4;
-  filter: blur(24px);
-  animation: interference-wave 9s linear infinite;
-}
-
-.qdz-quantum-rings {
-  position: absolute;
-  inset: 14%;
-}
-
-.qdz-quantum-rings .ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1px solid var(--qdz-ring-color);
-  box-shadow: 0 0 20px rgba(191, 219, 254, 0.18);
-  mix-blend-mode: screen;
-  animation: ring-rotate 16s linear infinite;
-}
-
-.qdz-quantum-rings .ring-1 {
-  animation-duration: 20s;
+.qdz-halo-outer {
+  background: radial-gradient(circle, var(--qdz-halo-outer) 0%, transparent 70%);
+  filter: blur(22px);
   opacity: 0.55;
 }
 
-.qdz-quantum-rings .ring-2 {
-  inset: 12%;
-  animation-duration: 12s;
+.qdz-halo-inner {
+  width: clamp(200px, 34%, 340px);
+  background: radial-gradient(circle, var(--qdz-halo-inner) 0%, transparent 72%);
+  box-shadow: 0 0 80px var(--qdz-halo-glow);
+  opacity: 0.75;
+}
+
+.qdz-grid {
+  position: absolute;
+  inset: 14%;
+  border-radius: 50%;
+  border: 1px solid var(--qdz-grid);
+  opacity: 0.28;
+  mask-image: radial-gradient(circle, rgba(255, 255, 255, 0.95), transparent 80%);
+}
+
+.qdz-grid::before,
+.qdz-grid::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid var(--qdz-grid);
   opacity: 0.35;
 }
 
-.qdz-quantum-rings .ring-3 {
-  inset: 24%;
-  animation-duration: 9s;
-  opacity: 0.25;
+.qdz-grid::before {
+  inset: 9%;
 }
 
-.qdz-tunnel .qdz-quantum-rings .ring {
-  animation-duration: 8s;
-  border-color: rgba(96, 165, 250, 0.45);
+.qdz-grid::after {
+  inset: 18%;
 }
 
-.qdz-collapse .qdz-quantum-rings .ring {
-  opacity: 0.2;
-}
-
-.qdz-decohere .qdz-quantum-rings .ring {
-  border-color: rgba(248, 113, 113, 0.35);
-}
-
-.qdz-quantum-particles {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.qdz-quantum-particles .particle {
+.qdz-focus {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: clamp(2px, 0.6vw, 5px);
-  height: clamp(2px, 0.6vw, 5px);
-  border-radius: 50%;
-  background: var(--qdz-particle);
-  opacity: 0;
-  transform: translate(-50%, -50%);
-  animation: particle-flow 12s linear infinite;
-  animation-delay: var(--delay);
-  filter: blur(0.35px);
-}
-
-.qdz-cloud .qdz-quantum-particles .particle {
-  animation-duration: 15s;
-}
-
-.qdz-tunnel .qdz-quantum-particles .particle {
-  animation-duration: 9s;
-}
-
-.qdz-collapse .qdz-quantum-particles .particle {
-  animation-duration: 6s;
-  opacity: 0.3;
-}
-
-.qdz-decohere .qdz-quantum-particles .particle {
-  background: rgba(248, 113, 113, 0.8);
-}
-
-.qdz-drag-sensor {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-}
-
-.qdz-drag-sensor .drag-orbit {
-  width: clamp(240px, 40vw, 320px);
+  width: clamp(200px, 36%, 320px);
   aspect-ratio: 1;
+  transform: translate(-50%, -50%);
   border-radius: 50%;
-  border: 1px dashed var(--qdz-orbit);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 0 50px rgba(15, 118, 226, 0.38);
+  transition: transform 0.4s ease, box-shadow 0.4s ease, opacity 0.4s ease;
+  opacity: 0.75;
+}
+
+.qdz-focus::after {
+  content: "";
+  position: absolute;
+  inset: 28%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--qdz-focus), transparent 72%);
+  box-shadow: 0 0 35px var(--qdz-focus);
   opacity: 0.55;
-  animation: orbit-pulse 5.5s ease-in-out infinite;
-  filter: blur(0.3px);
+  transition: opacity 0.4s ease;
 }
 
-.qdz.qdz-drag-active .drag-orbit {
-  border-style: solid;
+.qdz-focus[data-active="true"] {
+  transform: translate(-50%, -50%) scale(1.08);
+  box-shadow: 0 0 70px rgba(6, 182, 212, 0.48);
+  opacity: 1;
+}
+
+.qdz-focus[data-active="true"]::after {
   opacity: 0.9;
-  animation: orbit-active 1.5s ease-in-out infinite;
 }
 
-.qdz .electrons {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: clamp(240px, 40vw, 320px);
-  aspect-ratio: 1;
-  transform: translate(-50%, -50%);
+.qdz-static .qdz-focus {
+  opacity: 0.6;
+  box-shadow: 0 0 40px rgba(148, 163, 184, 0.35);
 }
 
-.qdz .electron {
-  position: absolute;
-  width: clamp(6px, 0.9vw, 9px);
-  height: clamp(6px, 0.9vw, 9px);
-  border-radius: 50%;
-  background: var(--qdz-highlight);
-  box-shadow: 0 0 16px var(--qdz-highlight);
-  animation: electron-orbit 6s linear infinite;
-  animation-delay: var(--delay);
-  filter: blur(0.2px);
+.qdz.qdz-drag-active:not(.is-disabled) {
+  box-shadow: 0 42px 120px rgba(56, 189, 248, 0.35);
+  transform: translateY(-6px) scale(1.01);
+  filter: saturate(1.25);
 }
 
-.qdz .electron-1 {
-  left: 50%;
-  top: 0%;
+.qdz.qdz-drag-active:not(.is-disabled) .qdz-halo-inner {
+  opacity: 0.92;
 }
 
-.qdz .electron-2 {
-  left: 100%;
-  top: 50%;
-}
-
-.qdz .electron-3 {
-  left: 50%;
-  top: 100%;
-}
-
-.qdz.qdz-drag-active .electron {
-  box-shadow: 0 0 22px rgba(255, 255, 255, 0.65);
-  background: rgba(224, 242, 254, 0.9);
+.qdz.qdz-drag-active:not(.is-disabled) .qdz-halo-outer {
+  opacity: 0.7;
+  transform: translate(-50%, -50%) scale(1.02);
 }
 
 .qdz--lan {
-  --qdz-bg: radial-gradient(circle at 25% 18%, rgba(34, 197, 94, 0.35), transparent 60%),
-    radial-gradient(circle at 72% 78%, rgba(74, 222, 128, 0.28), transparent 58%),
-    linear-gradient(170deg, rgba(10, 47, 26, 0.95), rgba(3, 18, 7, 0.9));
-  --qdz-glow: rgba(134, 239, 172, 0.9);
-  --qdz-highlight: rgba(163, 230, 53, 0.65);
-  --qdz-ring-color: rgba(190, 242, 100, 0.35);
-  --qdz-particle: rgba(202, 252, 203, 0.85);
-  --qdz-orbit: rgba(163, 230, 53, 0.36);
+  --qdz-primary: #6ff0c5;
+  --qdz-secondary: #14b8a6;
+  --qdz-halo-outer: rgba(111, 255, 213, 0.32);
+  --qdz-halo-inner: rgba(226, 255, 244, 0.45);
+  --qdz-grid: rgba(134, 239, 172, 0.26);
+  --qdz-focus: rgba(110, 231, 183, 0.7);
+  --qdz-halo-glow: rgba(110, 231, 183, 0.55);
+  background:
+    radial-gradient(circle at 30% 24%, rgba(45, 212, 191, 0.28), transparent 62%),
+    radial-gradient(circle at 68% 76%, rgba(134, 239, 172, 0.24), transparent 60%),
+    linear-gradient(175deg, rgba(4, 24, 16, 0.96), rgba(3, 12, 8, 0.92));
 }
 
 .qdz--relay {
-  --qdz-bg: radial-gradient(circle at 20% 22%, rgba(251, 191, 36, 0.38), transparent 60%),
-    radial-gradient(circle at 78% 68%, rgba(248, 113, 113, 0.28), transparent 62%),
-    linear-gradient(160deg, rgba(80, 28, 7, 0.95), rgba(37, 14, 2, 0.9));
-  --qdz-glow: rgba(254, 215, 170, 0.9);
-  --qdz-highlight: rgba(253, 224, 71, 0.65);
-  --qdz-ring-color: rgba(253, 224, 71, 0.32);
-  --qdz-particle: rgba(254, 240, 138, 0.85);
-  --qdz-orbit: rgba(248, 196, 113, 0.4);
+  --qdz-primary: #ff8de6;
+  --qdz-secondary: #fb7185;
+  --qdz-halo-outer: rgba(255, 141, 230, 0.32);
+  --qdz-halo-inner: rgba(255, 228, 248, 0.4);
+  --qdz-grid: rgba(248, 113, 113, 0.24);
+  --qdz-focus: rgba(251, 113, 133, 0.6);
+  --qdz-halo-glow: rgba(255, 141, 230, 0.5);
+  background:
+    radial-gradient(circle at 30% 24%, rgba(248, 113, 113, 0.32), transparent 64%),
+    radial-gradient(circle at 72% 72%, rgba(244, 114, 182, 0.28), transparent 62%),
+    linear-gradient(175deg, rgba(42, 7, 21, 0.96), rgba(18, 3, 11, 0.92));
 }
 
 .qdz--p2p {
-  --qdz-bg: radial-gradient(circle at 35% 15%, rgba(59, 130, 246, 0.35), transparent 60%),
-    radial-gradient(circle at 70% 80%, rgba(45, 212, 191, 0.32), transparent 58%),
-    linear-gradient(165deg, rgba(15, 23, 42, 0.95), rgba(4, 12, 24, 0.9));
-  --qdz-glow: rgba(94, 234, 212, 0.95);
-  --qdz-highlight: rgba(94, 234, 212, 0.65);
-  --qdz-ring-color: rgba(125, 211, 252, 0.32);
-  --qdz-particle: rgba(125, 211, 252, 0.85);
-  --qdz-orbit: rgba(59, 130, 246, 0.38);
-}
-
-.qdz-decohere {
-  filter: saturate(0.85) brightness(0.82);
-  box-shadow: 0 24px 70px rgba(180, 83, 9, 0.4);
-}
-
-.qdz-collapse {
-  box-shadow: 0 30px 90px rgba(253, 224, 71, 0.25);
+  --qdz-primary: #8fa4ff;
+  --qdz-secondary: #4f46e5;
+  --qdz-halo-outer: rgba(143, 164, 255, 0.3);
+  --qdz-halo-inner: rgba(231, 233, 255, 0.42);
+  --qdz-grid: rgba(165, 180, 252, 0.26);
+  --qdz-focus: rgba(129, 140, 248, 0.6);
+  --qdz-halo-glow: rgba(129, 140, 248, 0.5);
+  background:
+    radial-gradient(circle at 32% 20%, rgba(129, 140, 248, 0.3), transparent 60%),
+    radial-gradient(circle at 70% 76%, rgba(99, 102, 241, 0.25), transparent 62%),
+    linear-gradient(175deg, rgba(8, 7, 27, 0.98), rgba(3, 4, 16, 0.92));
 }
 
 .qdz-cloud {
-  box-shadow: 0 28px 80px rgba(34, 211, 238, 0.22);
+  filter: saturate(0.95);
 }
 
 .qdz-tunnel {
-  box-shadow: 0 34px 110px rgba(56, 189, 248, 0.35);
+  filter: saturate(1.18) brightness(1.05);
 }
 
-@keyframes singularity-pulse {
-  0%,
-  100% {
-    transform: translate(-50%, -50%) scale(0.95);
-    opacity: 0.85;
-  }
-  50% {
-    transform: translate(-50%, -50%) scale(1.1);
-    opacity: 1;
-  }
+.qdz-collapse {
+  filter: saturate(0.85) brightness(0.92);
 }
 
-@keyframes ring-rotate {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
+.qdz-decohere {
+  filter: hue-rotate(-12deg) saturate(0.95);
+  box-shadow: 0 26px 90px rgba(248, 113, 113, 0.38);
 }
 
-@keyframes particle-flow {
-  0% {
-    opacity: 0;
-    transform: translate(-50%, -50%) scale(var(--depth, 0.6));
-  }
-  15% {
-    opacity: 0.8;
-  }
-  60% {
-    opacity: 0.9;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(calc(var(--tx) + -50%), calc(var(--ty) + -50%)) scale(calc(var(--depth, 0.6) * 1.2));
-  }
-}
-
-@keyframes cloud-pulse {
-  0%,
-  100% {
-    transform: scale(0.95);
-    opacity: 0.55;
-  }
-  50% {
-    transform: scale(1.05);
-    opacity: 0.85;
-  }
-}
-
-@keyframes interference-wave {
-  0% {
-    transform: rotate(0deg) scale(1);
-  }
-  50% {
-    transform: rotate(180deg) scale(1.05);
-  }
-  100% {
-    transform: rotate(360deg) scale(1);
-  }
-}
-
-@keyframes orbit-pulse {
-  0%,
-  100% {
-    transform: scale(0.98);
-    opacity: 0.55;
-  }
-  50% {
-    transform: scale(1.02);
-    opacity: 0.75;
-  }
-}
-
-@keyframes orbit-active {
-  0%,
-  100% {
-    transform: scale(1.03);
-    opacity: 0.95;
-  }
-  50% {
-    transform: scale(1.07);
-    opacity: 1;
-  }
-}
-
-@keyframes electron-orbit {
-  0% {
-    transform: rotate(var(--offset, 0deg)) translateX(-50%) translateY(-50%);
-  }
-  100% {
-    transform: rotate(calc(var(--offset, 0deg) + 360deg)) translateX(-50%) translateY(-50%);
-  }
-}
-
-@keyframes collapse-spark {
-  0%,
-  100% {
-    transform: translate(-50%, -50%) scale(0.9);
-    opacity: 0.6;
-    box-shadow: 0 0 45px rgba(253, 224, 71, 0.35);
-  }
-  40% {
-    transform: translate(-50%, -50%) scale(1.08);
-    opacity: 1;
-    box-shadow: 0 0 140px rgba(253, 224, 71, 0.6);
-  }
-  70% {
-    transform: translate(-50%, -50%) scale(0.95);
-    opacity: 0.85;
-    box-shadow: 0 0 80px rgba(252, 211, 77, 0.5);
-  }
-}
-
-@keyframes quantum-photon-stream {
-  0% {
-    transform: rotate(0deg) scale(1.05);
-  }
-  50% {
-    transform: rotate(180deg) scale(1.12);
-  }
-  100% {
-    transform: rotate(360deg) scale(1.05);
-  }
-}
-
-@keyframes quantum-starlight {
-  0%,
-  100% {
-    opacity: 0.62;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.85;
-    transform: scale(1.05);
-  }
+.qdz-static .qdz-halo-inner,
+.qdz-static .qdz-halo-outer {
+  opacity: 0.6;
+  filter: blur(18px);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1337,13 +1562,13 @@ input[type="text"]::placeholder {
   .qt-starlight,
   .quantum-drag-zone,
   .qdz,
-  .qdz-singularity,
-  .qdz-quantum-rings .ring,
-  .qdz-quantum-particles .particle,
-  .qdz-wave-function .probability-cloud,
-  .qdz-wave-function .interference-pattern,
-  .qdz .electron,
-  .qdz-drag-sensor .drag-orbit {
+  .qdz-dot-surface,
+  .q3d-surface,
+  .qdz-halo,
+  .qdz-grid,
+  .qdz-focus,
+  .quantum-slider input[type="range"],
+  .quantum-animations-indicator {
     animation: none !important;
     transition: none !important;
   }
@@ -1352,7 +1577,11 @@ input[type="text"]::placeholder {
   }
   .qdz {
     transform: none !important;
-  filter: none !important;
+    filter: none !important;
+  }
+  .q3d-surface {
+    mix-blend-mode: normal;
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.82), rgba(15, 23, 42, 0.58));
   }
 }
 
@@ -1362,6 +1591,10 @@ input[type="text"]::placeholder {
   align-items: stretch;
   width: 100%;
   margin-top: 1.5rem;
+}
+
+.qdz-shell .qdz {
+  flex: 1;
 }
 
 .qdz-shell .qdz-icon-button {
@@ -1457,4 +1690,103 @@ input[type="text"]::placeholder {
   .panel-section {
     padding: 1.25rem;
   }
+}
+
+body,
+#root,
+.app-minimal {
+  background: #000 !important;
+}
+
+.wormhole-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  background: #000;
+}
+
+.app-minimal .app-header,
+.app-minimal .tabs,
+.app-minimal .card,
+.app-minimal .section-title {
+  display: none !important;
+}
+
+.actions-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+.actions-row .primary {
+  min-width: 160px;
+}
+
+.status-panel {
+  width: 100%;
+  max-width: 880px;
+  padding: 1.5rem 1.75rem;
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 16px 42px rgba(15, 23, 42, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.status-panel h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: rgba(226, 243, 255, 0.85);
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+
+.status-label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(148, 163, 184, 0.7);
+}
+
+.status-value {
+  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+  font-size: 0.95rem;
+  color: #e2f3ff;
+}
+
+.log-panel {
+  width: 100%;
+  max-width: 880px;
+  padding: 1.5rem 1.75rem;
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+  box-shadow: 0 16px 38px rgba(14, 165, 233, 0.25);
+  color: rgba(226, 243, 255, 0.82);
+}
+
+.log-panel h3 {
+  margin: 0 0 0.8rem;
+  font-size: 1.05rem;
+}
+
+.log-panel ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
 }

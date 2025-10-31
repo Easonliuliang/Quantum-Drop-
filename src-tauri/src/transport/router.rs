@@ -1,5 +1,6 @@
 use std::fs;
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::warn;
 use serde::Deserialize;
@@ -39,6 +40,7 @@ impl RouteKind {
 pub struct SelectedRoute {
     pub route: RouteKind,
     pub stream: Box<dyn TransportStream>,
+    pub attempt_notes: Vec<String>,
 }
 
 type AdapterHandle = Arc<dyn TransportAdapter>;
@@ -108,9 +110,6 @@ impl Router {
             preferred.push(RouteKind::MockLocal);
         }
 
-        #[cfg(not(feature = "transport-webrtc"))]
-        let _ = &stun;
-
         let mock: AdapterHandle = Arc::new(MockLocalAdapter::new());
 
         #[cfg(feature = "transport-quic")]
@@ -122,7 +121,12 @@ impl Router {
             }
         };
         #[cfg(not(feature = "transport-quic"))]
-        let lan: Option<AdapterHandle> = None;
+        let lan: Option<AdapterHandle> = {
+            if preferred.iter().any(|route| route == &RouteKind::Lan) {
+                warn!("transport-quic feature disabled; lan route unavailable");
+            }
+            None
+        };
 
         #[cfg(feature = "transport-webrtc")]
         let p2p: Option<AdapterHandle> = build_webrtc_adapter(&stun).map(|adapter| {
@@ -130,12 +134,23 @@ impl Router {
             handle
         });
         #[cfg(not(feature = "transport-webrtc"))]
-        let p2p: Option<AdapterHandle> = None;
+        let p2p: Option<AdapterHandle> = {
+            if preferred.iter().any(|route| route == &RouteKind::P2p) {
+                warn!("transport-webrtc feature disabled; p2p route unavailable");
+            }
+            let _ = &stun;
+            None
+        };
 
         #[cfg(feature = "transport-relay")]
         let relay_adapter: Option<AdapterHandle> = Some(Arc::new(RelayAdapter::new()));
         #[cfg(not(feature = "transport-relay"))]
-        let relay_adapter: Option<AdapterHandle> = None;
+        let relay_adapter: Option<AdapterHandle> = {
+            if preferred.iter().any(|route| route == &RouteKind::Relay) {
+                warn!("transport-relay feature disabled; relay route unavailable");
+            }
+            None
+        };
 
         #[cfg(feature = "transport-relay")]
         let relay_hint = relay
@@ -161,78 +176,156 @@ impl Router {
 
     pub async fn connect(&self, session: &SessionDesc) -> Result<SelectedRoute, TransportError> {
         let mut last_error: Option<TransportError> = None;
+        let mut attempt_notes: Vec<String> = Vec::new();
+        let mut attempted_real_route = false;
+
         for route in &self.preferred {
             match route {
                 RouteKind::Lan => {
                     if let Some(adapter) = &self.lan {
+                        attempted_real_route = true;
+                        let started = Instant::now();
                         match timeout(Duration::from_secs(3), adapter.connect(session)).await {
                             Ok(Ok(stream)) => {
+                                let elapsed_ms = started.elapsed().as_millis();
+                                attempt_notes.push(format!("lan success in {}ms", elapsed_ms));
                                 return Ok(SelectedRoute {
                                     route: RouteKind::Lan,
                                     stream,
-                                })
+                                    attempt_notes,
+                                });
                             }
-                            Ok(Err(err)) => last_error = Some(err),
+                            Ok(Err(err)) => {
+                                let elapsed_ms = started.elapsed().as_millis();
+                                let err_msg = err.to_string();
+                                attempt_notes
+                                    .push(format!("lan error after {}ms: {}", elapsed_ms, err_msg));
+                                last_error = Some(err);
+                            }
                             Err(_) => {
+                                let elapsed_ms = started.elapsed().as_millis();
+                                attempt_notes.push(format!("lan timeout after {}ms", elapsed_ms));
                                 last_error = Some(TransportError::Timeout(
                                     "lan route timed out after 3s".into(),
-                                ))
+                                ));
                             }
                         }
+                    } else {
+                        attempt_notes.push("lan adapter unavailable".into());
                     }
                 }
                 RouteKind::P2p => {
                     if let Some(adapter) = &self.p2p {
+                        attempted_real_route = true;
+                        let started = Instant::now();
                         match timeout(Duration::from_secs(6), adapter.connect(session)).await {
                             Ok(Ok(stream)) => {
+                                let elapsed_ms = started.elapsed().as_millis();
+                                attempt_notes.push(format!("p2p success in {}ms", elapsed_ms));
                                 return Ok(SelectedRoute {
                                     route: RouteKind::P2p,
                                     stream,
-                                })
+                                    attempt_notes,
+                                });
                             }
-                            Ok(Err(err)) => last_error = Some(err),
+                            Ok(Err(err)) => {
+                                let elapsed_ms = started.elapsed().as_millis();
+                                let err_msg = err.to_string();
+                                attempt_notes
+                                    .push(format!("p2p error after {}ms: {}", elapsed_ms, err_msg));
+                                last_error = Some(err);
+                            }
                             Err(_) => {
+                                let elapsed_ms = started.elapsed().as_millis();
+                                attempt_notes.push(format!("p2p timeout after {}ms", elapsed_ms));
                                 last_error = Some(TransportError::Timeout(
                                     "p2p route timed out after 6s".into(),
-                                ))
+                                ));
                             }
                         }
+                    } else {
+                        attempt_notes.push("p2p adapter unavailable".into());
                     }
                 }
-                RouteKind::Relay =>
-                {
+                RouteKind::Relay => {
                     #[cfg(feature = "transport-relay")]
-                    if let Some(relay) = &self.relay {
-                        let relay_session =
-                            session_with_relay_hint(session, self.relay_hint.as_ref());
-                        match timeout(Duration::from_secs(8), relay.connect(&relay_session)).await {
-                            Ok(Ok(stream)) => {
-                                return Ok(SelectedRoute {
-                                    route: RouteKind::Relay,
-                                    stream,
-                                })
+                    {
+                        if let Some(relay) = &self.relay {
+                            attempted_real_route = true;
+                            let started = Instant::now();
+                            let relay_session =
+                                session_with_relay_hint(session, self.relay_hint.as_ref());
+                            match timeout(Duration::from_secs(8), relay.connect(&relay_session))
+                                .await
+                            {
+                                Ok(Ok(stream)) => {
+                                    let elapsed_ms = started.elapsed().as_millis();
+                                    attempt_notes
+                                        .push(format!("relay success in {}ms", elapsed_ms));
+                                    return Ok(SelectedRoute {
+                                        route: RouteKind::Relay,
+                                        stream,
+                                        attempt_notes,
+                                    });
+                                }
+                                Ok(Err(err)) => {
+                                    let elapsed_ms = started.elapsed().as_millis();
+                                    let err_msg = err.to_string();
+                                    attempt_notes.push(format!(
+                                        "relay error after {}ms: {}",
+                                        elapsed_ms, err_msg
+                                    ));
+                                    last_error = Some(err);
+                                }
+                                Err(_) => {
+                                    let elapsed_ms = started.elapsed().as_millis();
+                                    attempt_notes
+                                        .push(format!("relay timeout after {}ms", elapsed_ms));
+                                    last_error = Some(TransportError::Timeout(
+                                        "relay route timed out after 8s".into(),
+                                    ));
+                                }
                             }
-                            Ok(Err(err)) => last_error = Some(err),
-                            Err(_) => {
-                                last_error = Some(TransportError::Timeout(
-                                    "relay route timed out after 8s".into(),
-                                ))
-                            }
+                        } else {
+                            attempt_notes.push("relay adapter unavailable".into());
                         }
                     }
+                    #[cfg(not(feature = "transport-relay"))]
+                    {
+                        let _ = session;
+                        attempt_notes.push("relay feature disabled".into());
+                    }
                 }
-                _ => {}
+                RouteKind::MockLocal => {
+                    attempt_notes.push("mock route pending fallback".into());
+                }
             }
         }
 
-        let stream = self
-            .mock
-            .connect(session)
-            .await
-            .map_err(|err| last_error.unwrap_or(err))?;
+        if attempted_real_route {
+            if let Some(err) = last_error.take() {
+                let summary = attempt_notes.join(" | ");
+                return Err(TransportError::Setup(format!(
+                    "all transport routes failed ({summary}); last error: {err}"
+                )));
+            }
+        }
+
+        let stream = match self.mock.connect(session).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                if let Some(previous) = last_error {
+                    return Err(previous);
+                }
+                return Err(err);
+            }
+        };
+
+        attempt_notes.push("mock fallback selected".into());
         Ok(SelectedRoute {
             route: RouteKind::MockLocal,
             stream,
+            attempt_notes,
         })
     }
 }
@@ -434,16 +527,21 @@ mod tests {
     use tokio::runtime::Runtime;
     use tokio::time::{sleep, Duration as TestDuration};
 
-    #[cfg(feature = "transport-quic")]
     #[test]
     fn prefers_quic_for_lan_route() {
         let rt = Runtime::new().expect("runtime");
         rt.block_on(async {
-            let router = Router::new(vec![RouteKind::Lan]);
+            let mut router = Router::new(vec![RouteKind::Lan, RouteKind::P2p]);
+            router.lan = Some(Arc::new(StubAdapter::success(TestDuration::from_millis(1))));
+            router.p2p = Some(Arc::new(StubAdapter::success(TestDuration::from_millis(10))));
+
             let session = SessionDesc::new("router-quic");
-            let selection = router.connect(&session).await.expect("connect");
-            assert_eq!(selection.route, RouteKind::Lan);
-            let mut stream = selection.stream;
+            let SelectedRoute {
+                route,
+                mut stream,
+                ..
+            } = router.connect(&session).await.expect("connect lan");
+            assert_eq!(route, RouteKind::Lan);
             stream.close().await.expect("close");
         });
     }
@@ -495,8 +593,11 @@ mod tests {
             ))));
 
             let session = SessionDesc::new("timeout-test");
-            let SelectedRoute { route, mut stream } =
-                router.connect(&session).await.expect("connect fallback");
+            let SelectedRoute {
+                route,
+                mut stream,
+                ..
+            } = router.connect(&session).await.expect("connect fallback");
             assert_eq!(route, RouteKind::P2p);
             stream.close().await.expect("close");
         });
@@ -520,10 +621,68 @@ mod tests {
             router.relay_hint = Some(default_local_relay_hint());
 
             let session = SessionDesc::new("relay-fallback");
-            let SelectedRoute { route, mut stream } =
-                router.connect(&session).await.expect("connect relay");
+            let SelectedRoute {
+                route,
+                mut stream,
+                ..
+            } = router.connect(&session).await.expect("connect relay");
             assert_eq!(route, RouteKind::Relay);
             stream.close().await.expect("close");
+        });
+    }
+
+    #[test]
+    fn attempt_notes_capture_failures_before_success() {
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut router = Router::new(vec![RouteKind::Lan, RouteKind::P2p]);
+            router.lan = Some(Arc::new(StubAdapter::failure(
+                "lan failure",
+                TestDuration::from_millis(5),
+            )));
+            router.p2p = Some(Arc::new(StubAdapter::success(TestDuration::from_millis(1))));
+
+            let session = SessionDesc::new("attempt-notes-success");
+            let SelectedRoute {
+                route,
+                mut stream,
+                attempt_notes,
+            } = router.connect(&session).await.expect("connect");
+            assert_eq!(route, RouteKind::P2p);
+            assert!(attempt_notes.iter().any(|note| note.contains("lan failure")));
+            assert!(attempt_notes.iter().any(|note| note.contains("p2p success")));
+            stream.close().await.expect("close");
+        });
+    }
+
+    #[test]
+    fn attempt_notes_included_in_error_summary() {
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut router = Router::new(vec![RouteKind::Lan, RouteKind::P2p]);
+            router.lan = Some(Arc::new(StubAdapter::failure(
+                "lan failure",
+                TestDuration::from_millis(2),
+            )));
+            router.p2p = Some(Arc::new(StubAdapter::failure(
+                "p2p failure",
+                TestDuration::from_millis(2),
+            )));
+
+            let session = SessionDesc::new("attempt-notes-error");
+            let err = match router.connect(&session).await {
+                Ok(success) => {
+                    panic!("expected failure, got route {:?}", success.route);
+                }
+                Err(err) => err,
+            };
+            match err {
+                TransportError::Setup(message) => {
+                    assert!(message.contains("lan failure"));
+                    assert!(message.contains("p2p failure"));
+                }
+                other => panic!("unexpected error variant: {other:?}"),
+            }
         });
     }
 }

@@ -7,6 +7,22 @@ fn default_true() -> bool {
     true
 }
 
+fn default_intensity() -> u8 {
+    2
+}
+
+fn default_speed() -> f32 {
+    1.0
+}
+
+fn default_quality() -> String {
+    "medium".to_string()
+}
+
+fn default_fps() -> u16 {
+    60
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerateCodeResponse {
     pub task_id: String,
@@ -156,6 +172,22 @@ pub struct SettingsPayload {
     pub quantum_mode: bool,
     #[serde(default = "default_true")]
     pub minimal_quantum_ui: bool,
+    #[serde(default = "default_intensity")]
+    pub quantum_intensity: u8,
+    #[serde(default = "default_speed")]
+    pub quantum_speed: f32,
+    #[serde(default = "default_true", rename = "animationsEnabled")]
+    pub animations_enabled: bool,
+    #[serde(default = "default_true", rename = "audioEnabled")]
+    pub audio_enabled: bool,
+    #[serde(default = "default_true", rename = "enable3DQuantum")]
+    pub enable3d_quantum: bool,
+    #[serde(default = "default_quality", rename = "quantum3DQuality")]
+    pub quantum3d_quality: String,
+    #[serde(default = "default_fps", rename = "quantum3DFps")]
+    pub quantum3d_fps: u16,
+    #[serde(default = "default_true", rename = "wormholeMode")]
+    pub wormhole_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -14,9 +14,7 @@ use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
 use tokio::time::{sleep, timeout};
 
 use crate::{
-    attestation::{
-        compute_file_attestation, write_proof_of_transition, ProofOfTransition,
-    },
+    attestation::{compute_file_attestation, write_proof_of_transition, ProofOfTransition},
     config::{AdaptiveChunkPolicy, ConfigStore, RuntimeSettings},
     crypto,
     resume::{derive_chunk_size, ChunkCatalog, ResumeStore},
@@ -27,7 +25,7 @@ use crate::{
 
 use state::{TrackedFile, TransferTask};
 use types::{
-    ChunkPolicyPayload, CommandError, ExportPotResponse, GenerateCodeResponse,
+    ChunkPolicyPayload, CommandError, ErrorCode, ExportPotResponse, GenerateCodeResponse,
     P2pSmokeTestResponse, ResumeProgressDto, SettingsPayload, TaskResponse, TransferDirection,
     TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute, TransferStatus,
     TransferSummary, VerifyPotResponse,
@@ -194,25 +192,23 @@ pub async fn courier_resume(
         existing.status,
         TransferStatus::Completed | TransferStatus::Cancelled
     ) {
-        return Err(CommandError::invalid(
-            "Transfer already finalised",
-        ));
+        return Err(CommandError::invalid("Transfer already finalised"));
     }
-    state
-        .set_status(&task_id, TransferStatus::Pending)
-        .await;
+    state.set_status(&task_id, TransferStatus::Pending).await;
     spawn_transfer_runner(&app, state.inner().clone(), task_id.clone());
     Ok(TaskResponse { task_id })
 }
 
 #[tauri::command]
-pub async fn courier_p2p_smoke_test(
-    app: AppHandle,
-) -> Result<P2pSmokeTestResponse, CommandError> {
+pub async fn courier_p2p_smoke_test(app: AppHandle) -> Result<P2pSmokeTestResponse, CommandError> {
     let router = Router::p2p_only(&app);
     let session = SessionDesc::new("p2p-smoke-test");
 
-    let SelectedRoute { route, mut stream } = router
+    let SelectedRoute {
+        route,
+        mut stream,
+        ..
+    } = router
         .connect(&session)
         .await
         .map_err(|err| CommandError::route_unreachable(format!("p2p connect failed: {err}")))?;
@@ -249,8 +245,7 @@ pub async fn courier_p2p_smoke_test(
     }
 
     stream.close().await.ok();
-    let echoed =
-        echoed.ok_or_else(|| CommandError::route_unreachable("p2p echo missing"))?;
+    let echoed = echoed.ok_or_else(|| CommandError::route_unreachable("p2p echo missing"))?;
 
     Ok(P2pSmokeTestResponse {
         route: route.label().to_string(),
@@ -275,12 +270,13 @@ pub async fn courier_relay_smoke_test(
         let router = Router::new(vec![RouteKind::Relay]);
         let session = SessionDesc::new("relay-smoke-test");
 
-        let SelectedRoute { route, mut stream } = router
-            .connect(&session)
-            .await
-            .map_err(|err| {
-                CommandError::route_unreachable(format!("relay connect failed: {err}"))
-            })?;
+        let SelectedRoute {
+            route,
+            mut stream,
+            ..
+        } = router.connect(&session).await.map_err(|err| {
+            CommandError::route_unreachable(format!("relay connect failed: {err}"))
+        })?;
 
         if route != RouteKind::Relay {
             stream.close().await.ok();
@@ -321,8 +317,7 @@ pub async fn courier_relay_smoke_test(
         }
 
         stream.close().await.ok();
-        let echoed =
-            echoed.ok_or_else(|| CommandError::route_unreachable("relay echo missing"))?;
+        let echoed = echoed.ok_or_else(|| CommandError::route_unreachable("relay echo missing"))?;
 
         Ok(P2pSmokeTestResponse {
             route: route.label().to_string(),
@@ -343,9 +338,7 @@ pub async fn export_pot(
         .map_err(|err| CommandError::from_io(&err, "failed to prepare proofs directory"))?;
 
     let maybe_task = state.get_task(&task_id).await;
-    let mut source_path = maybe_task
-        .as_ref()
-        .and_then(|task| task.pot_path.clone());
+    let mut source_path = maybe_task.as_ref().and_then(|task| task.pot_path.clone());
 
     if source_path.is_none() {
         let record = store
@@ -355,8 +348,8 @@ pub async fn export_pot(
         source_path = record.pot_path.map(PathBuf::from);
     }
 
-    let source_path =
-        source_path.ok_or_else(|| CommandError::invalid("Proof of Transition not yet available"))?;
+    let source_path = source_path
+        .ok_or_else(|| CommandError::invalid("Proof of Transition not yet available"))?;
     if !source_path.exists() {
         return Err(CommandError::verify_failed(format!(
             "PoT artefact missing at {}",
@@ -375,9 +368,7 @@ pub async fn export_pot(
     }
 
     if let Some(task) = maybe_task {
-        state
-            .set_pot_path(&task.task_id, destination.clone())
-            .await;
+        state.set_pot_path(&task.task_id, destination.clone()).await;
     }
 
     Ok(ExportPotResponse {
@@ -394,9 +385,8 @@ pub async fn verify_pot(pot_path: String) -> Result<VerifyPotResponse, CommandEr
 
     let file = fs::File::open(&path)
         .map_err(|err| CommandError::from_io(&err, "failed to open PoT file"))?;
-    let proof: ProofOfTransition = serde_json::from_reader(file).map_err(|err| {
-        CommandError::verify_failed(format!("invalid PoT JSON payload: {err}"))
-    })?;
+    let proof: ProofOfTransition = serde_json::from_reader(file)
+        .map_err(|err| CommandError::verify_failed(format!("invalid PoT JSON payload: {err}")))?;
 
     let reason = validate_proof(&proof);
     Ok(VerifyPotResponse {
@@ -426,6 +416,14 @@ pub fn update_settings(
         },
         quantum_mode: payload.quantum_mode,
         minimal_quantum_ui: payload.minimal_quantum_ui,
+        quantum_intensity: payload.quantum_intensity,
+        quantum_speed: payload.quantum_speed,
+        animations_enabled: payload.animations_enabled,
+        audio_enabled: payload.audio_enabled,
+        enable_3d_quantum: payload.enable3d_quantum,
+        quantum_3d_quality: payload.quantum3d_quality.clone(),
+        quantum_3d_fps: payload.quantum3d_fps,
+        wormhole_mode: payload.wormhole_mode,
     };
     let updated = config.update(runtime).map_err(CommandError::from)?;
     Ok(to_settings_payload(updated))
@@ -470,6 +468,14 @@ fn to_settings_payload(settings: RuntimeSettings) -> SettingsPayload {
         },
         quantum_mode: settings.quantum_mode,
         minimal_quantum_ui: settings.minimal_quantum_ui,
+        quantum_intensity: settings.quantum_intensity,
+        quantum_speed: settings.quantum_speed,
+        animations_enabled: settings.animations_enabled,
+        audio_enabled: settings.audio_enabled,
+        enable3d_quantum: settings.enable_3d_quantum,
+        quantum3d_quality: settings.quantum_3d_quality,
+        quantum3d_fps: settings.quantum_3d_fps,
+        wormhole_mode: settings.wormhole_mode,
     }
 }
 
@@ -539,6 +545,53 @@ mod tests {
     }
 
     #[test]
+    fn settings_round_trip_preserves_wormhole_flags() {
+        let runtime = RuntimeSettings {
+            enable_3d_quantum: false,
+            quantum_3d_quality: "high".into(),
+            quantum_3d_fps: 45,
+            animations_enabled: false,
+            audio_enabled: false,
+            wormhole_mode: false,
+            ..RuntimeSettings::default()
+        };
+        let payload = super::to_settings_payload(runtime.clone());
+        assert!(!payload.enable3d_quantum);
+        assert_eq!(payload.quantum3d_quality, "high");
+        assert_eq!(payload.quantum3d_fps, 45);
+        assert!(!payload.animations_enabled);
+        assert!(!payload.audio_enabled);
+        assert!(!payload.wormhole_mode);
+
+        let reconstructed = RuntimeSettings {
+            preferred_routes: payload.preferred_routes.clone(),
+            code_expire_sec: payload.code_expire_sec,
+            relay_enabled: payload.relay_enabled,
+            chunk_policy: AdaptiveChunkPolicy {
+                enabled: payload.chunk_policy.adaptive,
+                min_bytes: payload.chunk_policy.min_bytes,
+                max_bytes: payload.chunk_policy.max_bytes,
+            },
+            quantum_mode: payload.quantum_mode,
+            minimal_quantum_ui: payload.minimal_quantum_ui,
+            quantum_intensity: payload.quantum_intensity,
+            quantum_speed: payload.quantum_speed,
+            animations_enabled: payload.animations_enabled,
+            audio_enabled: payload.audio_enabled,
+            enable_3d_quantum: payload.enable3d_quantum,
+            quantum_3d_quality: payload.quantum3d_quality.clone(),
+            quantum_3d_fps: payload.quantum3d_fps,
+            wormhole_mode: payload.wormhole_mode,
+        };
+        assert!(!reconstructed.enable_3d_quantum);
+        assert!(!reconstructed.animations_enabled);
+        assert!(!reconstructed.audio_enabled);
+        assert!(!reconstructed.wormhole_mode);
+        assert_eq!(reconstructed.quantum_3d_quality, "high");
+        assert_eq!(reconstructed.quantum_3d_fps, 45);
+    }
+
+    #[test]
     fn validate_proof_accepts_valid_payload() {
         let proof = sample_proof();
         assert!(validate_proof(&proof).is_none());
@@ -568,12 +621,12 @@ mod tests {
     #[test]
     fn verify_pot_command_flags_invalid_json() {
         let mut temp = NamedTempFile::new().expect("temp file");
-        write!(temp, "{}").expect("write invalid json");
+        write!(temp, "{{}}").expect("write invalid json");
         let path = temp.path().display().to_string();
         let result = tauri::async_runtime::block_on(verify_pot(path));
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert_eq!(err.code, ErrorCode::E_VERIFY_FAIL);
+        assert_eq!(err.code, ErrorCode::EVerifyFail);
     }
 
     #[test]
@@ -594,7 +647,10 @@ mod tests {
         let result = tauri::async_runtime::block_on(verify_pot(path));
         let response = result.expect("command response");
         assert!(!response.valid);
-        assert!(response.reason.unwrap_or_default().contains("No attested files"));
+        assert!(response
+            .reason
+            .unwrap_or_default()
+            .contains("No attested files"));
     }
 }
 
@@ -611,7 +667,21 @@ fn spawn_transfer_runner(app: &AppHandle, state: SharedState, task_id: String) {
         )
         .await
         {
-            let error_message = err.to_string();
+            let error = err;
+            let error_code = error.code.clone();
+            let error_message = error.message.clone();
+            let display_message = match error_code {
+                ErrorCode::EUnknown => error_message.clone(),
+                _ => format!("{} ({:?})", error_message, error_code),
+            };
+            emit_log(
+                &app_handle,
+                &task_id_clone,
+                format!(
+                    "Transfer failed with code {:?}: {}",
+                    error_code, error_message
+                ),
+            );
             let updated = state_clone
                 .set_status(&task_id_clone, TransferStatus::Failed)
                 .await;
@@ -635,7 +705,7 @@ fn spawn_transfer_runner(app: &AppHandle, state: SharedState, task_id: String) {
                     bytes_total: None,
                     speed_bps: None,
                     route: None,
-                    message: Some(error_message.clone()),
+                    message: Some(display_message.clone()),
                     resume: None,
                 },
             );
@@ -646,18 +716,22 @@ fn spawn_transfer_runner(app: &AppHandle, state: SharedState, task_id: String) {
                     task_id: task_id_clone,
                     direction,
                     code: None,
-                    message: Some(error_message),
+                    message: Some(display_message),
                 },
             );
         }
     });
 }
 
-async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) -> Result<()> {
+async fn simulate_transfer(
+    app: AppHandle,
+    state: SharedState,
+    task_id: String,
+) -> Result<(), CommandError> {
     let task = state
         .get_task(&task_id)
         .await
-        .ok_or_else(|| anyhow!("transfer task not found"))?;
+        .ok_or_else(CommandError::not_found)?;
 
     emit_log(
         &app,
@@ -725,22 +799,31 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
     let SelectedRoute {
         route: selected_route,
         mut stream,
-    } = router
-        .connect(&session)
-        .await
-        .map_err(|err| anyhow!("transport selection failed: {err}"))?;
+        attempt_notes,
+    } = router.connect(&session).await.map_err(|err| {
+        CommandError::route_unreachable(format!("transport selection failed: {err}"))
+    })?;
     emit_log(
         &app,
         &task_id,
         format!("Selected transport route {}", selected_route.label()),
     );
     let route = TransferRoute::from(selected_route.clone());
+    for note in &attempt_notes {
+        emit_log(
+            &app,
+            &task_id,
+            format!("Route attempt · {}", note),
+        );
+    }
 
     let handshake_start = Instant::now();
     stream
         .send(Frame::Control("handshake".into()))
         .await
-        .map_err(|err| anyhow!("transport handshake failed: {err}"))?;
+        .map_err(|err| {
+            CommandError::route_unreachable(format!("transport handshake failed: {err}"))
+        })?;
     let handshake_elapsed = match stream.recv().await {
         Ok(frame) => {
             let elapsed = handshake_start.elapsed();
@@ -783,12 +866,16 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
         total_bytes = MOCK_RECEIVE_FILE_SIZE;
     }
     let settings = app.state::<ConfigStore>().get();
-    let weak_network =
-        matches!(selected_route, RouteKind::Relay) || handshake_elapsed > Duration::from_millis(250);
-    let suggested_chunk =
-        derive_chunk_size(&settings.chunk_policy, &selected_route, handshake_elapsed, weak_network);
-    let resume_store = ResumeStore::from_app(&app)?;
-    let mut catalog = match resume_store.load(&task_id)? {
+    let weak_network = matches!(selected_route, RouteKind::Relay)
+        || handshake_elapsed > Duration::from_millis(250);
+    let suggested_chunk = derive_chunk_size(
+        &settings.chunk_policy,
+        &selected_route,
+        handshake_elapsed,
+        weak_network,
+    );
+    let resume_store = ResumeStore::from_app(&app).map_err(CommandError::from)?;
+    let mut catalog = match resume_store.load(&task_id).map_err(CommandError::from)? {
         Some(mut existing) => {
             existing.reconcile_total_bytes(total_bytes);
             if existing.chunk_size != suggested_chunk {
@@ -805,7 +892,9 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
         }
         None => {
             let created = ChunkCatalog::new(total_bytes, suggested_chunk);
-            resume_store.store(&task_id, &created)?;
+            resume_store
+                .store(&task_id, &created)
+                .map_err(CommandError::from)?;
             emit_log(
                 &app,
                 &task_id,
@@ -850,8 +939,7 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
                 task_id: task_id.clone(),
                 phase: TransferPhase::Transferring,
                 progress: Some(
-                    (0.25 + (acknowledged_bytes as f32 / bytes_total as f32) * 0.5)
-                        .min(0.75),
+                    (0.25 + (acknowledged_bytes as f32 / bytes_total as f32) * 0.5).min(0.75),
                 ),
                 bytes_sent: Some(acknowledged_bytes),
                 bytes_total: Some(bytes_total),
@@ -879,9 +967,11 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
         stream
             .send(Frame::Data(payload))
             .await
-            .map_err(|err| anyhow!("transport failed: {err}"))?;
+            .map_err(|err| CommandError::route_unreachable(format!("transport failed: {err}")))?;
         catalog.mark_received(*chunk_index);
-        resume_store.store(&task_id, &catalog)?;
+        resume_store
+            .store(&task_id, &catalog)
+            .map_err(CommandError::from)?;
         acknowledged_bytes = acknowledged_bytes
             .saturating_add(chunk_len)
             .min(bytes_total);
@@ -933,7 +1023,9 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
     stream.close().await.ok();
 
     if matches!(task.direction, TransferDirection::Receive) {
-        tracked_files = materialise_mock_payload(&tracked_files).await?;
+        tracked_files = materialise_mock_payload(&tracked_files)
+            .await
+            .map_err(CommandError::from)?;
         let updated_files = tracked_files.clone();
         state
             .update_task(&task_id, |task| {
@@ -959,15 +1051,20 @@ async fn simulate_transfer(app: AppHandle, state: SharedState, task_id: String) 
 
     let mut attestations = Vec::new();
     for tracked in &tracked_files {
-        let attestation = compute_file_attestation(&tracked.path)
-            .with_context(|| format!("unable to attest file {}", tracked.path.display()))?;
+        let attestation = compute_file_attestation(&tracked.path).map_err(|err| {
+            CommandError::from(anyhow!(
+                "unable to attest file {}: {err}",
+                tracked.path.display()
+            ))
+        })?;
         attestations.push(attestation);
     }
 
-    let proofs_dir = default_proofs_dir(&app)?;
+    let proofs_dir = default_proofs_dir(&app).map_err(CommandError::from)?;
     let route_label_str = route_label(&route).to_string();
     let pot_path =
-        write_proof_of_transition(&task_id, &attestations, &route_label_str, &proofs_dir)?;
+        write_proof_of_transition(&task_id, &attestations, &route_label_str, &proofs_dir)
+            .map_err(CommandError::from)?;
     state.set_pot_path(&task_id, pot_path.clone()).await;
     if let Some(task_snapshot) = state.set_status(&task_id, TransferStatus::Completed).await {
         persist_transfer_snapshot(
