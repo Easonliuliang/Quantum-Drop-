@@ -23,30 +23,34 @@
     </filter>
     <!-- 使用圆角矩形作为剪裁区域，模拟 macOS 的图标轮廓（近似 squircle） -->
     <clipPath id="clip">
-      <rect x="0" y="0" width="1024" height="1024" rx="220" ry="220"/>
+      <!-- 近似 macOS Big Sur 图标圆角：1024 基准下约 196px -->
+      <rect x="0" y="0" width="1024" height="1024" rx="196" ry="196"/>
     </clipPath>
   </defs>
 
   <!-- 透明画布，保证四角透明 -->
   <g clip-path="url(#clip)">
-    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <!-- 统一缩放到 86%，避免视觉上偏大 -->
+    <g transform="translate(512 512) scale(0.86) translate(-512 -512)">
+      <rect width="1024" height="1024" fill="url(#bg)"/>
 
-    <!-- 顶部柔光区域 -->
-    <g opacity="0.55">
-      <path d="M0,0 H1024 V380 C780,460 244,460 0,380 Z" fill="url(#sheen)"/>
+      <!-- 顶部柔光区域（随缩放） -->
+      <g opacity="0.55">
+        <path d="M0,0 H1024 V380 C780,460 244,460 0,380 Z" fill="url(#sheen)"/>
+      </g>
+
+      <!-- 量子环 -->
+      <g filter="url(#glow)">
+        <circle cx="512" cy="560" r="330" fill="none" stroke="#38BDF85D" stroke-width="9"/>
+        <circle cx="512" cy="560" r="270" fill="none" stroke="#38BDF8" stroke-width="11"/>
+        <circle cx="512" cy="560" r="210" fill="none" stroke="#38BDF8BF" stroke-width="13"/>
+      </g>
+
+      <!-- 内部柔光核心 -->
+      <circle cx="512" cy="560" r="150" fill="#38BDF81F" filter="url(#glow)"/>
     </g>
-
-    <!-- 量子环 -->
-    <g filter="url(#glow)">
-      <circle cx="512" cy="560" r="330" fill="none" stroke="#38BDF85D" stroke-width="9"/>
-      <circle cx="512" cy="560" r="270" fill="none" stroke="#38BDF8" stroke-width="11"/>
-      <circle cx="512" cy="560" r="210" fill="none" stroke="#38BDF8BF" stroke-width="13"/>
-    </g>
-
-    <!-- 内部柔光核心 -->
-    <circle cx="512" cy="560" r="150" fill="#38BDF81F" filter="url(#glow)"/>
   </g>
 
   <!-- 外边沿轻微内描边，增添立体感（不影响透明角） -->
-  <rect x="3" y="3" width="1018" height="1018" rx="216" ry="216" fill="none" stroke="#60A5FA20" stroke-width="6"/>
+  <rect x="3" y="3" width="1018" height="1018" rx="192" ry="192" fill="none" stroke="#60A5FA1A" stroke-width="6"/>
 </svg>
