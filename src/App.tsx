@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getPublicKey, sign as signEd25519, utils as ed25519Utils, etc as ed25519Etc } from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha2.js";
 import { listen as listenTauri } from "@tauri-apps/api/event";
-import { appWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   loadIdentity,
   loadLastIdentityId,
@@ -810,9 +810,9 @@ export default function App(): JSX.Element {
     };
   }, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, sendHeartbeat]);
 
-  // 监听 Tauri 系统拖拽（包含绝对路径）——优先 appWindow.onFileDropEvent，其次事件总线，再退全局注入
+  // 监听 Tauri 系统拖拽（包含绝对路径）——优先 webview.onDragDropEvent，其次事件总线，再退全局注入
   useEffect(() => {
-    if (!detectTauri()) return;
+    if (!isTauri) return;
     const unlisteners: Array<() => void | Promise<void>> = [];
 
     const handler = (evt: { payload: string[] }) => {
@@ -840,16 +840,22 @@ export default function App(): JSX.Element {
     };
 
     (async () => {
-      // 1. appWindow.onFileDropEvent（提供 drop 类型与绝对路径）
+      // 1. webview.onDragDropEvent（提供 drop 类型与绝对路径）
       try {
-        const off = await appWindow.onFileDropEvent((event) => {
-          if (event?.payload?.type === "drop") {
+        const off = await getCurrentWebview().onDragDropEvent((event) => {
+          const t = event?.payload?.type;
+          if (t === "enter" || t === "over") {
+            setHovered(true);
+          } else if (t === "leave") {
+            setHovered(false);
+          } else if (t === "drop") {
+            setHovered(false);
             handler({ payload: event.payload.paths ?? [] });
           }
         });
-        unlisteners.push(() => off?.());
+        unlisteners.push(off);
       } catch (err) {
-        console.warn("appWindow.onFileDropEvent failed", err);
+        console.warn("webview.onDragDropEvent failed", err);
       }
 
       // 2. 事件总线
@@ -887,7 +893,7 @@ export default function App(): JSX.Element {
         }
       });
     };
-  }, [identity, identityPrivateKey, activeDeviceId, devices, isSending]);
+  }, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, isSending]);
 
   // 保险：在 Tauri 环境里，系统级拖拽可能不触发 DOM onDrop。
   // 用全局 dragenter/dragleave 保证至少出现一次吸入动效，提升反馈感知。
