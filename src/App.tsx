@@ -308,6 +308,7 @@ export default function App(): JSX.Element {
   const [info, setInfo] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [absorbing, setAbsorbing] = useState(false);
+  const beginTransferRef = useRef<(pathsOverride?: string[]) => void>();
   const heartbeatTimerRef = useRef<number | null>(null);
   const heartbeatCapabilities = useMemo(() => ["ui:minimal-panel"], []);
   const deviceStatusOptions = useMemo(() => ["active", "standby", "inactive"], []);
@@ -807,6 +808,43 @@ export default function App(): JSX.Element {
     };
   }, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, sendHeartbeat]);
 
+  // 监听 Tauri 的系统文件拖拽（包含绝对路径），吸入动效 + 可自动发送
+  useEffect(() => {
+    if (!detectTauri()) return;
+    const tauri = getTauri();
+    const listen = tauri?.event?.listen as
+      | (<T>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>)
+      | undefined;
+    if (!listen) return;
+    let unlisten: (() => void) | null = null;
+    listen<string[]>("tauri://file-drop", (evt) => {
+      const paths = (evt?.payload ?? []).filter((v) => typeof v === "string");
+      if (paths.length === 0) return;
+      const displayFiles = paths.map<SelectedFile>((path) => {
+        const parts = path.split(/[/\\]/);
+        const name = parts[parts.length - 1] ?? path;
+        return { name, path };
+      });
+      setFiles(displayFiles);
+      setPendingPaths(paths);
+      setTaskId(null);
+      setTaskCode(null);
+      setProgress(null);
+      setLogs([]);
+      setAbsorbing(true);
+      window.setTimeout(() => setAbsorbing(false), 900);
+      const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
+      if (canAuto && !isSending) {
+        window.setTimeout(() => {
+          beginTransferRef.current?.(paths);
+        }, 220);
+      }
+    }).then((fn) => (unlisten = fn));
+    return () => {
+      try { unlisten?.(); } catch {}
+    };
+  }, [identity, identityPrivateKey, activeDeviceId, devices, isSending]);
+
   useEffect(() => {
     if (!identity) {
       return;
@@ -880,8 +918,7 @@ export default function App(): JSX.Element {
         const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
         if (canAuto && !isSending) {
           window.setTimeout(() => {
-            // 兼容类型
-            void beginTransfer(normalized as unknown as string[]);
+            beginTransferRef.current?.(normalized as unknown as string[]);
           }, 220);
         }
       } else {
@@ -907,7 +944,9 @@ export default function App(): JSX.Element {
     setTaskCode(null);
     setProgress(null);
     setLogs([]);
-    setInfo("浏览器模式仅展示 UI，传输需在 Tauri 桌面环境运行。");
+    // 仅播放吸入动效（input 回退场景无法拿到绝对路径，不自动发送）
+    setAbsorbing(true);
+    window.setTimeout(() => setAbsorbing(false), 900);
   };
 
   const humanSpeed = useMemo(() => {
@@ -990,6 +1029,10 @@ export default function App(): JSX.Element {
       setIsSending(false);
     }
   }, [appendLog, pendingPaths, identity, devices, activeDeviceId, signPurpose]);
+
+  useEffect(() => {
+    beginTransferRef.current = beginTransfer;
+  }, [beginTransfer]);
 
   const handleCopy = useCallback(
     async (field: string, value: string) => {
@@ -1223,6 +1266,14 @@ export default function App(): JSX.Element {
           <span className="ring ring-middle" />
           <span className="ring ring-inner" />
         </div>
+        <div className="absorb-particles" aria-hidden="true">
+          <span className="p p1" />
+          <span className="p p2" />
+          <span className="p p3" />
+          <span className="p p4" />
+          <span className="p p5" />
+          <span className="p p6" />
+        </div>
         <div className="cta">
           <h1>Quantum Drop</h1>
           <p>拖拽或选择文件，启动 Courier Agent 的模拟传输流程。</p>
@@ -1256,7 +1307,7 @@ export default function App(): JSX.Element {
               <button
                 className="primary"
                 type="button"
-                onClick={beginTransfer}
+                onClick={() => beginTransferRef.current?.()}
                 disabled={pendingPaths.length === 0 || isSending}
               >
                 {isSending ? "启动中…" : "启动传输"}

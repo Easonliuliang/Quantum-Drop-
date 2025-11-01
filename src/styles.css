@@ -104,6 +104,37 @@ body {
   100% { transform: scale(1.35); opacity: 0; }
 }
 
+/* 粒子向心流（极简版） */
+.absorb-particles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.absorb-particles .p {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(56,189,248,0.8) 55%, rgba(56,189,248,0.2) 100%);
+  opacity: 0;
+}
+.dropzone.is-absorbing .absorb-particles .p {
+  animation: particle-move 0.9s cubic-bezier(.25,.9,.3,1) forwards;
+}
+.absorb-particles .p1 { left: 18%; top: 28%; }
+.absorb-particles .p2 { left: 82%; top: 32%; animation-delay: .04s; }
+.absorb-particles .p3 { left: 26%; top: 70%; animation-delay: .08s; }
+.absorb-particles .p4 { left: 74%; top: 76%; animation-delay: .12s; }
+.absorb-particles .p5 { left: 40%; top: 18%; animation-delay: .16s; }
+.absorb-particles .p6 { left: 62%; top: 84%; animation-delay: .2s; }
+
+@keyframes particle-move {
+  0% { opacity: .95; transform: translate(-50%,-50%) scale(1); filter: blur(0); }
+  70% { opacity: .9; }
+  100% { left: 50%; top: 50%; opacity: 0; transform: translate(-50%,-50%) scale(.25); filter: blur(2px); }
+}
+
 .dropzone:focus {
   outline: none;
   border-color: rgba(56, 189, 248, 0.7);
