@@ -22,6 +22,20 @@ The tunnel transitions through three distinct moments:
 
 Failures map to `error` with "纠缠中断" messaging and enable the “继续跃迁” resume CTA whenever chunk metadata supports recovery.
 
+## Wave-Dot Tunnel (Fallback)
+
+- `DotBlobFallback2D` replaces the animated canvas with a single, high-density frame when motion should stop. It distributes thousands of dots across concentric shells using a golden-spiral sampling pattern and applies the same orange→indigo band ramp used in 3D.
+- Route skins re-use the hue-shift offsets (`lan` −0.08, `p2p` 0, `relay` +0.12) and adjust saturation so the static imprint still hints at the active corridor.
+- The fallback drives both reduced-motion sessions and environments where WebGL2 fails the probe; the bitmap re-renders on resize so screenshots remain crisp.
+
+## Dot-Matrix Wormhole
+
+- `DotBlobWormhole3D` is the default WebGL2 renderer. It instantiates 22k–52k point sprites (based on intensity 1..3) across a deformed sphere/tube lattice and displaces them entirely in the vertex shader using layered FBM noise plus a gentle Y-axis swirl.
+- The fragment shader discards pixels outside the disc mask, applies a stochastic dither, then samples a five-stop orange→red→magenta→violet→indigo ramp. Banding comes from `uStripes`; hue tinting is handled through `uHueShift` so each route keeps its own accent (cyan-teal for LAN, indigo for P2P, amber-magenta for relay).
+- Uniforms cover time, speed (`0.6..1.8×`), swirl, noise amplitude, stripe count, hue shift and exposure. The renderer clamps DPR to 1.5, pauses when `document.hidden`, and gradually damps noise/exposure changes so bursts feel organic.
+- File drops trigger `triggerBurst()` for 400–700 ms, boosting `uNoiseAmp`/`uExposure` before dispatching the transfer. The orchestrator also pulses the burst when phases enter `tunnel`.
+- When WebGL2 is unavailable or motion is disabled, the orchestrator and dropzone swap to the fallback frame while keeping the black, rounded mask so the surface remains consistent.
+
 ## Status Language
 
 `QuantumStatusIndicator` renders the friendly vocabulary for every phase and falls back to the same text for hints if the transport layer does not provide richer messages.
@@ -44,19 +58,26 @@ Hints prefer transport messages, otherwise they use copy derived from the table 
 - The Settings panel exposes a "Quantum tunnel interface" toggle and synchronises the Zustand store so panels switch instantly.
 - When the toggle is off, the legacy progress bar, route chips, and numeric ETA return.
 - `settings.minimalQuantumUI` defaults to `true` and enables the textless quantum dropzone for send/receive; toggling it reverts to the original form-driven UI.
+- `settings.quantumIntensity` defaults to `2` (`1..3`) and controls how many rings/dots the tunnel paints.
+- `settings.quantumSpeed` defaults to `1.0` (`0.6..1.6`) and scales the phase velocity so the warp can be relaxed or accelerated.
+- `settings.animationsEnabled` defaults to `true`. Disabling it falls back to the static tunnel frame and propagates to `QuantumDotTunnel` via `reducedMotion`.
+- `settings.enable3DQuantum` defaults to `true` on desktop and activates the WebGL tunnel whenever WebGL2 is detected at runtime. The flag holds user intent even if the current session falls back to 2D after a failed capability probe.
+- `settings.quantum3DQuality` (`low`/`medium`/`high`) tunes instanced particle counts; `settings.quantum3DFps` clamps the render loop between 30 and 60fps.
+- The Settings panel adds icon-only controls for the 3D toggle, density, and frame cap. Controls disable automatically when the session downgrades to the 2D tunnel due to unsupported GPUs or reduced-motion preferences.
 
 ## Immersive Dropzone (zero-copy UI)
 
-- `QuantumDropzone` renders a full-bleed, text-free surface for initiating transfers. It layers a singularity core, rotating rings, particle field, and drag orbit sensor to express each phase (`cloud`, `tunnel`, `collapse`, `decohere`).
-- Route skins (`qdz--lan`, `qdz--p2p`, `qdz--relay`) adjust gradients, particle colours, and motion speed so the lane is recognisable at a glance without labels.
-- The send panel binds `onFiles` to the existing `startSend` workflow; the receive panel reuses the component in a disabled state to visualise “awaiting files”.
-- Icon-only buttons keep the P2P and relay smoke tests accessible without introducing visible copy. Each button exposes descriptive `aria-label`s for assistive tech.
-- CSS honours `prefers-reduced-motion` by disabling all keyframe animations while retaining the layered visuals, ensuring the experience remains functional for users who opt out of motion.
+- `QuantumDropzone` now hosts the canvas tunnel and a lightweight glow overlay (`qdz-halo`, `qdz-grid`, `qdz-focus`) instead of the previous DOM particle stack. The surface stretches edge-to-edge, keeps pointer events on the root element, and relies on sr-only helpers for instructions.
+- Route skins (`qdz--lan`, `qdz--p2p`, `qdz--relay`) remap colour variables for the canvas, background gradient, and focus halo, so each transport still feels distinct without labels.
+- Send mode keeps drag-and-drop wired to `startSend`, while Receive mode mounts the tunnel in a disabled state to reflect current progress without accepting files.
+- Icon-only smoke-test buttons remain available and rely on `aria-label`s for accessibility.
+- `qdz-static` activates when either the OS or app disables animation. The canvas renders a single frame and the CSS halos soften, preserving the immersive look without motion.
 
 ## Reduced Motion & Audio
 
-- Animations are pure CSS with `prefers-reduced-motion: reduce` guards that disable the photon stream, starlight pulse, and drag-zone glow.
-- A compact WebAudio helper (`playQuantumPing`) plays short tones on stage transitions. Browsers without `AudioContext` simply skip playback.
+- Canvas rendering pauses when `reducedMotion` is true or when `settings.animationsEnabled` is toggled off. The tunnel paints a static frame and CSS halos drop to a low-energy style.
+- Existing CSS guards still silence the legacy photon/starlight layers when the classic tunnel renders.
+- The `playQuantumPing` helper remains optional; browsers without `AudioContext` simply skip playback.
 
 ## Drag & Resume
 

@@ -161,6 +161,84 @@ pub struct TransferLifecycleEvent {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityRegistrationPayload {
+    pub identity_id: String,
+    pub public_key: String,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityResponse {
+    pub identity_id: String,
+    pub public_key: String,
+    pub label: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRegistrationPayload {
+    pub identity_id: String,
+    pub device_id: String,
+    pub public_key: String,
+    pub name: Option<String>,
+    pub signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceResponse {
+    pub device_id: String,
+    pub identity_id: String,
+    pub public_key: String,
+    pub name: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicesQueryPayload {
+    pub identity_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityRefPayload {
+    pub identity_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicesResponse {
+    pub items: Vec<DeviceResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitlementUpdatePayload {
+    pub identity_id: String,
+    pub plan: String,
+    pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitlementDto {
+    pub identity_id: String,
+    pub plan: String,
+    pub expires_at: Option<i64>,
+    pub features: Vec<String>,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPayload {
@@ -216,6 +294,44 @@ pub enum ErrorCode {
 pub struct CommandError {
     pub code: ErrorCode,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticatedPayload<T> {
+    pub identity_id: String,
+    pub device_id: String,
+    pub signature: String,
+    #[serde(bound(deserialize = "T: Deserialize<'de>"))]
+    pub payload: T,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedPathsPayload {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedReceivePayload {
+    pub code: String,
+    pub save_dir: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatPayload {
+    pub status: Option<String>,
+    pub capabilities: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceUpdatePayload {
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub capabilities: Option<Vec<String>>,
 }
 
 impl CommandError {

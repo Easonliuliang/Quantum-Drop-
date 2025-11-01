@@ -17,6 +17,17 @@
         "height": 780,
         "resizable": true
       }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
     ]
-  }
+  },
+  "plugins": {}
 }

@@ -21,11 +21,11 @@
     "npm": ">=9.0.0"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.1",
-    "@tauri-apps/plugin-dialog": "^2.4.2",
+    "@noble/ed25519": "^2.3.0",
+    "@noble/hashes": "^2.0.1",
+    "@tauri-apps/api": "^2.9.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "zustand": "^4.5.5"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",

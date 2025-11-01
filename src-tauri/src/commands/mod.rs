@@ -9,6 +9,8 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::{Signature as EdSignature, Verifier, VerifyingKey};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
 use tokio::time::{sleep, timeout};
@@ -19,16 +21,22 @@ use crate::{
     crypto,
     resume::{derive_chunk_size, ChunkCatalog, ResumeStore},
     signaling::SessionTicket,
-    store::{TransferRecord, TransferStore},
+    store::{
+        DeviceRecord, EntitlementRecord, IdentityRecord, IdentityStore, TransferRecord,
+        TransferStore,
+    },
     transport::{Frame, RouteKind, Router, SelectedRoute, SessionDesc},
 };
 
 use state::{TrackedFile, TransferTask};
 use types::{
-    ChunkPolicyPayload, CommandError, ErrorCode, ExportPotResponse, GenerateCodeResponse,
-    P2pSmokeTestResponse, ResumeProgressDto, SettingsPayload, TaskResponse, TransferDirection,
-    TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute, TransferStatus,
-    TransferSummary, VerifyPotResponse,
+    AuthenticatedPayload, ChunkPolicyPayload, CommandError, DeviceRegistrationPayload,
+    DeviceResponse, DevicesQueryPayload, DevicesResponse, DeviceUpdatePayload, EntitlementDto,
+    EntitlementUpdatePayload, ErrorCode, ExportPotResponse, GenerateCodeResponse, HeartbeatPayload,
+    IdentityRefPayload, IdentityRegistrationPayload, IdentityResponse, P2pSmokeTestResponse,
+    ResumeProgressDto, SettingsPayload, SignedPathsPayload, SignedReceivePayload, TaskResponse,
+    TransferDirection, TransferLifecycleEvent, TransferPhase, TransferProgressEvent,
+    TransferRoute, TransferStatus, TransferSummary, VerifyPotResponse,
 };
 
 const MOCK_RECEIVE_FILE_SIZE: u64 = 2 * 1024 * 1024;
@@ -36,16 +44,222 @@ const MOCK_RECEIVE_FILE_SIZE: u64 = 2 * 1024 * 1024;
 pub use state::AppState as SharedState;
 
 #[tauri::command]
+pub async fn auth_register_identity(
+    store: State<'_, IdentityStore>,
+    payload: IdentityRegistrationPayload,
+) -> Result<IdentityResponse, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    if payload.public_key.trim().is_empty() {
+        return Err(CommandError::invalid("public_key is required"));
+    }
+    let record = store
+        .register_identity(
+            payload.identity_id.trim(),
+            payload.public_key.trim(),
+            payload.label.as_deref(),
+        )
+        .map_err(CommandError::from)?;
+    Ok(to_identity_response(&record))
+}
+
+#[tauri::command]
+pub async fn auth_register_device(
+    app: AppHandle,
+    store: State<'_, IdentityStore>,
+    payload: DeviceRegistrationPayload,
+) -> Result<DeviceResponse, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    if payload.device_id.trim().is_empty() {
+        return Err(CommandError::invalid("device_id is required"));
+    }
+    if payload.public_key.trim().is_empty() {
+        return Err(CommandError::invalid("device public_key is required"));
+    }
+    if payload
+        .signature
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return Err(CommandError::invalid(
+            "device signature is required for registration",
+        ));
+    }
+
+    let identity = store
+        .get_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+
+    let device_id = payload.device_id.trim();
+    let public_key = payload.public_key.trim();
+    let signature = payload.signature.as_deref().unwrap().trim();
+
+    verify_device_signature(&identity, device_id, public_key, signature)?;
+
+    let record = store
+        .register_device(
+            &identity.identity_id,
+            device_id,
+            public_key,
+            payload.name.as_deref(),
+            "active",
+        )
+        .map_err(CommandError::from)?;
+    emit_devices_update(&app, &store, &identity.identity_id);
+    Ok(to_device_response(&record))
+}
+
+#[tauri::command]
+pub async fn auth_list_devices(
+    store: State<'_, IdentityStore>,
+    payload: DevicesQueryPayload,
+) -> Result<DevicesResponse, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    store
+        .get_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let devices = store
+        .list_devices(payload.identity_id.trim())
+        .map_err(CommandError::from)?;
+    let items = devices.iter().map(to_device_response).collect();
+    Ok(DevicesResponse { items })
+}
+
+#[tauri::command]
+pub async fn auth_load_entitlement(
+    store: State<'_, IdentityStore>,
+    payload: IdentityRefPayload,
+) -> Result<EntitlementDto, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    store
+        .get_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let record = store
+        .get_entitlement(payload.identity_id.trim())
+        .map_err(CommandError::from)?;
+    let dto = record
+        .as_ref()
+        .map(to_entitlement_dto)
+        .unwrap_or_else(|| default_entitlement(payload.identity_id.trim()));
+    Ok(dto)
+}
+
+#[tauri::command]
+pub async fn auth_update_entitlement(
+    app: AppHandle,
+    store: State<'_, IdentityStore>,
+    payload: EntitlementUpdatePayload,
+) -> Result<EntitlementDto, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    if payload.plan.trim().is_empty() {
+        return Err(CommandError::invalid("plan is required"));
+    }
+    store
+        .get_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let record = store
+        .set_entitlement(
+            payload.identity_id.trim(),
+            payload.plan.trim(),
+            payload.expires_at,
+            &payload.features,
+        )
+        .map_err(CommandError::from)?;
+    emit_devices_update(&app, &store, payload.identity_id.trim());
+    Ok(to_entitlement_dto(&record))
+}
+
+#[tauri::command]
+pub async fn auth_heartbeat_device(
+    app: AppHandle,
+    store: State<'_, IdentityStore>,
+    auth: AuthenticatedPayload<HeartbeatPayload>,
+) -> Result<DeviceResponse, CommandError> {
+    let capabilities_value = auth.payload.capabilities.unwrap_or_default();
+    let status_value = auth.payload.status.unwrap_or_else(|| "active".to_string());
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "heartbeat",
+    )?;
+    let record = store
+        .touch_device(
+            auth.identity_id.trim(),
+            auth.device_id.trim(),
+            None,
+            Some(status_value.as_str()),
+            Some(capabilities_value.as_slice()),
+        )
+        .map_err(CommandError::from)?;
+    emit_devices_update(&app, &store, auth.identity_id.trim());
+    Ok(to_device_response(&record))
+}
+
+#[tauri::command]
+pub async fn auth_update_device(
+    app: AppHandle,
+    store: State<'_, IdentityStore>,
+    auth: AuthenticatedPayload<DeviceUpdatePayload>,
+) -> Result<DeviceResponse, CommandError> {
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "update_device",
+    )?;
+    let caps_slice = auth
+        .payload
+        .capabilities
+        .as_ref()
+        .map(|values| values.as_slice());
+    let record = store
+        .touch_device(
+            auth.identity_id.trim(),
+            auth.device_id.trim(),
+            auth.payload.name.as_deref(),
+            auth.payload.status.as_deref(),
+            caps_slice,
+        )
+        .map_err(CommandError::from)?;
+    emit_devices_update(&app, &store, auth.identity_id.trim());
+    Ok(to_device_response(&record))
+}
+
+#[tauri::command]
 pub async fn courier_generate_code(
     state: State<'_, SharedState>,
     config: State<'_, ConfigStore>,
-    paths: Vec<String>,
-    expire_sec: Option<i64>,
+    identity_store: State<'_, IdentityStore>,
+    auth: AuthenticatedPayload<GeneratePayload>,
 ) -> Result<GenerateCodeResponse, CommandError> {
-    if paths.is_empty() {
+    verify_request(
+        &identity_store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "generate",
+    )?;
+    if auth.payload.paths.is_empty() {
         return Err(CommandError::invalid("At least one file is required"));
     }
-    let files = collect_files(&paths).map_err(CommandError::from)?;
+    let files = collect_files(&auth.payload.paths).map_err(CommandError::from)?;
     let code = crypto::generate_task_code(6);
     let session_key = crypto::derive_mock_session_key();
     let task = TransferTask::new(
@@ -57,7 +271,11 @@ pub async fn courier_generate_code(
     let task = state.insert_task(task).await;
 
     let settings = config.get();
-    let ttl = expire_sec.unwrap_or(settings.code_expire_sec).max(60);
+    let ttl = auth
+        .payload
+        .expire_sec
+        .unwrap_or(settings.code_expire_sec)
+        .max(60);
     let ticket = SessionTicket::new(code.clone(), ttl);
     state.track_code(&code, &task.task_id).await;
 
@@ -73,13 +291,21 @@ pub async fn courier_generate_code(
 pub async fn courier_send(
     app: AppHandle,
     state: State<'_, SharedState>,
+    store: State<'_, IdentityStore>,
+    auth: AuthenticatedPayload<SignedPathsPayload>,
     code: String,
-    paths: Vec<String>,
 ) -> Result<TaskResponse, CommandError> {
-    if paths.is_empty() {
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "send",
+    )?;
+    if auth.payload.paths.is_empty() {
         return Err(CommandError::invalid("At least one file is required"));
     }
-    let files = collect_files(&paths).map_err(CommandError::from)?;
+    let files = collect_files(&auth.payload.paths).map_err(CommandError::from)?;
     let maybe_task = state.find_by_code(&code).await;
 
     let task = if let Some(existing) = maybe_task {
@@ -105,10 +331,17 @@ pub async fn courier_send(
 pub async fn courier_receive(
     app: AppHandle,
     state: State<'_, SharedState>,
-    code: String,
-    save_dir: String,
+    store: State<'_, IdentityStore>,
+    auth: AuthenticatedPayload<SignedReceivePayload>,
 ) -> Result<TaskResponse, CommandError> {
-    let save_dir_path = Path::new(&save_dir);
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "receive",
+    )?;
+    let save_dir_path = Path::new(&auth.payload.save_dir);
     if !save_dir_path.exists() {
         fs::create_dir_all(save_dir_path)
             .map_err(|err| CommandError::from_io(&err, "failed to prepare save directory"))?;
@@ -117,7 +350,7 @@ pub async fn courier_receive(
         return Err(CommandError::invalid("save_dir must be a directory"));
     }
 
-    let mock_file_path = save_dir_path.join(format!("courier-receive-{code}.bin"));
+    let mock_file_path = save_dir_path.join(format!("courier-receive-{}.bin", auth.payload.code));
     let tracked_file = TrackedFile {
         name: mock_file_path
             .file_name()
@@ -131,12 +364,12 @@ pub async fn courier_receive(
     let session_key = crypto::derive_mock_session_key();
     let task = TransferTask::new(
         TransferDirection::Receive,
-        Some(code.clone()),
+        Some(auth.payload.code.clone()),
         vec![tracked_file],
         session_key,
     );
     let task = state.insert_task(task).await;
-    state.track_code(&code, &task.task_id).await;
+    state.track_code(&auth.payload.code, &task.task_id).await;
 
     spawn_transfer_runner(&app, state.inner().clone(), task.task_id.clone());
 
@@ -205,9 +438,7 @@ pub async fn courier_p2p_smoke_test(app: AppHandle) -> Result<P2pSmokeTestRespon
     let session = SessionDesc::new("p2p-smoke-test");
 
     let SelectedRoute {
-        route,
-        mut stream,
-        ..
+        route, mut stream, ..
     } = router
         .connect(&session)
         .await
@@ -271,9 +502,7 @@ pub async fn courier_relay_smoke_test(
         let session = SessionDesc::new("relay-smoke-test");
 
         let SelectedRoute {
-            route,
-            mut stream,
-            ..
+            route, mut stream, ..
         } = router.connect(&session).await.map_err(|err| {
             CommandError::route_unreachable(format!("relay connect failed: {err}"))
         })?;
@@ -479,6 +708,48 @@ fn to_settings_payload(settings: RuntimeSettings) -> SettingsPayload {
     }
 }
 
+fn to_identity_response(record: &IdentityRecord) -> IdentityResponse {
+    IdentityResponse {
+        identity_id: record.identity_id.clone(),
+        public_key: record.public_key.clone(),
+        label: record.label.clone(),
+        created_at: record.created_at,
+    }
+}
+
+fn to_device_response(record: &DeviceRecord) -> DeviceResponse {
+    DeviceResponse {
+        device_id: record.device_id.clone(),
+        identity_id: record.identity_id.clone(),
+        public_key: record.public_key.clone(),
+        name: record.name.clone(),
+        status: record.status.clone(),
+        created_at: record.created_at,
+        last_seen_at: record.last_seen_at,
+        capabilities: record.capabilities.clone(),
+    }
+}
+
+fn to_entitlement_dto(record: &EntitlementRecord) -> EntitlementDto {
+    EntitlementDto {
+        identity_id: record.identity_id.clone(),
+        plan: record.plan.clone(),
+        expires_at: record.expires_at,
+        features: record.features.clone(),
+        updated_at: record.updated_at,
+    }
+}
+
+fn default_entitlement(identity_id: &str) -> EntitlementDto {
+    EntitlementDto {
+        identity_id: identity_id.to_string(),
+        plan: "free".into(),
+        expires_at: None,
+        features: Vec::new(),
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    }
+}
+
 fn validate_proof(proof: &ProofOfTransition) -> Option<String> {
     if proof.version.trim() != "1" {
         return Some("Unsupported PoT version".into());
@@ -508,14 +779,65 @@ fn validate_proof(proof: &ProofOfTransition) -> Option<String> {
     None
 }
 
+fn emit_devices_update(app: &AppHandle, store: &IdentityStore, identity_id: &str) {
+    if let Ok(devices) = store.list_devices(identity_id) {
+        let items: Vec<DeviceResponse> = devices.iter().map(to_device_response).collect();
+        let event = DevicesUpdateEvent {
+            identity_id: identity_id.to_string(),
+            items,
+        };
+        let _ = app.emit_to(EventTarget::app(), "identity_devices_updated", event);
+    }
+}
+
+fn verify_device_signature(
+    identity: &IdentityRecord,
+    device_id: &str,
+    device_public_key_hex: &str,
+    signature_hex: &str,
+) -> Result<(), CommandError> {
+    let identity_key_bytes =
+        decode_hex_to_array::<32>(&identity.public_key, "identity public key")?;
+    let verifying_key = VerifyingKey::from_bytes(&identity_key_bytes)
+        .map_err(|_| CommandError::invalid("identity public key is invalid"))?;
+
+    // Validate device public key format even if not used directly for verification yet.
+    let _ = decode_hex_to_array::<32>(device_public_key_hex, "device public key")?;
+    let signature_bytes = decode_hex_to_array::<64>(signature_hex, "device signature")?;
+    let signature = EdSignature::from_bytes(&signature_bytes);
+    let message = format!("register:{device_id}:{device_public_key_hex}");
+    verifying_key
+        .verify(message.as_bytes(), &signature)
+        .map_err(|_| CommandError::invalid("device signature verification failed"))?;
+    Ok(())
+}
+
+fn decode_hex_to_array<const N: usize>(input: &str, field: &str) -> Result<[u8; N], CommandError> {
+    let trimmed = input.trim();
+    let decoded = hex::decode(trimmed)
+        .map_err(|_| CommandError::invalid(format!("{field} must be hex-encoded")))?;
+    if decoded.len() != N {
+        return Err(CommandError::invalid(format!(
+            "{field} must be {N} bytes, got {}",
+            decoded.len()
+        )));
+    }
+    let mut array = [0u8; N];
+    array.copy_from_slice(&decoded);
+    Ok(array)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::attestation::{pot::ProofSignature, FileAttestation};
     use crate::commands::types::ErrorCode;
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
     use serde_json::json;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use uuid::Uuid;
 
     fn sample_attestation() -> FileAttestation {
         FileAttestation {
@@ -605,6 +927,130 @@ mod tests {
         assert!(error.is_some());
         assert!(error.unwrap().contains("No attested files"));
     }
+
+    fn setup_identity_store() -> (tempfile::TempDir, IdentityStore) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("identities.sqlite3");
+        let store = IdentityStore::with_path(db_path).expect("store");
+        (temp_dir, store)
+    }
+
+    fn register_identity_and_device(store: &IdentityStore) -> (SigningKey, String, String) {
+        let mut rng = OsRng;
+        let identity_key = SigningKey::generate(&mut rng);
+        let identity_id = format!("id_{}", Uuid::new_v4().simple());
+        let identity_public = hex::encode(identity_key.verifying_key().to_bytes());
+        store
+            .register_identity(&identity_id, &identity_public, Some("测试身份"))
+            .expect("register identity");
+
+        let device_key = SigningKey::generate(&mut rng);
+        let device_id = format!("dev_{}", Uuid::new_v4().simple());
+        let device_public = hex::encode(device_key.verifying_key().to_bytes());
+        store
+            .register_device(
+                &identity_id,
+                &device_id,
+                &device_public,
+                Some("同频终端"),
+                "active",
+            )
+            .expect("register device");
+        (identity_key, identity_id, device_id)
+    }
+
+    #[test]
+    fn verify_request_accepts_active_and_standby_devices() {
+        let (_guard, store) = setup_identity_store();
+        let (identity_key, identity_id, device_id) = register_identity_and_device(&store);
+
+        let heartbeat_signature = identity_key
+            .sign(format!("heartbeat:{identity_id}:{device_id}").as_bytes());
+        super::verify_request(
+            &store,
+            &identity_id,
+            &device_id,
+            &hex::encode(heartbeat_signature.to_bytes()),
+            "heartbeat",
+        )
+        .expect("heartbeat should validate");
+
+        let capabilities = vec!["ui:minimal-panel".to_string()];
+        store
+            .touch_device(
+                &identity_id,
+                &device_id,
+                None,
+                Some("standby"),
+                Some(capabilities.as_slice()),
+            )
+            .expect("touch device");
+
+        let update_signature = identity_key
+            .sign(format!("update_device:{identity_id}:{device_id}").as_bytes());
+        super::verify_request(
+            &store,
+            &identity_id,
+            &device_id,
+            &hex::encode(update_signature.to_bytes()),
+            "update_device",
+        )
+        .expect("standby device can update");
+
+        let refreshed = store
+            .get_device(&identity_id, &device_id)
+            .expect("fetch device")
+            .expect("device exists");
+        assert_eq!(refreshed.status, "standby");
+        assert_eq!(refreshed.capabilities, capabilities);
+    }
+
+    #[test]
+    fn verify_request_rejects_invalid_signatures() {
+        let (_guard, store) = setup_identity_store();
+        let (identity_key, identity_id, device_id) = register_identity_and_device(&store);
+
+        let bad_signature = identity_key
+            .sign(format!("update_device:{}:{}:noise", identity_id, device_id).as_bytes());
+        let error = super::verify_request(
+            &store,
+            &identity_id,
+            &device_id,
+            &hex::encode(bad_signature.to_bytes()),
+            "update_device",
+        )
+        .expect_err("should reject tampered signature");
+        assert_eq!(error.code, ErrorCode::EInvalidInput);
+        assert!(error
+            .message
+            .to_ascii_lowercase()
+            .contains("signature verification failed"));
+    }
+
+    #[test]
+    fn touch_device_allows_renaming_and_capabilities() {
+        let (_guard, store) = setup_identity_store();
+        let (_identity_key, identity_id, device_id) = register_identity_and_device(&store);
+
+        let capabilities = vec!["ui:minimal-panel".to_string(), "transport:mock".to_string()];
+        store
+            .touch_device(
+                &identity_id,
+                &device_id,
+                Some("量子终端"),
+                Some("active"),
+                Some(capabilities.as_slice()),
+            )
+            .expect("touch device metadata");
+        let snapshot = store
+            .get_device(&identity_id, &device_id)
+            .expect("load device")
+            .expect("device exists");
+        assert_eq!(snapshot.name.as_deref(), Some("量子终端"));
+        assert_eq!(snapshot.status, "active");
+        assert_eq!(snapshot.capabilities, capabilities);
+    }
+
 
     #[test]
     fn verify_pot_command_validates_success() {
@@ -810,11 +1256,7 @@ async fn simulate_transfer(
     );
     let route = TransferRoute::from(selected_route.clone());
     for note in &attempt_notes {
-        emit_log(
-            &app,
-            &task_id,
-            format!("Route attempt · {}", note),
-        );
+        emit_log(&app, &task_id, format!("Route attempt · {}", note));
     }
 
     let handshake_start = Instant::now();
@@ -1175,6 +1617,13 @@ struct LogPayload {
     message: String,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DevicesUpdateEvent {
+    identity_id: String,
+    items: Vec<DeviceResponse>,
+}
+
 fn collect_files(paths: &[String]) -> Result<Vec<TrackedFile>> {
     let mut files = Vec::new();
     for path in paths {
@@ -1246,4 +1695,56 @@ async fn materialise_mock_payload(files: &[TrackedFile]) -> Result<Vec<TrackedFi
         });
     }
     Ok(results)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratePayload {
+    pub paths: Vec<String>,
+    pub expire_sec: Option<i64>,
+}
+
+fn verify_request(
+    identity_store: &IdentityStore,
+    identity_id: &str,
+    device_id: &str,
+    signature_hex: &str,
+    purpose: &str,
+) -> Result<(), CommandError> {
+    if identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    if device_id.trim().is_empty() {
+        return Err(CommandError::invalid("device_id is required"));
+    }
+    let device = identity_store
+        .get_device(identity_id.trim(), device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+    let device_status = device.status.to_ascii_lowercase();
+    let allowed = matches!(device_status.as_str(), "active" | "standby");
+    if !allowed {
+        return Err(CommandError::invalid("device not active"));
+    }
+    let identity = identity_store
+        .get_identity(identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+
+    let identity_key_bytes =
+        decode_hex_to_array::<32>(&identity.public_key, "identity public key")?;
+    let verifying_key = VerifyingKey::from_bytes(&identity_key_bytes)
+        .map_err(|_| CommandError::invalid("identity public key invalid"))?;
+
+    if purpose == "register" {
+        return Ok(());
+    }
+
+    let signature = decode_hex_to_array::<64>(signature_hex, "request signature")?;
+    let signature = EdSignature::from_bytes(&signature);
+    let message = format!("{purpose}:{identity_id}:{device_id}");
+    verifying_key
+        .verify(message.as_bytes(), &signature)
+        .map_err(|_| CommandError::invalid("signature verification failed"))?;
+    Ok(())
 }

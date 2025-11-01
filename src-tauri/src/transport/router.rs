@@ -533,13 +533,13 @@ mod tests {
         rt.block_on(async {
             let mut router = Router::new(vec![RouteKind::Lan, RouteKind::P2p]);
             router.lan = Some(Arc::new(StubAdapter::success(TestDuration::from_millis(1))));
-            router.p2p = Some(Arc::new(StubAdapter::success(TestDuration::from_millis(10))));
+            router.p2p = Some(Arc::new(StubAdapter::success(TestDuration::from_millis(
+                10,
+            ))));
 
             let session = SessionDesc::new("router-quic");
             let SelectedRoute {
-                route,
-                mut stream,
-                ..
+                route, mut stream, ..
             } = router.connect(&session).await.expect("connect lan");
             assert_eq!(route, RouteKind::Lan);
             stream.close().await.expect("close");
@@ -594,9 +594,7 @@ mod tests {
 
             let session = SessionDesc::new("timeout-test");
             let SelectedRoute {
-                route,
-                mut stream,
-                ..
+                route, mut stream, ..
             } = router.connect(&session).await.expect("connect fallback");
             assert_eq!(route, RouteKind::P2p);
             stream.close().await.expect("close");
@@ -622,9 +620,7 @@ mod tests {
 
             let session = SessionDesc::new("relay-fallback");
             let SelectedRoute {
-                route,
-                mut stream,
-                ..
+                route, mut stream, ..
             } = router.connect(&session).await.expect("connect relay");
             assert_eq!(route, RouteKind::Relay);
             stream.close().await.expect("close");
@@ -649,8 +645,12 @@ mod tests {
                 attempt_notes,
             } = router.connect(&session).await.expect("connect");
             assert_eq!(route, RouteKind::P2p);
-            assert!(attempt_notes.iter().any(|note| note.contains("lan failure")));
-            assert!(attempt_notes.iter().any(|note| note.contains("p2p success")));
+            assert!(attempt_notes
+                .iter()
+                .any(|note| note.contains("lan failure")));
+            assert!(attempt_notes
+                .iter()
+                .any(|note| note.contains("p2p success")));
             stream.close().await.expect("close");
         });
     }

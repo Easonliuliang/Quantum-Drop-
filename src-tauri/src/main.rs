@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod attestation;
-mod config;
 mod commands;
+mod config;
 mod crypto;
 mod resume;
 mod signaling;
@@ -10,13 +10,15 @@ mod store;
 mod transport;
 
 use commands::{
-    courier_cancel, courier_generate_code, courier_p2p_smoke_test, courier_receive,
-    courier_relay_smoke_test, courier_resume, courier_send, export_pot, list_transfers,
-    load_settings, update_settings, verify_pot, SharedState,
+    auth_list_devices, auth_load_entitlement, auth_register_device, auth_register_identity,
+    auth_update_device, auth_update_entitlement, auth_heartbeat_device, courier_cancel,
+    courier_generate_code, courier_p2p_smoke_test,
+    courier_receive, courier_relay_smoke_test, courier_resume, courier_send, export_pot,
+    list_transfers, load_settings, update_settings, verify_pot, SharedState,
 };
 use config::ConfigStore;
 use serde::Serialize;
-use store::TransferStore;
+use store::{IdentityStore, TransferStore};
 use tauri::Manager;
 
 #[derive(Serialize)]
@@ -41,13 +43,23 @@ fn main() {
             let store = TransferStore::initialise(&app.handle())
                 .expect("failed to initialise transfer store");
             app.manage(store);
-            let config_store = ConfigStore::initialise(&app.handle())
-                .expect("failed to initialise config store");
+            let config_store =
+                ConfigStore::initialise(&app.handle()).expect("failed to initialise config store");
             app.manage(config_store);
+            let identity_store = IdentityStore::initialise(&app.handle())
+                .expect("failed to initialise identity store");
+            app.manage(identity_store);
             Ok(())
         })
         .manage(SharedState::new())
         .invoke_handler(tauri::generate_handler![
+            auth_register_identity,
+            auth_register_device,
+            auth_list_devices,
+            auth_load_entitlement,
+            auth_update_entitlement,
+            auth_update_device,
+            auth_heartbeat_device,
             health_check,
             courier_generate_code,
             courier_send,

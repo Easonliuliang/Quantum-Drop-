@@ -4,7 +4,6 @@
   --quantum-blue: #38bdf8;
   --quantum-blue-soft: rgba(56, 189, 248, 0.4);
   --quantum-blue-strong: rgba(56, 189, 248, 0.75);
-  background: radial-gradient(circle at 20% 20%, #0ea5e9 0%, #020617 60%);
 }
 
 * {
@@ -24,7 +23,6 @@ body {
   align-items: center;
   justify-content: center;
   padding: 4vh 5vw;
-  background: radial-gradient(circle at top, #0b1120 0%, #020617 70%);
   color: #e2f3ff;
 }
 
@@ -36,6 +34,33 @@ body {
   justify-content: center;
   gap: 2.5rem;
   align-items: center;
+  position: relative;
+  z-index: 0;
+}
+
+/* 遮罩背景：仅保留顶部区的蓝色渐变，卡片区域下方收敛为深色 */
+.app-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(
+      circle at 50% 6%,
+      rgba(56, 189, 248, 0.25) 0%,
+      rgba(56, 189, 248, 0.18) 12%,
+      rgba(2, 6, 23, 0.85) 42%,
+      rgba(2, 6, 23, 0.96) 60%
+    );
+}
+
+/* 确保卡片内容盖在遮罩之上 */
+.dropzone,
+.identity-panel,
+.status-panel,
+.log-panel {
+  position: relative;
+  z-index: 1;
 }
 
 .dropzone {
@@ -1764,6 +1789,32 @@ body,
   color: #e2f3ff;
 }
 
+.status-value.with-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-value.with-actions code {
+  overflow-wrap: anywhere;
+}
+
+.copy-button {
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.65);
+  color: #cbd5f5;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.copy-button:hover {
+  border-color: rgba(56, 189, 248, 0.6);
+  background: rgba(15, 23, 42, 0.8);
+}
+
 .log-panel {
   width: 100%;
   max-width: 880px;
@@ -1789,4 +1840,199 @@ body,
   gap: 0.5rem;
   font-size: 0.9rem;
   line-height: 1.5;
+}
+
+.identity-panel {
+  width: 100%;
+  max-width: 880px;
+  padding: 1.5rem 1.75rem;
+  border-radius: 20px;
+  background: rgba(12, 20, 40, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: 0 14px 36px rgba(12, 20, 40, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  /* 防止蓝色发光背景溢出到卡片外部 */
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.identity-panel h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: rgba(226, 243, 255, 0.85);
+}
+
+.identity-actions {
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.identity-actions .secondary,
+.identity-actions .primary,
+.identity-actions .plain {
+  min-width: 140px;
+}
+
+.identity-import {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.identity-import input {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(15, 23, 42, 0.4);
+  color: #e2f3ff;
+}
+
+.identity-import button {
+  min-width: 120px;
+}
+
+.entitlement-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.active-device-banner {
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 12px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.85rem;
+  color: #dbeafe;
+}
+
+.identity-empty {
+  margin: 0;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 0.9rem;
+}
+
+.identity-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: rgba(148, 163, 184, 0.7);
+}
+
+.device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.device-item {
+  padding: 0.7rem 0.9rem;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.device-item[data-active="true"] {
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+}
+
+.device-name {
+  font-weight: 600;
+  color: rgba(226, 243, 255, 0.9);
+}
+
+.device-meta {
+  font-size: 0.8rem;
+  color: rgba(148, 163, 184, 0.7);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.device-meta-text {
+  color: rgba(148, 163, 184, 0.75);
+  font-size: 0.78rem;
+}
+
+.device-active-flag {
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.25);
+  color: #bfdbfe;
+  font-size: 0.75rem;
+}
+
+.status-badge {
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.status-active {
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+}
+
+.status-inactive,
+.status-offline {
+  background: rgba(148, 163, 184, 0.2);
+  color: #e2e8f0;
+}
+
+.device-editor {
+  padding: 1rem 1.1rem;
+  border-radius: 16px;
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  background: rgba(12, 20, 40, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.device-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.8rem;
+}
+
+.device-editor-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: rgba(226, 243, 255, 0.8);
+}
+
+.device-editor-grid input,
+.device-editor-grid select {
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(15, 23, 42, 0.55);
+  color: #e2f3ff;
+}
+
+.device-editor-actions .secondary,
+.device-editor-actions .plain {
+  min-width: 130px;
+}
+
+.device-editor-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: rgba(148, 163, 184, 0.7);
 }

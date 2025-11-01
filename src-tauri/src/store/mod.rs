@@ -1,3 +1,5 @@
+pub mod identity;
+
 use std::{fs, path::PathBuf};
 
 #[cfg(test)]
@@ -9,6 +11,8 @@ use rusqlite::{named_params, params, Connection, OptionalExtension, Row};
 use tauri::Manager;
 
 use crate::commands::types::{TransferDirection, TransferStatus, TransferSummary};
+
+pub use identity::{DeviceRecord, EntitlementRecord, IdentityRecord, IdentityStore};
 
 #[derive(Clone, Debug)]
 pub struct TransferStore {

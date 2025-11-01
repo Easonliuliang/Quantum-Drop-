@@ -1,17 +1,10 @@
-use std::{
-    fs,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::{
-    config::AdaptiveChunkPolicy,
-    transport::RouteKind,
-};
+use crate::{config::AdaptiveChunkPolicy, transport::RouteKind};
 
 const MIN_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
@@ -62,8 +55,7 @@ impl ChunkCatalog {
         } else {
             total_bytes
         };
-        let required_chunks =
-            ((effective_total + self.chunk_size - 1) / self.chunk_size).max(1);
+        let required_chunks = ((effective_total + self.chunk_size - 1) / self.chunk_size).max(1);
         self.total_bytes = effective_total;
         if required_chunks as usize != self.received_chunks.len() {
             self.received_chunks.resize(required_chunks as usize, false);
@@ -140,8 +132,8 @@ impl ResumeStore {
 
     pub fn store(&self, task_id: &str, catalog: &ChunkCatalog) -> Result<()> {
         let path = self.path_for(task_id);
-        let payload = serde_json::to_vec_pretty(catalog)
-            .context("failed to serialise chunk catalog")?;
+        let payload =
+            serde_json::to_vec_pretty(catalog).context("failed to serialise chunk catalog")?;
         fs::write(&path, payload)
             .with_context(|| format!("failed to persist resume catalog {}", path.display()))?;
         Ok(())
@@ -189,14 +181,16 @@ pub fn derive_chunk_size(
 fn align(value: u64) -> u64 {
     let unit = 1024 * 1024;
     let multiples = (value + unit - 1) / unit;
-    (multiples * unit)
-        .clamp(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES)
+    (multiples * unit).clamp(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{adapter::MockLocalAdapter, Frame, SessionDesc};
+    use crate::transport::{
+        adapter::{MockLocalAdapter, TransportAdapter},
+        Frame, SessionDesc,
+    };
 
     #[test]
     fn bitmap_diff_only_returns_missing_indices() {
@@ -205,11 +199,7 @@ mod tests {
         catalog.mark_received(2);
         let missing = catalog.missing_indices();
         assert_eq!(missing, vec![1, 3, 4, 5, 6, 7]);
-        let received = catalog
-            .received_chunks
-            .iter()
-            .filter(|flag| **flag)
-            .count();
+        let received = catalog.received_chunks.iter().filter(|flag| **flag).count();
         assert_eq!(received, 2);
     }
 
@@ -220,7 +210,8 @@ mod tests {
             min_bytes: 2 * 1024 * 1024,
             max_bytes: 16 * 1024 * 1024,
         };
-        let size_fast = derive_chunk_size(&policy, &RouteKind::Lan, Duration::from_millis(20), false);
+        let size_fast =
+            derive_chunk_size(&policy, &RouteKind::Lan, Duration::from_millis(20), false);
         assert_eq!(size_fast, 4 * 1024 * 1024);
         let size_medium =
             derive_chunk_size(&policy, &RouteKind::Lan, Duration::from_millis(120), false);
@@ -228,8 +219,7 @@ mod tests {
         let size_slow =
             derive_chunk_size(&policy, &RouteKind::Lan, Duration::from_millis(220), false);
         assert_eq!(size_slow, 16 * 1024 * 1024);
-        let weak =
-            derive_chunk_size(&policy, &RouteKind::Relay, Duration::from_millis(90), true);
+        let weak = derive_chunk_size(&policy, &RouteKind::Relay, Duration::from_millis(90), true);
         assert_eq!(weak, 2 * 1024 * 1024);
     }
 
@@ -266,12 +256,11 @@ mod tests {
 
         let chunk_len = catalog.chunk_length(1);
         let payload = vec![0xAB; chunk_len as usize];
-        stream
-            .send(Frame::Data(payload))
-            .await
-            .expect("send chunk");
+        stream.send(Frame::Data(payload)).await.expect("send chunk");
         catalog.mark_received(1);
-        store.store("task", &catalog).expect("persist updated catalog");
+        store
+            .store("task", &catalog)
+            .expect("persist updated catalog");
         let missing = catalog.missing_indices();
         assert!(missing.is_empty());
         stream.close().await.expect("close stream");
