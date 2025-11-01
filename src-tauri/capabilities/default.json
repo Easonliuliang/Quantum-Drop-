@@ -1,0 +1,12 @@
+{
+  "$schema": "../../schemas/capability.json",
+  "identifier": "default",
+  "description": "Default capability: window + event listen + file-drop",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:event:allow-listen",
+    "core:window:default"
+  ]
+}

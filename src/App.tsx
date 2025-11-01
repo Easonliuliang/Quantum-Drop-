@@ -874,6 +874,21 @@ export default function App(): JSX.Element {
     };
   }, [identity, identityPrivateKey, activeDeviceId, devices, isSending]);
 
+  // 保险：在 Tauri 环境里，系统级拖拽可能不触发 DOM onDrop。
+  // 用全局 dragenter/dragleave 保证至少出现一次吸入动效，提升反馈感知。
+  useEffect(() => {
+    if (!detectTauri()) return;
+    const onEnter = (e: DragEvent) => {
+      // 只在外部拖入时触发，避免内部拖拽干扰
+      if (e.dataTransfer && e.dataTransfer.types?.length) {
+        setAbsorbing(true);
+        window.setTimeout(() => setAbsorbing(false), 600);
+      }
+    };
+    window.addEventListener('dragenter', onEnter);
+    return () => window.removeEventListener('dragenter', onEnter);
+  }, []);
+
   useEffect(() => {
     if (!identity) {
       return;
