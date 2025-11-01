@@ -808,10 +808,10 @@ export default function App(): JSX.Element {
     };
   }, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, sendHeartbeat]);
 
-  // 监听 Tauri 系统拖拽（包含绝对路径）— 首选 window.onFileDropEvent，其次事件总线，最后 DOM
+  // 监听 Tauri 系统拖拽（包含绝对路径）——优先 appWindow.onFileDropEvent，其次事件总线，再退全局注入
   useEffect(() => {
     if (!detectTauri()) return;
-    let unlisten: (() => void) | null = null;
+    const unlisteners: Array<() => void | Promise<void>> = [];
 
     const handler = (evt: { payload: string[] }) => {
       const paths = (evt?.payload ?? []).filter((v) => typeof v === "string");
@@ -838,47 +838,52 @@ export default function App(): JSX.Element {
     };
 
     (async () => {
-      // 优先读取全局注入（无模块加载依赖），在大部分 desktop 配置中都存在
+      // 1. appWindow.onFileDropEvent（提供 drop 类型与绝对路径）
+      try {
+        const off = await appWindow.onFileDropEvent((event) => {
+          if (event?.payload?.type === "drop") {
+            handler({ payload: event.payload.paths ?? [] });
+          }
+        });
+        unlisteners.push(() => off?.());
+      } catch (err) {
+        console.warn("appWindow.onFileDropEvent failed", err);
+      }
+
+      // 2. 事件总线
+      try {
+        const offEvent = await listenTauri<string[]>("tauri://file-drop", handler);
+        unlisteners.push(offEvent);
+      } catch (err) {
+        console.warn("event.listen fallback failed", err);
+      }
+
+      // 3. 全局注入（在 withGlobalTauri=true 时存在）
       const tauri = getTauri();
-      const globalListen = tauri?.event?.listen;
+      const globalListen = tauri?.event?.listen as
+        | (<T>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>)
+        | undefined;
       if (globalListen) {
         try {
-          unlisten = await globalListen<string[]>("tauri://file-drop", handler);
-          return;
-        } catch (e) {
-          console.warn("global event listen failed", e);
+          const off = await globalListen<string[]>("tauri://file-drop", handler);
+          unlisteners.push(off);
+        } catch (err) {
+          console.warn("global event listen failed", err);
         }
-      }
-
-      // 其次尝试 @tauri-apps/api/window
-      try {
-        const wmod = await import("@tauri-apps/api/window");
-        if ((wmod as any)?.appWindow?.onFileDropEvent) {
-          const off = await (wmod as any).appWindow.onFileDropEvent((e: any) => {
-            if (e?.payload?.type === 'drop') {
-              handler({ payload: e.payload.paths || [] });
-            }
-          });
-          unlisten = () => off?.();
-          return;
-        }
-      } catch (e) {
-        console.warn("window api load failed", e);
-      }
-
-      // 再次退化到 @tauri-apps/api/event
-      try {
-        const emod = await import("@tauri-apps/api/event");
-        unlisten = await (emod as unknown as { listen: Function }).listen("tauri://file-drop", handler);
-      } catch (e) {
-        console.warn("file-drop listen not available", e);
       }
     })();
 
     return () => {
-      try {
-        unlisten?.();
-      } catch {}
+      unlisteners.forEach((dispose) => {
+        try {
+          const result = dispose();
+          if (result instanceof Promise) {
+            result.catch(() => undefined);
+          }
+        } catch {
+          // ignore
+        }
+      });
     };
   }, [identity, identityPrivateKey, activeDeviceId, devices, isSending]);
 
