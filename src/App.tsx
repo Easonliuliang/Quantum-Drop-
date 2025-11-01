@@ -808,16 +808,12 @@ export default function App(): JSX.Element {
     };
   }, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, sendHeartbeat]);
 
-  // 监听 Tauri 的系统文件拖拽（包含绝对路径），吸入动效 + 可自动发送
+  // 监听 Tauri 系统拖拽（包含绝对路径）— 首选官方 API，失败则回退到 window.__TAURI__ 注入
   useEffect(() => {
     if (!detectTauri()) return;
-    const tauri = getTauri();
-    const listen = tauri?.event?.listen as
-      | (<T>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>)
-      | undefined;
-    if (!listen) return;
     let unlisten: (() => void) | null = null;
-    listen<string[]>("tauri://file-drop", (evt) => {
+
+    const handler = (evt: { payload: string[] }) => {
       const paths = (evt?.payload ?? []).filter((v) => typeof v === "string");
       if (paths.length === 0) return;
       const displayFiles = paths.map<SelectedFile>((path) => {
@@ -839,9 +835,33 @@ export default function App(): JSX.Element {
           beginTransferRef.current?.(paths);
         }, 220);
       }
-    }).then((fn) => (unlisten = fn));
+    };
+
+    (async () => {
+      try {
+        const mod = await import("@tauri-apps/api/event");
+        unlisten = await (mod as unknown as { listen: Function }).listen(
+          "tauri://file-drop",
+          handler
+        );
+      } catch (e) {
+        // 回退到全局注入
+        const tauri = getTauri();
+        const listen = tauri?.event?.listen as
+          | (<T>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>)
+          | undefined;
+        if (listen) {
+          unlisten = await listen<string[]>("tauri://file-drop", handler);
+        } else {
+          console.warn("file-drop listen not available", e);
+        }
+      }
+    })();
+
     return () => {
-      try { unlisten?.(); } catch {}
+      try {
+        unlisten?.();
+      } catch {}
     };
   }, [identity, identityPrivateKey, activeDeviceId, devices, isSending]);
 
