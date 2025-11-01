@@ -1265,20 +1265,20 @@ export default function App(): JSX.Element {
           <span className="ring ring-outer" />
           <span className="ring ring-middle" />
           <span className="ring ring-inner" />
-        </div>
-        <div className="absorb-particles" aria-hidden="true">
-          <span className="p p1" />
-          <span className="p p2" />
-          <span className="p p3" />
-          <span className="p p4" />
-          <span className="p p5" />
-          <span className="p p6" />
-          <span className="p p7" />
-          <span className="p p8" />
-          <span className="p p9" />
-          <span className="p p10" />
-          <span className="p p11" />
-          <span className="p p12" />
+          <div className="absorb-particles" aria-hidden="true">
+            <span className="p p1" />
+            <span className="p p2" />
+            <span className="p p3" />
+            <span className="p p4" />
+            <span className="p p5" />
+            <span className="p p6" />
+            <span className="p p7" />
+            <span className="p p8" />
+            <span className="p p9" />
+            <span className="p p10" />
+            <span className="p p11" />
+            <span className="p p12" />
+          </div>
         </div>
         <div className="cta">
           <h1>Quantum Drop</h1>
