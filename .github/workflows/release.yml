@@ -19,9 +19,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -38,6 +57,30 @@ jobs:
 
       - name: Build Tauri app
         run: npm run tauri:build
+
+      - name: Sign Windows bundles (optional)
+        if: matrix.platform == 'windows-latest' && env.WIN_CERT_B64 != ''
+        shell: pwsh
+        env:
+          WIN_CERT_B64: ${{ secrets.WIN_CERT_B64 }}
+          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $PWD 'win_signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WIN_CERT_B64))
+          $files = Get-ChildItem -Recurse "src-tauri/target/release/bundle" -Include *.exe,*.msi
+          foreach ($f in $files) {
+            & signtool.exe sign /f $pfxPath /p $env:WIN_CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 $f.FullName
+          }
+
+      - name: Sign Linux bundles (optional, detached .asc)
+        if: matrix.platform == 'ubuntu-latest' && env.LINUX_GPG_PRIVATE_KEY != ''
+        env:
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+        run: |
+          echo "$LINUX_GPG_PRIVATE_KEY" | gpg --batch --import
+          find src-tauri/target/release/bundle -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" \) -print0 | \
+            xargs -0 -I {} bash -c 'gpg --batch --pinentry-mode loopback --passphrase "$LINUX_GPG_PASSPHRASE" --armor --detach-sign "{}"'
 
       - name: Upload bundles
         uses: actions/upload-artifact@v4
