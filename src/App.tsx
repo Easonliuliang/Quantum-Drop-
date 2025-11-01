@@ -1273,6 +1273,12 @@ export default function App(): JSX.Element {
           <span className="p p4" />
           <span className="p p5" />
           <span className="p p6" />
+          <span className="p p7" />
+          <span className="p p8" />
+          <span className="p p9" />
+          <span className="p p10" />
+          <span className="p p11" />
+          <span className="p p12" />
         </div>
         <div className="cta">
           <h1>Quantum Drop</h1>

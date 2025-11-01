@@ -113,26 +113,33 @@ body {
 }
 .absorb-particles .p {
   position: absolute;
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(56,189,248,0.8) 55%, rgba(56,189,248,0.2) 100%);
   opacity: 0;
+  --rot: 140deg;
 }
 .dropzone.is-absorbing .absorb-particles .p {
   animation: particle-move 0.9s cubic-bezier(.25,.9,.3,1) forwards;
 }
 .absorb-particles .p1 { left: 18%; top: 28%; }
-.absorb-particles .p2 { left: 82%; top: 32%; animation-delay: .04s; }
-.absorb-particles .p3 { left: 26%; top: 70%; animation-delay: .08s; }
-.absorb-particles .p4 { left: 74%; top: 76%; animation-delay: .12s; }
-.absorb-particles .p5 { left: 40%; top: 18%; animation-delay: .16s; }
-.absorb-particles .p6 { left: 62%; top: 84%; animation-delay: .2s; }
+.absorb-particles .p2 { left: 82%; top: 32%; animation-delay: .04s; --rot: -160deg; }
+.absorb-particles .p3 { left: 26%; top: 70%; animation-delay: .08s; --rot: 120deg; }
+.absorb-particles .p4 { left: 74%; top: 76%; animation-delay: .12s; --rot: -120deg; }
+.absorb-particles .p5 { left: 40%; top: 18%; animation-delay: .16s; --rot: 100deg; }
+.absorb-particles .p6 { left: 62%; top: 84%; animation-delay: .2s; --rot: -100deg; }
+.absorb-particles .p7 { left: 12%; top: 56%; animation-delay: .06s; --rot: 150deg; }
+.absorb-particles .p8 { left: 88%; top: 58%; animation-delay: .1s; --rot: -150deg; }
+.absorb-particles .p9 { left: 32%; top: 86%; animation-delay: .14s; --rot: 130deg; }
+.absorb-particles .p10 { left: 68%; top: 14%; animation-delay: .18s; --rot: -130deg; }
+.absorb-particles .p11 { left: 8%; top: 38%; animation-delay: .22s; --rot: 110deg; }
+.absorb-particles .p12 { left: 92%; top: 42%; animation-delay: .24s; --rot: -110deg; }
 
 @keyframes particle-move {
-  0% { opacity: .95; transform: translate(-50%,-50%) scale(1); filter: blur(0); }
-  70% { opacity: .9; }
-  100% { left: 50%; top: 50%; opacity: 0; transform: translate(-50%,-50%) scale(.25); filter: blur(2px); }
+  0% { opacity: .95; transform: translate(-50%,-50%) rotate(0deg) scale(1); filter: blur(0); }
+  65% { opacity: .9; }
+  100% { left: 50%; top: 50%; opacity: 0; transform: translate(-50%,-50%) rotate(var(--rot)) scale(.22); filter: blur(2px); }
 }
 
 .dropzone:focus {
