@@ -31,7 +31,7 @@
   <!-- 透明画布，保证四角透明 -->
   <g clip-path="url(#clip)">
     <!-- 统一缩放到 86%，避免视觉上偏大 -->
-    <g transform="translate(512 512) scale(0.86) translate(-512 -512)">
+    <g transform="translate(512 512) scale(0.82) translate(-512 -512)">
       <rect width="1024" height="1024" fill="url(#bg)"/>
 
       <!-- 顶部柔光区域（随缩放） -->
@@ -51,6 +51,5 @@
     </g>
   </g>
 
-  <!-- 外边沿轻微内描边，增添立体感（不影响透明角） -->
-  <rect x="3" y="3" width="1018" height="1018" rx="192" ry="192" fill="none" stroke="#60A5FA1A" stroke-width="6"/>
+  <!-- 边沿描边移除，避免在某些缩略视图中被误判为硬边框 -->
 </svg>
