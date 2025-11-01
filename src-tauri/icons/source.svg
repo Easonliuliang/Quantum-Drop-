@@ -1,11 +1,19 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <radialGradient id="bg" cx="50%" cy="16%" r="80%">
-      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.25"/>
-      <stop offset="22%" stop-color="#38BDF8" stop-opacity="0.18"/>
-      <stop offset="60%" stop-color="#020617" stop-opacity="0.85"/>
-      <stop offset="82%" stop-color="#020617" stop-opacity="0.96"/>
+    <!-- 背景径向渐变，呼应 UI 的量子蓝色调 -->
+    <radialGradient id="bg" cx="50%" cy="16%" r="85%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.28"/>
+      <stop offset="25%" stop-color="#38BDF8" stop-opacity="0.20"/>
+      <stop offset="62%" stop-color="#020617" stop-opacity="0.90"/>
+      <stop offset="88%" stop-color="#020617" stop-opacity="0.98"/>
     </radialGradient>
+    <!-- 顶部柔光高光，用于贴近 macOS 图标质感 -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="55%" stop-color="#FFFFFF" stop-opacity="0.0"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.0"/>
+    </linearGradient>
+    <!-- 内发光 -->
     <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
       <feGaussianBlur stdDeviation="6" result="b"/>
       <feMerge>
@@ -13,19 +21,32 @@
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+    <!-- 使用圆角矩形作为剪裁区域，模拟 macOS 的图标轮廓（近似 squircle） -->
+    <clipPath id="clip">
+      <rect x="0" y="0" width="1024" height="1024" rx="220" ry="220"/>
+    </clipPath>
   </defs>
-  <rect width="1024" height="1024" fill="url(#bg)"/>
 
-  <!-- Outer ring -->
-  <g filter="url(#glow)">
-    <circle cx="512" cy="512" r="360" fill="none" stroke="#38BDF866" stroke-width="8"/>
-    <!-- Middle ring -->
-    <circle cx="512" cy="512" r="300" fill="none" stroke="#38BDF8" stroke-width="10"/>
-    <!-- Inner ring -->
-    <circle cx="512" cy="512" r="240" fill="none" stroke="#38BDF8BF" stroke-width="12"/>
+  <!-- 透明画布，保证四角透明 -->
+  <g clip-path="url(#clip)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+
+    <!-- 顶部柔光区域 -->
+    <g opacity="0.55">
+      <path d="M0,0 H1024 V380 C780,460 244,460 0,380 Z" fill="url(#sheen)"/>
+    </g>
+
+    <!-- 量子环 -->
+    <g filter="url(#glow)">
+      <circle cx="512" cy="560" r="330" fill="none" stroke="#38BDF85D" stroke-width="9"/>
+      <circle cx="512" cy="560" r="270" fill="none" stroke="#38BDF8" stroke-width="11"/>
+      <circle cx="512" cy="560" r="210" fill="none" stroke="#38BDF8BF" stroke-width="13"/>
+    </g>
+
+    <!-- 内部柔光核心 -->
+    <circle cx="512" cy="560" r="150" fill="#38BDF81F" filter="url(#glow)"/>
   </g>
 
-  <!-- Soft inner glow -->
-  <circle cx="512" cy="512" r="160" fill="#38BDF820" filter="url(#glow)"/>
+  <!-- 外边沿轻微内描边，增添立体感（不影响透明角） -->
+  <rect x="3" y="3" width="1018" height="1018" rx="216" ry="216" fill="none" stroke="#60A5FA20" stroke-width="6"/>
 </svg>
-
