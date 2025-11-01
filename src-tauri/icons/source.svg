@@ -21,34 +21,26 @@
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
-    <!-- 使用圆角矩形作为剪裁区域，模拟 macOS 的图标轮廓（近似 squircle） -->
-    <clipPath id="clip">
-      <!-- 近似 macOS Big Sur 图标圆角：1024 基准下约 196px -->
-      <rect x="0" y="0" width="1024" height="1024" rx="196" ry="196"/>
-    </clipPath>
+    <!-- 不再使用剪裁，直接用圆角矩形绘制，确保导出后四角透明 -->
   </defs>
 
-  <!-- 透明画布，保证四角透明 -->
-  <g clip-path="url(#clip)">
-    <!-- 统一缩放到 86%，避免视觉上偏大 -->
-    <g transform="translate(512 512) scale(0.82) translate(-512 -512)">
-      <rect width="1024" height="1024" fill="url(#bg)"/>
+  <!-- 统一缩放，所有绘制都在圆角矩形内，不使用剪裁，保证四角透明 -->
+  <g transform="translate(512 512) scale(0.82) translate(-512 -512)">
+    <!-- 背景为圆角矩形，导出后四角透明 -->
+    <rect width="1024" height="1024" rx="196" ry="196" fill="url(#bg)"/>
 
-      <!-- 顶部柔光区域（随缩放） -->
-      <g opacity="0.55">
-        <path d="M0,0 H1024 V380 C780,460 244,460 0,380 Z" fill="url(#sheen)"/>
-      </g>
+    <!-- 顶部柔光（同样使用圆角矩形，避免溢出边界） -->
+    <rect width="1024" height="1024" rx="196" ry="196" fill="url(#sheen)" opacity="0.55"/>
 
-      <!-- 量子环 -->
-      <g filter="url(#glow)">
-        <circle cx="512" cy="560" r="330" fill="none" stroke="#38BDF85D" stroke-width="9"/>
-        <circle cx="512" cy="560" r="270" fill="none" stroke="#38BDF8" stroke-width="11"/>
-        <circle cx="512" cy="560" r="210" fill="none" stroke="#38BDF8BF" stroke-width="13"/>
-      </g>
-
-      <!-- 内部柔光核心 -->
-      <circle cx="512" cy="560" r="150" fill="#38BDF81F" filter="url(#glow)"/>
+    <!-- 量子环 -->
+    <g filter="url(#glow)">
+      <circle cx="512" cy="560" r="330" fill="none" stroke="#38BDF85D" stroke-width="9"/>
+      <circle cx="512" cy="560" r="270" fill="none" stroke="#38BDF8" stroke-width="11"/>
+      <circle cx="512" cy="560" r="210" fill="none" stroke="#38BDF8BF" stroke-width="13"/>
     </g>
+
+    <!-- 内部柔光核心 -->
+    <circle cx="512" cy="560" r="150" fill="#38BDF81F" filter="url(#glow)"/>
   </g>
 
   <!-- 边沿描边移除，避免在某些缩略视图中被误判为硬边框 -->
