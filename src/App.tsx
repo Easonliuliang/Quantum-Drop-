@@ -808,7 +808,7 @@ export default function App(): JSX.Element {
     };
   }, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, sendHeartbeat]);
 
-  // 监听 Tauri 系统拖拽（包含绝对路径）— 首选官方 API，失败则回退到 window.__TAURI__ 注入
+  // 监听 Tauri 系统拖拽（包含绝对路径）— 首选 window.onFileDropEvent，其次事件总线，最后 DOM
   useEffect(() => {
     if (!detectTauri()) return;
     let unlisten: (() => void) | null = null;
@@ -839,11 +839,20 @@ export default function App(): JSX.Element {
 
     (async () => {
       try {
-        const mod = await import("@tauri-apps/api/event");
-        unlisten = await (mod as unknown as { listen: Function }).listen(
-          "tauri://file-drop",
-          handler
-        );
+        // 优先使用 window API（onFileDropEvent），在 v2 更稳定
+        const wmod = await import("@tauri-apps/api/window");
+        if ((wmod as any)?.appWindow?.onFileDropEvent) {
+          const off = await (wmod as any).appWindow.onFileDropEvent((e: any) => {
+            if (e?.payload?.type === 'drop') {
+              handler({ payload: e.payload.paths || [] });
+            }
+          });
+          unlisten = () => off?.();
+          return;
+        }
+        // 退化为事件总线监听
+        const emod = await import("@tauri-apps/api/event");
+        unlisten = await (emod as unknown as { listen: Function }).listen("tauri://file-drop", handler);
       } catch (e) {
         // 回退到全局注入
         const tauri = getTauri();
