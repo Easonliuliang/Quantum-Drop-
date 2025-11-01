@@ -6,7 +6,7 @@
 
 环境与版本锁定
 - Node 版本：.nvmrc（18.18.0），CI 使用 node-version-file 保持一致。
-- Rust 工具链：rust-toolchain.toml（1.81.0，含 rustfmt/clippy）。
+- Rust 工具链：rust-toolchain.toml（stable，含 rustfmt/clippy）。
 - 包管理：建议本地使用 npm ci（与 CI 保持一致）。
 
 如何发版
@@ -35,4 +35,3 @@ macOS（补充说明）
 - 图标：src-tauri/tauri.conf.json 中的 bundle.icon 如启用，需提供有效 PNG（各尺寸），否则会阻塞打包。
 - CI 构建缓存：可按需加入 Rust/Node 缓存以提速（actions/cache）。
 - 如果需要自动创建 Release 而非仅上传到 tag 对应 Release，工作流已包含 softprops/action-gh-release 完成这一动作。
-
