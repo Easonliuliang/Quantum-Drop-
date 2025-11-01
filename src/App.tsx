@@ -898,6 +898,10 @@ export default function App(): JSX.Element {
 
   const handleDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
+      // 在 Tauri 环境下，不拦截 DOM drop，让系统级 file-drop 事件拿到绝对路径
+      if (detectTauri()) {
+        return;
+      }
       event.preventDefault();
       setHovered(false);
       captureFiles(event.dataTransfer.files);
@@ -914,6 +918,7 @@ export default function App(): JSX.Element {
   );
 
   const handleDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (detectTauri()) return;
     event.preventDefault();
     if (!hovered) {
       setHovered(true);
@@ -921,6 +926,7 @@ export default function App(): JSX.Element {
   }, [hovered]);
 
   const handleDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (detectTauri()) return;
     event.preventDefault();
     setHovered(false);
   }, []);
