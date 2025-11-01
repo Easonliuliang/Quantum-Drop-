@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getPublicKey, sign as signEd25519, utils as ed25519Utils, etc as ed25519Etc } from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha2.js";
+import { listen as listenTauri } from "@tauri-apps/api/event";
+import { appWindow } from "@tauri-apps/api/window";
 import {
   loadIdentity,
   loadLastIdentityId,
