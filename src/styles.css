@@ -82,6 +82,28 @@ body {
   cursor: pointer;
 }
 
+/* 吸入动效：短暂收束 + 发光 */
+.dropzone.is-absorbing .rings::after {
+  content: "";
+  position: absolute;
+  inset: 28% 28%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(56,189,248,0.85) 0%, rgba(56,189,248,0.15) 45%, transparent 70%);
+  filter: blur(8px);
+  animation: absorbPulse 0.9s ease forwards;
+}
+
+.dropzone.is-absorbing {
+  transform: translateY(-3px) scale(1.01);
+  box-shadow: 0 60px 140px rgba(56, 189, 248, 0.45);
+}
+
+@keyframes absorbPulse {
+  0% { transform: scale(0.6); opacity: 0.95; }
+  60% { transform: scale(1.15); opacity: 0.75; }
+  100% { transform: scale(1.35); opacity: 0; }
+}
+
 .dropzone:focus {
   outline: none;
   border-color: rgba(56, 189, 248, 0.7);

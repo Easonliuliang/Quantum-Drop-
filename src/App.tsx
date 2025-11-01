@@ -307,6 +307,7 @@ export default function App(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [absorbing, setAbsorbing] = useState(false);
   const heartbeatTimerRef = useRef<number | null>(null);
   const heartbeatCapabilities = useMemo(() => ["ui:minimal-panel"], []);
   const deviceStatusOptions = useMemo(() => ["active", "standby", "inactive"], []);
@@ -823,11 +824,9 @@ export default function App(): JSX.Element {
       setTaskCode(null);
       setProgress(null);
       setLogs([]);
-      setInfo(
-        detectTauri()
-          ? "拖拽文件后请点击“选择文件”以使用 Tauri 文件对话框再试。"
-          : null
-      );
+      // 吸入动效（拖拽场景不自动发送）
+      setAbsorbing(true);
+      window.setTimeout(() => setAbsorbing(false), 900);
     },
     [captureFiles]
   );
@@ -862,7 +861,6 @@ export default function App(): JSX.Element {
         const selectedPaths = Array.isArray(selected) ? selected : [selected];
         const normalized = selectedPaths.filter((value): value is string => typeof value === "string");
         if (normalized.length === 0) {
-          setInfo("未选择任何文件。");
           return;
         }
         const displayFiles = normalized.map<SelectedFile>((path) => {
@@ -876,7 +874,16 @@ export default function App(): JSX.Element {
         setTaskCode(null);
         setProgress(null);
         setLogs([]);
-        setInfo("文件已准备，点击“启动传输”开始模拟发送。");
+        // 动效与自动传输
+        setAbsorbing(true);
+        window.setTimeout(() => setAbsorbing(false), 900);
+        const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
+        if (canAuto && !isSending) {
+          window.setTimeout(() => {
+            // 兼容类型
+            void beginTransfer(normalized as unknown as string[]);
+          }, 220);
+        }
       } else {
         // Tauri dialog 插件不可用时，回退到浏览器文件选择器
         fileInputRef.current?.click();
@@ -917,7 +924,7 @@ export default function App(): JSX.Element {
     return `${value} B/s`;
   }, [progress]);
 
-  const beginTransfer = useCallback(async () => {
+  const beginTransfer = useCallback(async (pathsOverride?: string[]) => {
     let invoke: TauriInvokeFn;
     try {
       invoke = resolveTauriInvoke();
@@ -935,7 +942,8 @@ export default function App(): JSX.Element {
       setInfo("请至少登记一个终端设备。");
       return;
     }
-    if (pendingPaths.length === 0) {
+    const pathsToUse = Array.isArray(pathsOverride) && pathsOverride.length > 0 ? pathsOverride : pendingPaths;
+    if (pathsToUse.length === 0) {
       setInfo("请选择至少一个文件。");
       return;
     }
@@ -951,7 +959,7 @@ export default function App(): JSX.Element {
           deviceId: activeDevice.deviceId,
           signature: signatureGenerate,
           payload: {
-            paths: pendingPaths,
+            paths: pathsToUse,
             expireSec: undefined,
           },
         },
@@ -967,13 +975,13 @@ export default function App(): JSX.Element {
           deviceId: activeDevice.deviceId,
           signature: signatureSend,
           payload: {
-            paths: pendingPaths,
+            paths: pathsToUse,
           },
         },
         code: result.code,
       });
       appendLog("传输已启动，等待事件更新…");
-      setInfo("模拟传输进行中，如在另一设备运行可输入相同取件码触发接收过程。");
+      // 最小提示：避免额外文本
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -1196,7 +1204,7 @@ export default function App(): JSX.Element {
   return (
     <div className="app-surface">
       <div
-        className={hovered ? "dropzone is-hovered" : "dropzone"}
+        className={`${hovered ? "dropzone is-hovered" : "dropzone"} ${absorbing ? "is-absorbing" : ""}`}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -1243,7 +1251,7 @@ export default function App(): JSX.Element {
               </li>
             ))}
           </ul>
-          {isTauri && (
+          {isTauri && !(identity && identityPrivateKey && (activeDeviceId || devices[0])) && (
             <div className="actions-row">
               <button
                 className="primary"
