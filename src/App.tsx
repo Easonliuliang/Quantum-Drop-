@@ -502,7 +502,7 @@ export default function App(): JSX.Element {
         payload: {
           identityId,
           publicKey: publicKeyHex,
-          label: "Quantum Courier",
+          label: "Quantum Drop · 量子快传",
         },
       })) as IdentityResponseDto;
       const resolvedId = response.identityId ?? response.identity_id ?? identityId;
@@ -1352,8 +1352,8 @@ export default function App(): JSX.Element {
           </div>
         </div>
         <div className="cta">
-          <h1>Quantum Drop</h1>
-          <p>拖拽或选择文件，启动 Courier Agent 的模拟传输流程。</p>
+          <h1>Quantum Drop · 量子快传</h1>
+          <p>拖拽或选择文件，启动 Quantum Drop · 量子快传 的模拟传输流程。</p>
           <button className="browse" onClick={handleBrowse} type="button">
             选择文件
           </button>

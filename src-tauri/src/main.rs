@@ -75,5 +75,5 @@ fn main() {
             update_settings
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Courier Agent");
+        .expect("error while running Quantum Drop · 量子快传");
 }

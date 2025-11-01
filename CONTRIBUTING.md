@@ -1,6 +1,6 @@
-# Contributing to Courier Agent
+# Contributing to Quantum Drop · 量子快传
 
-Welcome! Courier Agent is the data-plane intelligence for the AETHER OS ecosystem. Contributions that improve resilience, observability, and developer experience are especially appreciated.
+Welcome! Quantum Drop · 量子快传 is the data-plane intelligence for the AETHER OS ecosystem. Contributions that improve resilience, observability, and developer experience are especially appreciated.
 
 ## Development Flow
 
@@ -42,4 +42,4 @@ Report suspected vulnerabilities privately via security@aetheros.dev. Coordinate
 - **Discussions** – architecture debates, UX research, and roadmap alignment.
 - **Release Notes** – summarise user-facing changes; automation will compile highlights from merged PRs.
 
-Thank you for helping Courier Agent evolve into the backbone of AETHER’s data presence layer.⚛
+Thank you for helping Quantum Drop · 量子快传 evolve into the backbone of AETHER’s data presence layer.⚛

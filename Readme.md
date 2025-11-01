@@ -1,4 +1,4 @@
-# 🚀 Courier Agent · 智能文件传递体
+# 🚀 Quantum Drop · 量子快传
 
 > 消除路径感知、即时完成且可验证的文件传递体验。<br />
 > 基于 Tauri · Rust · React 构建，并与 AETHER OS 生态保持一致。
@@ -7,7 +7,7 @@
 
 ## 概览
 
-Courier Agent 将文件传输重新定义为“存在”，而非“移动”。应用并非让字节穿梭于脆弱的中继链路，而是在设备之间折叠并显化数据，一旦传输启动便产出经过验证的成果。灵感来自 AETHER OS 的理念——智能体以念头协作，需要时显形，用毕即散。
+Quantum Drop · 量子快传 将文件传输重新定义为“存在”，而非“移动”。应用并非让字节穿梭于脆弱的中继链路，而是在设备之间折叠并显化数据，一旦传输启动便产出经过验证的成果。灵感来自 AETHER OS 的理念——智能体以念头协作，需要时显形，用毕即散。
 
 核心设计目标：
 
@@ -138,7 +138,7 @@ npm run tauri:dev
 
 ## AETHER OS 设计注记
 
-Courier Agent 是 AETHER OS 星群中首个数据平面智能体：
+Quantum Drop · 量子快传 是 AETHER OS 星群中首个数据平面智能体：
 
 ```
 AETHER OS
@@ -146,7 +146,7 @@ AETHER OS
 ├─ Cognitive Agents (Planner · Researcher · Storyteller ...)
 │    ↳ Consume transfer events to seed shared memory graphs
 │
-└─ ⚛ Courier Agent（数据智能体）
+└─ ⚛ Quantum Drop · 量子快传（数据智能体）
      ├─ Fold: locally encrypts + shards payloads
      ├─ Jump: negotiates multi-path routes with situational policy
      ├─ Manifest: streams previews and metadata to recipients

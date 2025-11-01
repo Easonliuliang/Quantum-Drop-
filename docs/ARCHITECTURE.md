@@ -1,4 +1,4 @@
-# Courier Agent Architecture
+# Quantum Drop · 量子快传 Architecture
 
 This document tracks the concrete shape of the **S1 · 虫洞最小核** milestone. The complete intent, terminology, and acceptance criteria are recorded in `docs/PROJECT_BLUEPRINT.md`; what follows describes how that blueprint maps onto the code that now exists in the repository.
 

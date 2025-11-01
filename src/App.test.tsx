@@ -5,7 +5,7 @@ import App from "./App";
 describe("App", () => {
   it("renders quantum drop surface", () => {
     render(<App />);
-    expect(screen.getByRole("heading", { name: "Quantum Drop" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Quantum Drop · 量子快传" })).toBeVisible();
     expect(screen.getByRole("button", { name: "选择文件" })).toBeVisible();
     expect(screen.getByLabelText("拖拽或选择文件上传")).toBeVisible();
   });

@@ -1,4 +1,4 @@
-# Example Courier Agent configuration
+# Example Quantum Drop · 量子快传 configuration
 s2:
   transport:
     preferredRoutes:
