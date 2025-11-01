@@ -1353,7 +1353,7 @@ export default function App(): JSX.Element {
         </div>
         <div className="cta">
           <h1>Quantum Drop · 量子快传</h1>
-          <p>拖拽或选择文件，启动 Quantum Drop · 量子快传 的模拟传输流程。</p>
+          <p>轻松拖拽，极速直达。</p>
           <button className="browse" onClick={handleBrowse} type="button">
             选择文件
           </button>
