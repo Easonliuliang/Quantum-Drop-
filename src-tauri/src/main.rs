@@ -21,6 +21,8 @@ use serde::Serialize;
 use store::{IdentityStore, TransferStore};
 use tauri::Manager;
 
+mod services;
+
 #[derive(Serialize)]
 struct HealthCheck {
     status: &'static str,
@@ -40,6 +42,8 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Run legacy data migration (identifier/product rename) before stores initialise
+            services::migration::run_legacy_migration(&app.handle());
             let store = TransferStore::initialise(&app.handle())
                 .expect("failed to initialise transfer store");
             app.manage(store);
