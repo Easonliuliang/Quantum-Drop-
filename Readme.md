@@ -17,17 +17,29 @@ Quantum Drop · 量子快传 将文件传输重新定义为“存在”，而非
 
 ---
 
-## 功能亮点
+## 当前完成度（v0.1.x）
 
-- **Aether 级传输管线**：自动在局域网 QUIC、点对点 WebRTC、TURN 中继及可选缓存之间择优切换。
-- **可续传分片与自适应大小**：分片目录持久化，仅请求缺失段，并依据 RTT 自动调节分片尺寸。
-- **端到端机密性**：使用 Noise/XChaCha20-Poly1305 加密隧道，身份临时生成，信令层对载荷保持盲态。
-- **Proof of Transition 账本**：Merkle 校验的收据可导出，便于离线验证和审计。
-- **Presence UI**：Vite + React 前端强调“先到感”叙事，状态卡片由 Rust 运行时驱动。
-- **量子隧道界面**：参见 [docs/QUANTUM_UI.md](docs/QUANTUM_UI.md)，记录观察者/无时/无界原则、点阵虫洞与复制系统。
-- **点阵虫洞（WebGL2）**：点精灵着色器自橙到靛渐变，按路由调整色调，爆发时提升噪声与曝光，并为低动态或不支持 GPU 场景提供自动 2D 备选。
-- **沉浸式量子投递区**：零拷贝拖拽界面，带有动态皮肤、强度/速度控制，并支持减缓动效（详见 [Immersive Dropzone](docs/QUANTUM_UI.md#immersive-dropzone-zero-copy-ui)）。
-- **可组合智能体**：运行时开放 Hook，供其他 AETHER 认知智能体订阅传输事件与记忆图谱。
+- 前端与交互
+  - Quantum Drop 投递区：拖拽 hover/吸入动效（Tauri v2 + Webview 拖拽事件），键盘可达；浏览器模式保留 UI 演示。
+  - 标识与文案：应用更名为“Quantum Drop · 量子快传”，全平台图标统一（macOS 圆角风格）。
+- 身份与设备
+  - 本地生成 Ed25519 身份；登记设备；15s 心跳（状态/能力）。
+  - 身份/私钥/last-id 在桌面端落盘持久化（浏览器退化到 localStorage）。
+- 传输与事件（演示管线）
+  - 传输路由编排器（LAN/QUIC → P2P/WebRTC → Relay/TCP → Mock 兜底），按优先级与超时回退。
+  - 分片发送与事件流：阶段/进度/速率/路由标签（lan|p2p|relay），完成后导出演示版 PoT 路径。
+- 构建与发布
+  - Tauri 打包（macOS .app/.dmg 已验证），GitHub Actions 三平台构建与自动发布；仓库体积 ~9MB。
+
+> 说明：当前仓库内的 QUIC/WebRTC/Relay 适配器为本机回环 Demo，用于验证 UI/事件/路由链路。跨设备真实传输将以此为接口骨架逐步替换为生产实现。
+
+## 已知限制与计划
+
+- 真实跨设备传输：LAN 发现/打洞、P2P ICE/STUN/TURN、可部署 Relay 端点（规划中）。
+- 断点续传与强校验：块级位图/哈希清单持久化、崩溃恢复、自适应分片（近期优先）。
+- 吞吐优化：QUIC 多并发流/拥塞控制调优、I/O 管线化与背压、路由并发竞速与动态切换。
+- 端到端加密：会话密钥协商与内容加密落地（设计期）。
+- 签名发布：Windows/Linux 代码签名在 CI 预置，待稳定后开启。
 
 ## Error Codes
 
@@ -77,20 +89,18 @@ courier-agent/
 
 ```bash
 # 1. 安装工具链（首次执行）
-rustup target add x86_64-apple-darwin         # 以 macOS 为例
-cargo install tauri-cli                      # 可选，npm 脚本已自带
+# 建议使用项目内 rust-toolchain.toml / .nvmrc 锁定版本
+cargo --version && rustc --version            # 确认 Rust 已安装
+node -v && npm -v                             # Node 18
 
 # 2. 安装 Node 依赖
 npm install
 
-# 3. 启动 React UI 与 Tauri Shell
+# 3. 启动 Tauri 桌面环境（推荐）
 npm run tauri:dev
-# 或执行辅助脚本
-./scripts/dev.sh
 
-# 4. 合并前的质量关卡
-./scripts/check.sh
-# （执行仅构建验证：npm run build、cargo build --release）
+# 4. 质量校验（Lint/Unit/Clippy）
+npm run check
 ```
 
 常用命令：
@@ -99,17 +109,10 @@ npm run tauri:dev
 - `cargo test --manifest-path src-tauri/Cargo.toml`：执行原生单元/集成测试。
 - `npm run preview`：在无 Tauri Shell 的情况下预览编译后的前端。
 
-### Proof of Transition 工作流
+### PoT 与大文件
 
-- 每次完成传输都会生成确定性的 `proofs/<taskId>.pot.json` 收据。可在历史面板中通过 **Export PoT** 再次查看存储路径。
-- **Verify PoT** 支持加载任意 `.pot.json` 文件，完成结构与签名校验，并在失败时给出可执行提示。
-- 传输卡片实时展示字节进度、移动平均速度与预计完成时间，便于与 PoT 导出结果对照。
-
-### 断点续传工作流
-
-- 运行时报告分片状态后，活动卡片会显示“可续传”徽标；中断任务将提供 **继续** 按钮，只补传缺失段。
-- 续传元数据存储于 `cache/{taskId}-index.json`，成功完成或手动取消后会自动清理。
-- 设置页的“Advanced chunk sizing” 面板可开启自适应分片，并设置最小/最大值（单位 MiB）。
+- PoT：当前版本在完成后导出演示版 PoT 路径，记录路由与分片确认过程，用于 UI/事件链路验证。
+- 大文件策略（规划中）：块级哈希清单 + 断点位图、QUIC 并发流、背压与限速、路由竞速/迁移。
 
 ---
 
@@ -121,6 +124,8 @@ npm run tauri:dev
 2. **登记设备**：点击“登记新设备”即可生成终端公钥，前端会对 `register:<deviceId>:<devicePublicKey>` 签名，后端写入 SQLite `devices` 表。设备列表会显示状态、最近心跳时间与声明的能力标签。
 3. **心跳同步**：面板每 15 秒向 `auth_heartbeat_device` 发送签名心跳，刷新 `status`、`last_seen_at`、`capabilities`，并通过 `identity_devices_updated` 事件广播到所有前端实例，实现“同频”效果。
 4. **签名调用**：`courier_generate_code` / `courier_send` / `courier_receive` 均要求携带 `AuthenticatedPayload`，消息体为 `purpose:identity_id:device_id`。未登记或非 `active` 设备会被拒绝，防止越权。
+
+> 传输路径（设计）：优先 LAN(QUIC/UDP) → P2P(WebRTC DataChannel) → Relay(TCP)，失败回退到 Mock。本仓库提供接口与演示适配器，便于后续替换为真实跨设备实现；配置示例见 `docs/app.sample.yaml`。
 
 > 权益（plan/features）当前仍为本地占位，后续需要引入真实付费/令牌逻辑时，可直接扩展 `IdentityStore::set_entitlement` 与相关命令。
 
