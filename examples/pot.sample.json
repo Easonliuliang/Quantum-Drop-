@@ -1,0 +1,20 @@
+{
+  "taskId": "task_demo_123456",
+  "route": "lan",
+  "direction": "send",
+  "createdAt": "2025-01-01T12:34:56Z",
+  "files": [
+    { "name": "demo.txt", "size": 1024, "sha256": "6f5902ac237024bdd0c176cb93063dc4" }
+  ],
+  "chunks": { "total": 1, "size": 1048576, "acknowledged": [true] },
+  "attestations": [
+    {
+      "path": "demo.txt",
+      "sha256": "6f5902ac237024bdd0c176cb93063dc4",
+      "algorithm": "sha256"
+    }
+  ],
+  "proofVersion": "0.1",
+  "generator": "Quantum Drop · 量子快传"
+}
+

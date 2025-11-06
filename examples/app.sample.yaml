@@ -1,0 +1,14 @@
+# Example configuration for Quantum Drop · 量子快传
+s2:
+  transport:
+    preferredRoutes:
+      - lan
+      - p2p
+      - relay
+    # Relay endpoint (optional). For demo it's local, production points to your relay service.
+    relayEndpoint: tcp://127.0.0.1:6200
+    # STUN/TURN list for WebRTC (optional)
+    stun:
+      - stun:stun.l.google.com:19302
+      - turn:turn.relay.example:3478?transport=udp
+
