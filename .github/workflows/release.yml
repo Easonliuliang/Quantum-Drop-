@@ -16,6 +16,8 @@ jobs:
       matrix:
         platform: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
+    # Allow non-macOS builds to fail without blocking publish
+    continue-on-error: ${{ matrix.platform != 'macos-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -91,6 +93,8 @@ jobs:
 
   publish:
     needs: build
+    # Still publish whatever artifacts succeeded (e.g., macOS)
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts

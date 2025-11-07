@@ -1,5 +1,10 @@
 # 🚀 Quantum Drop · 量子快传
 
+[![Release Bundles](https://github.com/Easonliuliang/-1319/actions/workflows/release.yml/badge.svg)](https://github.com/Easonliuliang/-1319/actions/workflows/release.yml)
+![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
+![Node](https://img.shields.io/badge/node-18.x-026e00?logo=node.js)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
 > 消除路径感知、即时完成且可验证的文件传递体验。<br />
 > 基于 Tauri · Rust · React 构建，并与 AETHER OS 生态保持一致。
 
@@ -14,6 +19,10 @@ Quantum Drop · 量子快传 将文件传输重新定义为“存在”，而非
 - **存在优先的体验**：元数据与证明先行抵达，内容在后台快速收敛。
 - **多路径传输调度**：综合 QUIC、WebRTC、TURN 等链路，确保持续吞吐。
 - **可验证结果**：每次跃迁都会生成可携带的 Proof of Transition（PoT）文件。
+
+演示（拖拽投递）：
+
+![Demo](demo.gif)
 
 ---
 
@@ -114,6 +123,11 @@ npm run check
 - PoT：当前版本在完成后导出演示版 PoT 路径，记录路由与分片确认过程，用于 UI/事件链路验证。
 - 大文件策略（规划中）：块级哈希清单 + 断点位图、QUIC 并发流、背压与限速、路由竞速/迁移。
 
+### 示例与样例
+
+- 示例配置：examples/app.sample.yaml
+- 示例 PoT 收据：examples/pot.sample.json
+
 ---
 
 ## 量子身份与终端同频
@@ -176,3 +190,13 @@ AETHER OS
 ## 许可证
 
 项目以 MIT License 发布。待上游依赖允许后，可考虑切换为 MIT + Apache 2.0 双许可证模型。
+
+— 如果你喜欢这个项目，欢迎点 Star 支持；后续 Pro 版将解锁“真实 P2P、断点续传、企业 Relay 部署”等能力。
+
+---
+
+## 支持项目
+
+- 扫码支持（占位，后续可替换为你的二维码）：
+
+  <img src="docs/assets/qr.png" width="160" alt="Support QR" />
