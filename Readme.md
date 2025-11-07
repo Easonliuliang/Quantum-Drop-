@@ -1,6 +1,6 @@
 # 🚀 Quantum Drop · 量子快传
 
-[![Release Bundles](https://github.com/Easonliuliang/-1319/actions/workflows/release.yml/badge.svg)](https://github.com/Easonliuliang/-1319/actions/workflows/release.yml)
+[![Release Bundles](https://github.com/Easonliuliang/Quantum-Drop-/actions/workflows/release.yml/badge.svg)](https://github.com/Easonliuliang/Quantum-Drop-/actions/workflows/release.yml)
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 ![Node](https://img.shields.io/badge/node-18.x-026e00?logo=node.js)
 ![License](https://img.shields.io/badge/license-MIT-blue)
