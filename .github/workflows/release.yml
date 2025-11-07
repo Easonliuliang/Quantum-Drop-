@@ -93,9 +93,11 @@ jobs:
 
   publish:
     needs: build
-    # Still publish whatever artifacts succeeded (e.g., macOS)
-    if: ${{ always() }}
+    # Publish even if some builds failed, but only for tag events
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -103,10 +105,39 @@ jobs:
           path: dist-release
           merge-multiple: true
 
-      - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist-release/**
-          generate_release_notes: true
-          draft: false
-          prerelease: false
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            type -p curl >/dev/null || sudo apt-get update
+            sudo apt-get install -y curl
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update && sudo apt-get install -y gh
+          fi
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG_NAME="${GITHUB_REF_NAME}"
+          echo "Publishing tag: ${TAG_NAME}"
+          # If release exists from a previous attempt, delete it to avoid asset clobber edge-cases
+          gh release view "${TAG_NAME}" >/dev/null 2>&1 && gh release delete "${TAG_NAME}" -y || true
+          # Re-create fresh release (tag already exists)
+          gh release create "${TAG_NAME}" --title "${TAG_NAME}" --notes "Automated release for ${TAG_NAME}" --latest
+
+      - name: Upload assets via gh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG_NAME="${GITHUB_REF_NAME}"
+          # Collect only regular files
+          mapfile -d '' -t files < <(find dist-release -type f -print0)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No files found in dist-release to upload" >&2
+            exit 1
+          fi
+          gh release upload "${TAG_NAME}" "${files[@]}"
