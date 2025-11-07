@@ -140,9 +140,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euxo pipefail
-          gh --version
-          gh auth status -h github.com
+          set -euo pipefail
+          gh --version || true
+          # Note: gh uses GH_TOKEN implicitly; auth status may exit non-zero if not logged in persistently.
+          # Avoid failing on status and just proceed with upload.
+          gh auth status -h github.com || true
           ls -lR dist-release || true
           TAG_NAME="${GITHUB_REF_NAME}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
