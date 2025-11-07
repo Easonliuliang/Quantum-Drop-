@@ -107,11 +107,62 @@ jobs:
       - name: Checkout repository (for gh context)
         uses: actions/checkout@v4
 
+      - name: Determine tag name
+        env:
+          MANUAL_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${MANUAL_TAG}" ]; then
+            echo "TAG_NAME=${MANUAL_TAG}" >> "$GITHUB_ENV"
+          else
+            echo "TAG_NAME=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist-release
           merge-multiple: true
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          : "${TAG_NAME:?TAG_NAME not set}"
+          VERSION="${TAG_NAME#v}"
+          mkdir -p release-assets
+
+          sanitize() {
+            echo "$1" | sed -E 's/[^A-Za-z0-9._-]+/-/g'
+          }
+
+          copy_artifacts() {
+            local source_dir="$1"
+            local pattern="$2"
+            [ -d "$source_dir" ] || return 0
+            find "$source_dir" -maxdepth 1 -type f -name "$pattern" -print0 | while IFS= read -r -d '' file; do
+              base=$(basename "$file")
+              cp "$file" "release-assets/$(sanitize "$base")"
+            done
+          }
+
+          # Zip macOS .app bundles for friendly download
+          if [ -d dist-release/macos ]; then
+            find dist-release/macos -maxdepth 1 -mindepth 1 -type d -name '*.app' -print0 | while IFS= read -r -d '' app; do
+              name=$(basename "$app")
+              zip_name=$(sanitize "${name}_${VERSION}_macOS-app.zip")
+              (cd dist-release/macos && zip -qry "../../release-assets/${zip_name}" "$name")
+            done
+          fi
+
+          copy_artifacts dist-release/dmg '*.dmg'
+          copy_artifacts dist-release/nsis '*.exe'
+          copy_artifacts dist-release/appimage '*.AppImage'
+          copy_artifacts dist-release/deb '*.deb'
+
+          if [ ! -d release-assets ] || [ -z "$(ls -A release-assets)" ]; then
+            echo "No packaged assets found in release-assets" >&2
+            exit 1
+          fi
 
       - name: Install GitHub CLI
         run: |
@@ -129,10 +180,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG_NAME="${GITHUB_REF_NAME}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            TAG_NAME="${{ inputs.tag }}"
-          fi
+          : "${TAG_NAME:?TAG_NAME not set}"
           echo "Publishing tag: ${TAG_NAME}"
           # If release exists from a previous attempt, delete it to avoid asset clobber edge-cases
           gh release view "${TAG_NAME}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1 && gh release delete "${TAG_NAME}" -R "${GITHUB_REPOSITORY}" -y || true
@@ -148,15 +196,12 @@ jobs:
           # Note: gh uses GH_TOKEN implicitly; auth status may exit non-zero if not logged in persistently.
           # Avoid failing on status and just proceed with upload.
           gh auth status -h github.com || true
-          ls -lR dist-release || true
-          TAG_NAME="${GITHUB_REF_NAME}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            TAG_NAME="${{ inputs.tag }}"
-          fi
+          ls -lR release-assets || true
+          : "${TAG_NAME:?TAG_NAME not set}"
           # Collect only regular files
-          mapfile -d '' -t files < <(find dist-release -type f -print0)
+          mapfile -d '' -t files < <(find release-assets -type f -print0)
           if [ ${#files[@]} -eq 0 ]; then
-            echo "No files found in dist-release to upload" >&2
+            echo "No files found in release-assets to upload" >&2
             exit 1
           fi
           gh release upload "${TAG_NAME}" "${files[@]}" -R "${GITHUB_REPOSITORY}"
