@@ -132,9 +132,9 @@ jobs:
           fi
           echo "Publishing tag: ${TAG_NAME}"
           # If release exists from a previous attempt, delete it to avoid asset clobber edge-cases
-          gh release view "${TAG_NAME}" >/dev/null 2>&1 && gh release delete "${TAG_NAME}" -y || true
+          gh release view "${TAG_NAME}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1 && gh release delete "${TAG_NAME}" -R "${GITHUB_REPOSITORY}" -y || true
           # Re-create fresh release (tag already exists)
-          gh release create "${TAG_NAME}" --title "${TAG_NAME}" --notes "Automated release for ${TAG_NAME}" --latest
+          gh release create "${TAG_NAME}" -R "${GITHUB_REPOSITORY}" --title "${TAG_NAME}" --notes "Automated release for ${TAG_NAME}" --latest
 
       - name: Upload assets via gh
         env:
@@ -156,4 +156,4 @@ jobs:
             echo "No files found in dist-release to upload" >&2
             exit 1
           fi
-          gh release upload "${TAG_NAME}" "${files[@]}"
+          gh release upload "${TAG_NAME}" "${files[@]}" -R "${GITHUB_REPOSITORY}"
