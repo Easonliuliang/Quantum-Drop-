@@ -11,6 +11,7 @@ src-tauri/gen/
 logs/
 *.log
 .DS_Store
+截屏*.png
 
 # Env
 .env
