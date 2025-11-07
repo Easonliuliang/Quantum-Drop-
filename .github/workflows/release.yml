@@ -4,7 +4,12 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g., v0.1.5)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -93,8 +98,8 @@ jobs:
 
   publish:
     needs: build
-    # Publish even if some builds failed, but only for tag events
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
+    # Publish even if some builds failed; allow manual dispatch
+    if: ${{ always() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -122,6 +127,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG_NAME="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG_NAME="${{ inputs.tag }}"
+          fi
           echo "Publishing tag: ${TAG_NAME}"
           # If release exists from a previous attempt, delete it to avoid asset clobber edge-cases
           gh release view "${TAG_NAME}" >/dev/null 2>&1 && gh release delete "${TAG_NAME}" -y || true
@@ -132,8 +140,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          gh --version
+          gh auth status -h github.com
+          ls -lR dist-release || true
           TAG_NAME="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG_NAME="${{ inputs.tag }}"
+          fi
           # Collect only regular files
           mapfile -d '' -t files < <(find dist-release -type f -print0)
           if [ ${#files[@]} -eq 0 ]; then
