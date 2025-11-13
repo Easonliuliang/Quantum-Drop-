@@ -4,15 +4,18 @@ pub mod types;
 use std::{
     collections::HashSet,
     fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{Signature as EdSignature, Verifier, VerifyingKey};
-use serde::Deserialize;
+use if_addrs::{get_if_addrs, IfAddr};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
+use tokio::{fs::File, io::{AsyncReadExt, AsyncWriteExt}};
 use tokio::time::{sleep, timeout};
 
 use crate::{
@@ -20,23 +23,28 @@ use crate::{
     config::{AdaptiveChunkPolicy, ConfigStore, RuntimeSettings},
     crypto,
     resume::{derive_chunk_size, ChunkCatalog, ResumeStore},
+    services::mdns::{MdnsRegistry, SenderInfo as MdnsSenderInfo},
     signaling::SessionTicket,
     store::{
         DeviceRecord, EntitlementRecord, IdentityRecord, IdentityStore, TransferRecord,
         TransferStore,
     },
-    transport::{Frame, RouteKind, Router, SelectedRoute, SessionDesc},
+    transport::{
+        adapter::{WebRtcHint, WebRtcRole},
+        Frame, LanQuic, RouteKind, Router, SelectedRoute, SessionDesc, TransportStream,
+    },
 };
 
-use state::{TrackedFile, TransferTask};
+use state::{LanMode, TrackedFile, TransferTask};
 use types::{
-    AuthenticatedPayload, ChunkPolicyPayload, CommandError, DeviceRegistrationPayload,
-    DeviceResponse, DevicesQueryPayload, DevicesResponse, DeviceUpdatePayload, EntitlementDto,
-    EntitlementUpdatePayload, ErrorCode, ExportPotResponse, GenerateCodeResponse, HeartbeatPayload,
-    IdentityRefPayload, IdentityRegistrationPayload, IdentityResponse, P2pSmokeTestResponse,
-    ResumeProgressDto, SettingsPayload, SignedPathsPayload, SignedReceivePayload, TaskResponse,
-    TransferDirection, TransferLifecycleEvent, TransferPhase, TransferProgressEvent,
-    TransferRoute, TransferStatus, TransferSummary, VerifyPotResponse,
+    AuthenticatedPayload, ChunkPolicyPayload, CommandError, ConnectByCodePayload,
+    DeviceRegistrationPayload, DeviceResponse, DevicesQueryPayload, DevicesResponse,
+    DeviceUpdatePayload, EntitlementDto, EntitlementUpdatePayload, ErrorCode, ExportPotResponse,
+    GenerateCodeResponse, HeartbeatPayload, IdentityRefPayload, IdentityRegistrationPayload,
+    IdentityResponse, P2pSmokeTestResponse, ResumeProgressDto, SenderInfoDto, SettingsPayload,
+    SignedPathsPayload, SignedReceivePayload, TaskResponse, TransferDirection,
+    TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute, TransferStatus,
+    TransferSummary, VerifyPotResponse,
 };
 
 const MOCK_RECEIVE_FILE_SIZE: u64 = 2 * 1024 * 1024;
@@ -307,12 +315,25 @@ pub async fn courier_send(
     }
     let files = collect_files(&auth.payload.paths).map_err(CommandError::from)?;
     let maybe_task = state.find_by_code(&code).await;
+    let device_record = store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+    let device_label = device_record
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&device_record.device_id)
+        .to_string();
 
     let task = if let Some(existing) = maybe_task {
         state
             .update_task(&existing.task_id, |task| {
                 task.files = files.clone();
                 task.status = TransferStatus::InProgress;
+                task.lan_mode = Some(LanMode::Sender {
+                    device_name: Some(device_label.clone()),
+                });
             })
             .await
             .unwrap_or(existing)
@@ -341,41 +362,81 @@ pub async fn courier_receive(
         &auth.signature,
         "receive",
     )?;
-    let save_dir_path = Path::new(&auth.payload.save_dir);
-    if !save_dir_path.exists() {
-        fs::create_dir_all(save_dir_path)
-            .map_err(|err| CommandError::from_io(&err, "failed to prepare save directory"))?;
+    let save_dir_path = prepare_save_dir(&auth.payload.save_dir)?;
+    let host = auth.payload.host.trim();
+    if host.is_empty() {
+        return Err(CommandError::invalid("host is required"));
     }
-    if !save_dir_path.is_dir() {
-        return Err(CommandError::invalid("save_dir must be a directory"));
+    if auth.payload.port == 0 {
+        return Err(CommandError::invalid("port must be non-zero"));
     }
 
-    let mock_file_path = save_dir_path.join(format!("courier-receive-{}.bin", auth.payload.code));
-    let tracked_file = TrackedFile {
-        name: mock_file_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("incoming.bin")
-            .to_string(),
-        size: 0,
-        path: mock_file_path.clone(),
-    };
+    let updated_task = init_receive_task(
+        state.inner(),
+        &auth.payload.code,
+        &save_dir_path,
+        host.to_string(),
+        auth.payload.port,
+    )
+    .await?;
 
-    let session_key = crypto::derive_mock_session_key();
-    let task = TransferTask::new(
-        TransferDirection::Receive,
-        Some(auth.payload.code.clone()),
-        vec![tracked_file],
-        session_key,
-    );
-    let task = state.insert_task(task).await;
-    state.track_code(&auth.payload.code, &task.task_id).await;
-
-    spawn_transfer_runner(&app, state.inner().clone(), task.task_id.clone());
+    spawn_transfer_runner(&app, state.inner().clone(), updated_task.task_id.clone());
 
     Ok(TaskResponse {
-        task_id: task.task_id,
+        task_id: updated_task.task_id,
     })
+}
+
+#[tauri::command]
+pub async fn courier_connect_by_code(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    store: State<'_, IdentityStore>,
+    mdns: State<'_, MdnsRegistry>,
+    auth: AuthenticatedPayload<ConnectByCodePayload>,
+) -> Result<TaskResponse, CommandError> {
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "receive",
+    )?;
+    let save_dir_path = prepare_save_dir(&auth.payload.save_dir)?;
+    let addr = mdns
+        .discover_sender(&auth.payload.code, Duration::from_secs(10))
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("{err}")))?;
+
+    let updated_task = init_receive_task(
+        state.inner(),
+        &auth.payload.code,
+        &save_dir_path,
+        addr.ip().to_string(),
+        addr.port(),
+    )
+    .await?;
+
+    emit_log(
+        &app,
+        &updated_task.task_id,
+        format!("Discovered sender at {}", addr),
+    );
+    spawn_transfer_runner(&app, state.inner().clone(), updated_task.task_id.clone());
+    Ok(TaskResponse {
+        task_id: updated_task.task_id,
+    })
+}
+
+#[tauri::command]
+pub async fn courier_list_senders(
+    mdns: State<'_, MdnsRegistry>,
+) -> Result<Vec<SenderInfoDto>, CommandError> {
+    let items = mdns
+        .list_senders(Duration::from_secs(5))
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("{err}")))?;
+    Ok(items.into_iter().map(SenderInfoDto::from).collect())
 }
 
 #[tauri::command]
@@ -1179,6 +1240,10 @@ async fn simulate_transfer(
         .await
         .ok_or_else(CommandError::not_found)?;
 
+    if let Some(lan_mode) = task.lan_mode.clone() {
+        return run_lan_transfer(app, state, task, lan_mode).await;
+    }
+
     emit_log(
         &app,
         &task_id,
@@ -1241,7 +1306,17 @@ async fn simulate_transfer(
     );
     sleep(Duration::from_millis(200)).await;
 
-    let session = SessionDesc::new(task_id.clone());
+    let session_label = task.code.clone().unwrap_or_else(|| task_id.clone());
+    let mut session = SessionDesc::new(session_label);
+    #[cfg(feature = "transport-webrtc")]
+    {
+        let role = if matches!(task.direction, TransferDirection::Send) {
+            WebRtcRole::Offerer
+        } else {
+            WebRtcRole::Answerer
+        };
+        session.webrtc = Some(WebRtcHint { role });
+    }
     let SelectedRoute {
         route: selected_route,
         mut stream,
@@ -1556,6 +1631,511 @@ async fn simulate_transfer(
     Ok(())
 }
 
+async fn run_lan_transfer(
+    app: AppHandle,
+    state: SharedState,
+    task: TransferTask,
+    mode: LanMode,
+) -> Result<(), CommandError> {
+    emit_log(
+        &app,
+        &task.task_id,
+        format!("Transfer session key {}", task.session_key),
+    );
+
+    emit_event(
+        &app,
+        "transfer_started",
+        &TransferLifecycleEvent {
+            task_id: task.task_id.clone(),
+            direction: task.direction.clone(),
+            code: task.code.clone(),
+            message: None,
+        },
+    );
+    state
+        .set_status(&task.task_id, TransferStatus::InProgress)
+        .await;
+
+    match mode {
+        LanMode::Sender { .. } => run_lan_sender(app, state, task).await,
+        LanMode::Receiver { host, port } => run_lan_receiver(app, state, task, host, port).await,
+    }
+}
+
+async fn run_lan_sender(
+    app: AppHandle,
+    state: SharedState,
+    task: TransferTask,
+) -> Result<(), CommandError> {
+    let mut cleanup = MdnsCleanup::new(&app);
+    let result = run_lan_sender_impl(app.clone(), state, task, &mut cleanup).await;
+    cleanup.finish().await;
+    result
+}
+
+async fn run_lan_sender_impl(
+    app: AppHandle,
+    state: SharedState,
+    task: TransferTask,
+    cleanup: &mut MdnsCleanup,
+) -> Result<(), CommandError> {
+    if task.files.is_empty() {
+        return Err(CommandError::invalid("no files to send"));
+    }
+    let task_id = task.task_id.clone();
+    let files = task.files.clone();
+    let bytes_total: u64 = files.iter().map(|f| f.size).sum();
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Preparing,
+            progress: Some(0.05),
+            bytes_sent: None,
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            message: Some("Preparing LAN transfer context".into()),
+            resume: None,
+        },
+    );
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Pairing,
+            progress: Some(0.15),
+            bytes_sent: None,
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            message: Some("Waiting for receiver to connect".into()),
+            resume: None,
+        },
+    );
+
+    let quic = LanQuic::new().map_err(|err| CommandError::route_unreachable(err.to_string()))?;
+    let listener = quic
+        .bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan bind failed: {err}")))?;
+    let listen_addr = listener
+        .local_addr()
+        .map_err(|err| CommandError::route_unreachable(format!("lan addr failed: {err}")))?;
+    let interfaces = collect_lan_interfaces();
+    emit_log(
+        &app,
+        &task_id,
+        format!("LAN listener on {} · share IP: {:?}", listen_addr, interfaces),
+    );
+    if let Some(code) = task.code.clone() {
+        let device_label = match &task.lan_mode {
+            Some(LanMode::Sender { device_name }) => device_name.clone(),
+            _ => None,
+        };
+        if let Err(err) = cleanup
+            .register(&code, &task_id, listen_addr.port(), &interfaces, device_label)
+            .await
+        {
+            emit_log(
+                &app,
+                &task_id,
+                format!("mDNS registration skipped: {}", err.message),
+            );
+        }
+    }
+
+    let mut stream = timeout(Duration::from_secs(60), listener.accept())
+        .await
+        .map_err(|_| CommandError::route_unreachable("receiver did not connect in time"))?
+        .map_err(|err| CommandError::route_unreachable(format!("lan accept failed: {err}")))?;
+
+    let hello = stream.recv().await.map_err(|err| {
+        CommandError::route_unreachable(format!("lan handshake read failed: {err}"))
+    })?;
+    match hello {
+        Frame::Control(text) => match decode_control_message(&text)? {
+            LanControlMessage::ReceiverReady => {}
+            other => {
+                return Err(CommandError::route_unreachable(format!(
+                    "unexpected control {:?} during handshake",
+                    other
+                )));
+            }
+        },
+        _ => {
+            return Err(CommandError::route_unreachable(
+                "receiver did not initiate handshake",
+            ));
+        }
+    }
+
+    stream
+        .send(encode_control_message(&LanControlMessage::SenderReady {
+            addresses: interfaces.clone(),
+            port: listen_addr.port(),
+        })?)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan handshake failed: {err}")))?;
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Connecting,
+            progress: Some(0.25),
+            bytes_sent: None,
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            message: Some("Receiver connected via LAN".into()),
+            resume: None,
+        },
+    );
+
+    let manifest: Vec<LanFileManifestEntry> = files
+        .iter()
+        .map(|file| LanFileManifestEntry {
+            name: file.name.clone(),
+            size: file.size,
+        })
+        .collect();
+    stream
+        .send(encode_control_message(&LanControlMessage::Manifest {
+            files: manifest,
+        })?)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+
+    let mut bytes_sent = 0u64;
+    let mut last_emit = Instant::now();
+    let started = Instant::now();
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Transferring,
+            progress: Some(0.3),
+            bytes_sent: Some(0),
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            message: Some("Sending files over QUIC".into()),
+            resume: None,
+        },
+    );
+
+    for file in &files {
+        emit_log(
+            &app,
+            &task_id,
+            format!("Streaming {} ({} bytes)", file.name, file.size),
+        );
+        stream
+            .send(encode_control_message(&LanControlMessage::FileStart {
+                name: file.name.clone(),
+                size: file.size,
+            })?)
+            .await
+            .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+        let mut reader = File::open(&file.path).await.map_err(|err| {
+            CommandError::from_io(&err, format!("failed to open {}", file.path.display()))
+        })?;
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .await
+                .map_err(|err| CommandError::from_io(&err, "failed to read file chunk"))?;
+            if read == 0 {
+                break;
+            }
+            stream
+                .send(Frame::Data(buffer[..read].to_vec()))
+                .await
+                .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+            bytes_sent += read as u64;
+            if last_emit.elapsed() > Duration::from_millis(350) {
+                let elapsed = started.elapsed().as_secs_f32().max(0.001);
+                let speed = (bytes_sent as f32 / elapsed) as u64;
+                let progress = 0.3
+                    + 0.55 * ((bytes_sent as f32 / bytes_total as f32).min(1.0));
+                emit_progress(
+                    &app,
+                    TransferProgressEvent {
+                        task_id: task_id.clone(),
+                        phase: TransferPhase::Transferring,
+                        progress: Some(progress),
+                        bytes_sent: Some(bytes_sent),
+                        bytes_total: Some(bytes_total),
+                        speed_bps: Some(speed),
+                        route: Some(TransferRoute::Lan),
+                        message: Some(format!("Sending {}", file.name)),
+                        resume: None,
+                    },
+                );
+                last_emit = Instant::now();
+            }
+        }
+        stream
+            .send(encode_control_message(&LanControlMessage::FileEnd {
+                name: file.name.clone(),
+            })?)
+            .await
+            .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+    }
+
+    stream
+        .send(encode_control_message(&LanControlMessage::Done)?)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+    stream.close().await.ok();
+
+    emit_log(
+        &app,
+        &task_id,
+        format!("Delivered {} bytes via LAN", bytes_sent),
+    );
+
+    finalize_lan_success(&app, &state, &task_id, TransferRoute::Lan, bytes_sent).await
+}
+
+async fn run_lan_receiver(
+    app: AppHandle,
+    state: SharedState,
+    task: TransferTask,
+    host: String,
+    port: u16,
+) -> Result<(), CommandError> {
+    let save_dir = task
+        .save_dir
+        .clone()
+        .ok_or_else(|| CommandError::invalid("save_dir missing for receive task"))?;
+    let task_id = task.task_id.clone();
+    let ip: IpAddr = host
+        .parse()
+        .map_err(|_| CommandError::invalid("invalid host address"))?;
+    let remote_addr = SocketAddr::new(ip, port);
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Preparing,
+            progress: Some(0.05),
+            bytes_sent: None,
+            bytes_total: None,
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            message: Some(format!("Connecting to sender {}", remote_addr)),
+            resume: None,
+        },
+    );
+
+    let quic = LanQuic::new().map_err(|err| CommandError::route_unreachable(err.to_string()))?;
+    let mut stream = quic
+        .connect(remote_addr)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan connect failed: {err}")))?;
+
+    stream
+        .send(encode_control_message(&LanControlMessage::ReceiverReady)?)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan handshake failed: {err}")))?;
+
+    let ready = stream.recv().await.map_err(|err| {
+        CommandError::route_unreachable(format!("lan handshake read failed: {err}"))
+    })?;
+    match ready {
+        Frame::Control(text) => match decode_control_message(&text)? {
+            LanControlMessage::SenderReady { addresses, port } => {
+                emit_log(
+                    &app,
+                    &task_id,
+                    format!("Sender listening on port {} · {:?}", port, addresses),
+                );
+            }
+            other => {
+                return Err(CommandError::route_unreachable(format!(
+                    "unexpected control {:?} during handshake",
+                    other
+                )));
+            }
+        },
+        _ => {
+            return Err(CommandError::route_unreachable(
+                "sender handshake missing",
+            ));
+        }
+    }
+
+    let manifest_msg = stream.recv().await.map_err(|err| {
+        CommandError::route_unreachable(format!("failed to read manifest: {err}"))
+    })?;
+    let manifest = match manifest_msg {
+        Frame::Control(text) => match decode_control_message(&text)? {
+            LanControlMessage::Manifest { files } => files,
+            other => {
+                return Err(CommandError::route_unreachable(format!(
+                    "unexpected control {:?} when expecting manifest",
+                    other
+                )));
+            }
+        },
+        _ => {
+            return Err(CommandError::route_unreachable(
+                "sender did not provide manifest",
+            ));
+        }
+    };
+
+    let bytes_total: u64 = manifest.iter().map(|entry| entry.size).sum();
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Connecting,
+            progress: Some(0.2),
+            bytes_sent: Some(0),
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            message: Some(format!("Receiving {} files", manifest.len())),
+            resume: None,
+        },
+    );
+
+    let mut bytes_received = 0u64;
+    let mut last_emit = Instant::now();
+    let start = Instant::now();
+    let mut manifest_iter = manifest.into_iter();
+    let mut active_file: Option<(String, File, u64, u64, PathBuf)> = None;
+    let mut received_files: Vec<TrackedFile> = Vec::new();
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Transferring,
+            progress: Some(0.3),
+            bytes_sent: Some(0),
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            message: Some("Receiving data".into()),
+            resume: None,
+        },
+    );
+
+    loop {
+        let frame = stream.recv().await.map_err(|err| {
+            CommandError::route_unreachable(format!("lan receive failed: {err}"))
+        })?;
+        match frame {
+            Frame::Control(text) => match decode_control_message(&text)? {
+                LanControlMessage::FileStart { name, size } => {
+                    let entry = manifest_iter
+                        .next()
+                        .unwrap_or(LanFileManifestEntry { name: name.clone(), size });
+                    let dest = unique_destination_path(&save_dir, &entry.name);
+                    let file = File::create(&dest).await.map_err(|err| {
+                        CommandError::from_io(&err, format!("failed to create {}", dest.display()))
+                    })?;
+                    emit_log(
+                        &app,
+                        &task_id,
+                        format!("Receiving {} ({} bytes)", entry.name, entry.size),
+                    );
+                    active_file = Some((entry.name, file, 0, entry.size, dest));
+                }
+                LanControlMessage::FileEnd { name } => {
+                    if let Some((current_name, mut file, written, _target, dest)) =
+                        active_file.take()
+                    {
+                        if current_name != name {
+                            return Err(CommandError::route_unreachable(
+                                "file order mismatch",
+                            ));
+                        }
+                        file.flush().await.map_err(|err| {
+                            CommandError::from_io(&err, "failed to flush file")
+                        })?;
+                        received_files.push(TrackedFile {
+                            name: current_name,
+                            size: written,
+                            path: dest,
+                        });
+                    }
+                }
+                LanControlMessage::Done => {
+                    break;
+                }
+                other => {
+                    emit_log(
+                        &app,
+                        &task_id,
+                        format!("lan control {:?}", other),
+                    );
+                }
+            },
+            Frame::Data(bytes) => {
+                if let Some((name, file, written, total, _dest)) = active_file.as_mut() {
+                    file.write_all(&bytes).await.map_err(|err| {
+                        CommandError::from_io(&err, format!("write {} failed", name))
+                    })?;
+                    *written += bytes.len() as u64;
+                    bytes_received += bytes.len() as u64;
+                    if last_emit.elapsed() > Duration::from_millis(350) {
+                        let elapsed = start.elapsed().as_secs_f32().max(0.001);
+                        let speed = (bytes_received as f32 / elapsed) as u64;
+                        let progress = 0.3
+                            + 0.55 * ((bytes_received as f32 / bytes_total as f32).min(1.0));
+                        emit_progress(
+                            &app,
+                            TransferProgressEvent {
+                                task_id: task_id.clone(),
+                                phase: TransferPhase::Transferring,
+                                progress: Some(progress),
+                                bytes_sent: Some(bytes_received),
+                                bytes_total: Some(bytes_total),
+                                speed_bps: Some(speed),
+                                route: Some(TransferRoute::Lan),
+                                message: Some(format!(
+                                    "Receiving {} ({}/{})",
+                                    name, *written, total
+                                )),
+                                resume: None,
+                            },
+                        );
+                        last_emit = Instant::now();
+                    }
+                }
+            }
+        }
+    }
+
+    stream.close().await.ok();
+
+    let received_clone = received_files.clone();
+    state
+        .update_task(&task_id, |pending| {
+            pending.files = received_clone;
+        })
+        .await;
+
+    emit_log(
+        &app,
+        &task_id,
+        format!("Received {} bytes", bytes_received),
+    );
+
+    finalize_lan_success(&app, &state, &task_id, TransferRoute::Lan, bytes_received).await
+}
+
 fn emit_event<T>(app: &AppHandle, event: &str, payload: &T)
 where
     T: serde::Serialize + Clone,
@@ -1695,6 +2275,254 @@ async fn materialise_mock_payload(files: &[TrackedFile]) -> Result<Vec<TrackedFi
         });
     }
     Ok(results)
+}
+
+fn prepare_save_dir(path: &str) -> Result<PathBuf, CommandError> {
+    let save_dir_path = Path::new(path);
+    if !save_dir_path.exists() {
+        fs::create_dir_all(save_dir_path)
+            .map_err(|err| CommandError::from_io(&err, "failed to prepare save directory"))?;
+    }
+    if !save_dir_path.is_dir() {
+        return Err(CommandError::invalid("save_dir must be a directory"));
+    }
+    Ok(save_dir_path.to_path_buf())
+}
+
+async fn init_receive_task(
+    state: &SharedState,
+    code: &str,
+    save_dir_path: &Path,
+    host: String,
+    port: u16,
+) -> Result<TransferTask, CommandError> {
+    let session_key = crypto::derive_mock_session_key();
+    let task = TransferTask::new(
+        TransferDirection::Receive,
+        Some(code.to_string()),
+        Vec::new(),
+        session_key,
+    );
+    let task = state.insert_task(task).await;
+    state.track_code(code, &task.task_id).await;
+    let save_dir_owned = save_dir_path.to_path_buf();
+    let updated_task = state
+        .update_task(&task.task_id, |pending| {
+            pending.save_dir = Some(save_dir_owned.clone());
+            pending.lan_mode = Some(LanMode::Receiver {
+                host: host.clone(),
+                port,
+            });
+            pending.status = TransferStatus::InProgress;
+        })
+        .await
+        .unwrap_or(task);
+    Ok(updated_task)
+}
+
+impl From<MdnsSenderInfo> for SenderInfoDto {
+    fn from(value: MdnsSenderInfo) -> Self {
+        SenderInfoDto {
+            code: value.code,
+            device_name: value.device_name,
+            host: value.host,
+            port: value.port,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LanControlMessage {
+    ReceiverReady,
+    SenderReady { addresses: Vec<String>, port: u16 },
+    Manifest { files: Vec<LanFileManifestEntry> },
+    FileStart { name: String, size: u64 },
+    FileEnd { name: String },
+    Done,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LanFileManifestEntry {
+    name: String,
+    size: u64,
+}
+
+fn encode_control_message(message: &LanControlMessage) -> Result<Frame, CommandError> {
+    serde_json::to_string(message)
+        .map(Frame::Control)
+        .map_err(|err| CommandError::route_unreachable(format!("control encode failed: {err}")))
+}
+
+fn decode_control_message(payload: &str) -> Result<LanControlMessage, CommandError> {
+    serde_json::from_str(payload).map_err(|err| {
+        CommandError::route_unreachable(format!("control decode failed: {err}"))
+    })
+}
+
+fn collect_lan_interfaces() -> Vec<String> {
+    get_if_addrs()
+        .map(|ifaces| {
+            ifaces
+                .into_iter()
+                .filter_map(|iface| match iface.addr {
+                    IfAddr::V4(v4) if !v4.ip.is_loopback() => Some(v4.ip.to_string()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn unique_destination_path(base: &Path, file_name: &str) -> PathBuf {
+    let mut candidate = base.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let name_path = Path::new(file_name);
+    let stem = name_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
+    let ext = name_path.extension().and_then(|s| s.to_str());
+    let mut idx = 1;
+    loop {
+        let next_name = match ext {
+            Some(ext) if !ext.is_empty() => format!("{stem}-{idx}.{ext}"),
+            _ => format!("{stem}-{idx}"),
+        };
+        candidate = base.join(&next_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        idx += 1;
+    }
+}
+
+async fn finalize_lan_success(
+    app: &AppHandle,
+    state: &SharedState,
+    task_id: &str,
+    route: TransferRoute,
+    bytes_total: u64,
+) -> Result<(), CommandError> {
+    emit_progress(
+        app,
+        TransferProgressEvent {
+            task_id: task_id.to_string(),
+            phase: TransferPhase::Finalizing,
+            progress: Some(0.9),
+            bytes_sent: Some(bytes_total),
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(route.clone()),
+            message: Some("Generating PoT".into()),
+            resume: None,
+        },
+    );
+
+    let current_task = state
+        .get_task(task_id)
+        .await
+        .ok_or_else(CommandError::not_found)?;
+    let mut attestations = Vec::new();
+    for tracked in &current_task.files {
+        let attestation = compute_file_attestation(&tracked.path).map_err(|err| {
+            CommandError::from(anyhow!(
+                "unable to attest file {}: {err}",
+                tracked.path.display()
+            ))
+        })?;
+        attestations.push(attestation);
+    }
+
+    let proofs_dir = default_proofs_dir(app).map_err(CommandError::from)?;
+    let route_label = route.label().to_string();
+    let pot_path = write_proof_of_transition(task_id, &attestations, &route_label, &proofs_dir)
+        .map_err(CommandError::from)?;
+    state.set_pot_path(task_id, pot_path.clone()).await;
+    if let Some(task_snapshot) = state.set_status(task_id, TransferStatus::Completed).await {
+        persist_transfer_snapshot(
+            app,
+            &task_snapshot,
+            Some(bytes_total),
+            Some(bytes_total),
+            Some(route_label.clone()),
+        );
+    }
+
+    emit_progress(
+        app,
+        TransferProgressEvent {
+            task_id: task_id.to_string(),
+            phase: TransferPhase::Done,
+            progress: Some(1.0),
+            bytes_sent: Some(bytes_total),
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(route.clone()),
+            message: Some("Transfer completed".into()),
+            resume: None,
+        },
+    );
+
+    if let Some(task_snapshot) = state.get_task(task_id).await {
+        emit_event(
+            app,
+            "transfer_completed",
+            &TransferLifecycleEvent {
+                task_id: task_snapshot.task_id.clone(),
+                direction: task_snapshot.direction.clone(),
+                code: task_snapshot.code.clone(),
+                message: Some(pot_path.display().to_string()),
+            },
+        );
+    }
+    emit_log(
+        app,
+        task_id,
+        format!("Proof of Transition stored at {}", pot_path.display()),
+    );
+    Ok(())
+}
+
+struct MdnsCleanup {
+    app: AppHandle,
+    code: Option<String>,
+}
+
+impl MdnsCleanup {
+    fn new(app: &AppHandle) -> Self {
+        Self {
+            app: app.clone(),
+            code: None,
+        }
+    }
+
+    async fn register(
+        &mut self,
+        code: &str,
+        task_id: &str,
+        port: u16,
+        addresses: &[String],
+        device_name: Option<String>,
+    ) -> Result<(), CommandError> {
+        let mdns = self.app.state::<MdnsRegistry>();
+        mdns.register_sender(code, task_id, port, addresses, device_name)
+            .await
+            .map_err(|err| {
+                CommandError::route_unreachable(format!("mDNS register failed: {err}"))
+            })?;
+        self.code = Some(code.to_string());
+        Ok(())
+    }
+
+    async fn finish(&mut self) {
+        if let Some(code) = self.code.take() {
+            let mdns = self.app.state::<MdnsRegistry>();
+            let _ = mdns.unregister(&code).await;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

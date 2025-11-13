@@ -18,7 +18,7 @@ pub use adapter::{
 pub use router::{RouteKind, Router, SelectedRoute};
 
 #[cfg(feature = "transport-quic")]
-pub use quic::QuicAdapter;
+pub use quic::{LanQuic, QuicAdapter};
 
 #[cfg(feature = "transport-relay")]
 pub use relay::RelayAdapter;

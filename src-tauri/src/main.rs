@@ -12,9 +12,10 @@ mod transport;
 use commands::{
     auth_list_devices, auth_load_entitlement, auth_register_device, auth_register_identity,
     auth_update_device, auth_update_entitlement, auth_heartbeat_device, courier_cancel,
-    courier_generate_code, courier_p2p_smoke_test,
-    courier_receive, courier_relay_smoke_test, courier_resume, courier_send, export_pot,
-    list_transfers, load_settings, update_settings, verify_pot, SharedState,
+    courier_connect_by_code, courier_generate_code, courier_list_senders,
+    courier_p2p_smoke_test, courier_receive, courier_relay_smoke_test, courier_resume,
+    courier_send, export_pot, list_transfers, load_settings, update_settings, verify_pot,
+    SharedState,
 };
 use config::ConfigStore;
 use serde::Serialize;
@@ -22,6 +23,7 @@ use store::{IdentityStore, TransferStore};
 use tauri::Manager;
 
 mod services;
+use services::mdns::MdnsRegistry;
 
 #[derive(Serialize)]
 struct HealthCheck {
@@ -53,6 +55,8 @@ fn main() {
             let identity_store = IdentityStore::initialise(&app.handle())
                 .expect("failed to initialise identity store");
             app.manage(identity_store);
+            let mdns = MdnsRegistry::new().expect("failed to initialise mDNS registry");
+            app.manage(mdns);
             Ok(())
         })
         .manage(SharedState::new())
@@ -68,11 +72,13 @@ fn main() {
             courier_generate_code,
             courier_send,
             courier_receive,
+            courier_connect_by_code,
             courier_cancel,
             courier_p2p_smoke_test,
             courier_relay_smoke_test,
             courier_resume,
             export_pot,
+            courier_list_senders,
             verify_pot,
             list_transfers,
             load_settings,

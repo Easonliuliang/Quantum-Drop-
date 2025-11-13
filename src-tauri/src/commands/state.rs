@@ -14,6 +14,12 @@ pub struct TrackedFile {
 }
 
 #[derive(Debug, Clone)]
+pub enum LanMode {
+    Sender { device_name: Option<String> },
+    Receiver { host: String, port: u16 },
+}
+
+#[derive(Debug, Clone)]
 pub struct TransferTask {
     pub task_id: String,
     pub code: Option<String>,
@@ -24,6 +30,8 @@ pub struct TransferTask {
     pub files: Vec<TrackedFile>,
     pub pot_path: Option<PathBuf>,
     pub session_key: String,
+    pub save_dir: Option<PathBuf>,
+    pub lan_mode: Option<LanMode>,
 }
 
 impl TransferTask {
@@ -44,6 +52,8 @@ impl TransferTask {
             files,
             pot_path: None,
             session_key,
+            save_dir: None,
+            lan_mode: None,
         }
     }
 

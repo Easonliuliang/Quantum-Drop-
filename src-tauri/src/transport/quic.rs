@@ -21,22 +21,25 @@ use super::{Frame, SessionDesc, TransportAdapter, TransportStream};
 const FRAME_HEADER_LEN: usize = 5;
 
 #[derive(Clone)]
-pub struct QuicAdapter {
+struct QuicCredentials {
     cert_der: Arc<Vec<u8>>,
     key_der: Arc<Vec<u8>>,
     server_name: Arc<String>,
 }
 
-impl QuicAdapter {
-    pub fn new() -> Result<Self, TransportError> {
-        let CertifiedKey { cert, key_pair } = generate_simple_self_signed(vec!["localhost".into()])
-            .map_err(|err| TransportError::Setup(format!("failed to generate dev cert: {err}")))?;
+impl QuicCredentials {
+    fn new(server_name: impl Into<String>) -> Result<Self, TransportError> {
+        let domain = server_name.into();
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(vec![domain.clone()]).map_err(|err| {
+                TransportError::Setup(format!("failed to generate dev cert: {err}"))
+            })?;
         let cert_der = cert.der().as_ref().to_vec();
         let key_der = key_pair.serialize_der();
         Ok(Self {
             cert_der: Arc::new(cert_der),
             key_der: Arc::new(key_der),
-            server_name: Arc::new("localhost".to_string()),
+            server_name: Arc::new(domain),
         })
     }
 
@@ -69,6 +72,27 @@ impl QuicAdapter {
     }
 }
 
+#[derive(Clone)]
+pub struct QuicAdapter {
+    creds: Arc<QuicCredentials>,
+}
+
+impl QuicAdapter {
+    pub fn new() -> Result<Self, TransportError> {
+        Ok(Self {
+            creds: Arc::new(QuicCredentials::new("localhost")?),
+        })
+    }
+
+    fn build_server_config(&self) -> Result<ServerConfig, TransportError> {
+        self.creds.build_server_config()
+    }
+
+    fn build_client_config(&self) -> Result<ClientConfig, TransportError> {
+        self.creds.build_client_config()
+    }
+}
+
 #[async_trait]
 impl TransportAdapter for QuicAdapter {
     async fn connect(
@@ -92,7 +116,7 @@ impl TransportAdapter for QuicAdapter {
         client_endpoint.set_default_client_config(self.build_client_config()?);
 
         let connecting = client_endpoint
-            .connect(server_addr, &self.server_name)
+            .connect(server_addr, self.creds.server_name.as_str())
             .map_err(|err| TransportError::Setup(format!("connect initiation failed: {err}")))?;
 
         let client_task = async {
@@ -252,6 +276,142 @@ async fn echo_loop(mut recv: RecvStream, mut send: SendStream) -> Result<(), Tra
     }
     let _ = send.finish();
     Ok(())
+}
+
+#[derive(Clone)]
+pub struct LanQuic {
+    creds: Arc<QuicCredentials>,
+}
+
+impl LanQuic {
+    pub fn new() -> Result<Self, TransportError> {
+        Ok(Self {
+            creds: Arc::new(QuicCredentials::new("quantumdrop.local")?),
+        })
+    }
+
+    pub async fn bind(&self, addr: SocketAddr) -> Result<LanQuicListener, TransportError> {
+        let endpoint = Endpoint::server(self.creds.build_server_config()?, addr).map_err(|err| {
+            TransportError::Setup(format!("failed to bind lan listener: {err}"))
+        })?;
+        Ok(LanQuicListener { endpoint })
+    }
+
+    pub async fn connect(&self, remote: SocketAddr) -> Result<LanQuicStream, TransportError> {
+        let mut endpoint = Endpoint::client(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+            .map_err(|err| TransportError::Setup(format!("failed to create client endpoint: {err}")))?;
+        endpoint.set_default_client_config(self.creds.build_client_config()?);
+        let connecting = endpoint
+            .connect(remote, self.creds.server_name.as_str())
+            .map_err(|err| TransportError::Setup(format!("connect initiation failed: {err}")))?;
+        let connection = connecting
+            .await
+            .map_err(|err| TransportError::Setup(format!("client connect failed: {err}")))?;
+        let (send, recv) = connection
+            .open_bi()
+            .await
+            .map_err(|err| TransportError::Setup(format!("open bidi stream failed: {err}")))?;
+        Ok(LanQuicStream::new(send, recv, endpoint, connection))
+    }
+}
+
+pub struct LanQuicListener {
+    endpoint: Endpoint,
+}
+
+impl LanQuicListener {
+    pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
+        self.endpoint
+            .local_addr()
+            .map_err(|err| TransportError::Setup(format!("failed to read listener addr: {err}")))
+    }
+
+    pub async fn accept(&self) -> Result<LanQuicStream, TransportError> {
+        let connection = self
+            .endpoint
+            .accept()
+            .await
+            .ok_or(TransportError::Closed)?
+            .await
+            .map_err(|err| TransportError::Setup(format!("server accept failed: {err}")))?;
+        let (send, recv) = connection
+            .accept_bi()
+            .await
+            .map_err(|err| TransportError::Setup(format!("server stream failed: {err}")))?;
+        Ok(LanQuicStream::new(send, recv, self.endpoint.clone(), connection))
+    }
+}
+
+pub struct LanQuicStream {
+    send: SendStream,
+    recv: RecvStream,
+    _endpoint: Endpoint,
+    connection: Connection,
+}
+
+impl LanQuicStream {
+    fn new(send: SendStream, recv: RecvStream, endpoint: Endpoint, connection: Connection) -> Self {
+        Self {
+            send,
+            recv,
+            _endpoint: endpoint,
+            connection,
+        }
+    }
+}
+
+#[async_trait]
+impl TransportStream for LanQuicStream {
+    async fn send(&mut self, frame: Frame) -> Result<(), TransportError> {
+        let mut payload = Vec::with_capacity(FRAME_HEADER_LEN);
+        match frame {
+            Frame::Control(text) => {
+                payload.push(0u8);
+                let bytes = text.into_bytes();
+                payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                payload.extend_from_slice(&bytes);
+            }
+            Frame::Data(bytes) => {
+                payload.push(1u8);
+                payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                payload.extend_from_slice(&bytes);
+            }
+        }
+
+        self.send
+            .write_all(&payload)
+            .await
+            .map_err(|err| TransportError::Io(format!("quic write failed: {err}")))?;
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Frame, TransportError> {
+        let mut header = [0u8; FRAME_HEADER_LEN];
+        self.recv
+            .read_exact(&mut header)
+            .await
+            .map_err(|err| TransportError::Io(format!("quic read header failed: {err}")))?;
+        let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        let mut payload = vec![0u8; len];
+        self.recv
+            .read_exact(&mut payload)
+            .await
+            .map_err(|err| TransportError::Io(format!("quic read payload failed: {err}")))?;
+        match header[0] {
+            0 => {
+                let text = String::from_utf8(payload.clone())
+                    .unwrap_or_else(|_| String::from_utf8_lossy(&payload).into_owned());
+                Ok(Frame::Control(text))
+            }
+            1 => Ok(Frame::Data(payload)),
+            _ => Err(TransportError::Io("unknown frame tag".into())),
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), TransportError> {
+        self.connection.close(0u32.into(), b"lan closed");
+        Ok(())
+    }
 }
 
 #[cfg(test)]

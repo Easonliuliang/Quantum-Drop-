@@ -46,7 +46,7 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
   - `TransferStore`：与之前一致，持久化传输历史。
   - `IdentityStore`：SQLite `identities` / `devices` / `entitlements`。设备记录包含 `status`、`updated_at`、`last_seen_at`、`capabilities`，提供 `touch_device` 心跳接口并支持事件广播。
 
-- **`transport`** – owns the `TransportAdapter` traits, runtime `Router` (reads preferred routes and enforces the LAN → P2P → relay fallback ladder with 3s/6s/8s timeouts), `QuicAdapter` (quinn-powered loopback with self-signed `localhost` certificates under the `transport-quic` feature), `RelayAdapter` (Tokio TCP loopback guarded by `transport-relay`), `MockLocalAdapter` fallback for headless runs, and a gated `WebRtcAdapter` skeleton.
+- **`transport`** – owns the `TransportAdapter` traits, runtime `Router`（读取配置并在 LAN → P2P → Relay 之间并发竞速，默认超时分别为 3s/10s/8s；所有尝试都会写入 attempt_notes，以便 UI/日志展示）、`QuicAdapter`（仍用于 Router 内的回环演示）、`LanQuic`（阶段一真实局域网直连所用的 0.0.0.0 监听器）、`RelayAdapter`（Tokio TCP loopback，占位中继）、`MockLocalAdapter` 兜底以及预备中的 `WebRtcAdapter` 骨架。
 - **`resume`** – manages transfer chunk catalogs (size, count, bitmap), enforces adaptive sizing policy driven by RTT, persists `{task}-index.json` snapshots under `app_data_dir/cache/`, and exposes helpers for querying missing segments on reconnect.
 
 - **`attestation`** – Merkle helpers hashing chunks/root with SHA-256 (CID salted via Blake3) and a PoT writer that materialises JSON receipts aligned with the blueprint schema.
@@ -54,6 +54,7 @@ This document tracks the concrete shape of the **S1 · 虫洞最小核** milesto
 - **`crypto`** – lightweight helpers for generating share codes 和 mock session keys（后续可换成 Noise/PAKE）。身份签名目前由前端 WebCrypto + `@noble/ed25519` 提供，后端通过 `ed25519-dalek` 校验。
 
 - **`signaling`** – session ticket scaffolding, WebRTC `SessionDescription`/ICE types, and a lightweight Axum `/ws` hub (`signaling-server` feature) that merges `SessionDesc` updates for minimal WebRTC experiments。
+- **`services::mdns`** – wraps `mdns-sd` to register, unregister, discover, and list LAN senders. QUIC 发送端会在监听后注册配对码/设备名/IP，接收端通过 `courier_connect_by_code`/`courier_list_senders` 调用浏览器接口获得可连接设备。
 
 ## Resumable Chunk Flow
 
@@ -100,7 +101,7 @@ SendPanel "P2P Smoke Test"
 - `transport-relay` *(enabled by default in dev builds)* – turns on the Tokio TCP relay loopback adapter and `/relay` registry endpoint for the signaling server.
 - `signaling-server` *(opt-in)* – exposes an Axum router with a placeholder `/ws` endpoint for future signaling integration tests.
 
-The router reads its preferred route ordering from `app.yaml` under the app config directory. If the file is absent, the default order (`lan`, `p2p`, `relay`, then mock fallback) is used. Each probe has a dedicated timeout window (3s for LAN, 6s for P2P, 8s for relay) and the first successful hop cancels the rest.
+The router reads its preferred route ordering from `app.yaml` under the app config directory. If the file is absent, the default order (`lan`, `p2p`, `relay`, then mock fallback) is used. Each probe has a dedicated timeout window (3s for LAN, 10s for P2P, 8s for relay) and the first successful hop cancels the rest.
 
 ```yaml
 # app.yaml
@@ -111,14 +112,19 @@ s2:
       - p2p
       - relay
     relayEndpoint: tcp://127.0.0.1:6200
+    signalingUrl: wss://signaling.quantumdrop.dev/ws
     stun:
       - stun:stun.l.google.com:19302
-      - turn:turn.relay.example:3478?transport=udp
+    turn:
+      urls:
+        - turn:turn.quantumdrop.dev:3478?transport=udp
+      username: quantum
+      credential: drop123
 ```
 
 A ready-to-copy sample lives in `docs/app.sample.yaml`.
 
-The QUIC loopback spins up an in-process server/client pair bound to `127.0.0.1`, exchanges a self-signed `localhost` certificate, and echoes frames so tests can assert byte-for-byte delivery.
+`LanQuic` 会在 `0.0.0.0` 上监听、公布可用网卡地址，并通过 JSON 控制帧同步 Manifest/文件起止/完成，从而支撑阶段一的真实局域网传输；原有的 QUIC loopback（`QuicAdapter`）仍用于 Router 自检与单元测试，确保核心路由链路在 CI 中可重复验证。
 
 - **`main.rs`** – wires the modules into Tauri, manages state with `.manage(SharedState::new())`, and registers the expanded command handler list alongside `health_check`.
 
@@ -132,7 +138,7 @@ The QUIC loopback spins up an in-process server/client pair bound to `127.0.0.1`
 
 - **UI Panels**
   - `SendPanel` – file picker (via Tauri dialog), drag-and-drop entanglement zone, quantum tunnel cards (with resumable CTA) and a P2P smoke test button.
-  - `ReceivePanel` – input for courier code + destination directory, mirrored quantum tunnel visuals, plus a DEV-only relay smoke test toggle that exercises the relay adapter directly.
+  - `ReceivePanel` – 提供“配对码”（mDNS 自动发现）、“扫描附近”（列出广播中的发送方）、“手动 IP”三种模式，可调用 `courier_connect_by_code` 或 `courier_receive` 建立 LAN/QUIC 连接；DEV-only relay smoke test 切换依旧保留。
   - `HistoryPanel` – chronological table of transfers with PoT export/verify toasts, supplemented with a quantum tunnel strip per row when the mode is enabled.
   - `SettingsPanel` – toggles preferred routes, relay enable, code expiry, and the quantum tunnel experience, persisting via `ConfigStore`.
   - See [docs/QUANTUM_UI.md](./QUANTUM_UI.md) for the full quantum tunnel copy and motion spec.
@@ -148,8 +154,10 @@ Commands accept snake_case parameters and return camelCase objects conforming to
 | Command | Purpose | Notes |
 | --- | --- | --- |
 | `courier_generate_code(auth)` | 启动发送任务，产生取件码 | 需要附带签名，插入 `AppState` & `code` 映射 |
-| `courier_send(auth, code)` | 启动 mock 发送 | 验签后发射事件，写入 PoT |
-| `courier_receive(auth)` | 模拟接收 | 验签后生成占位文件与 PoT |
+| `courier_send(auth, code)` | 启动 LAN/QUIC 发送 | 验签后监听 0.0.0.0，广播 mDNS 并传输文件 |
+| `courier_receive(auth)` | 手动输入 IP/端口并接收 | 验签后生成任务，复用 QUIC 传输并写入 PoT |
+| `courier_connect_by_code(auth)` | 通过 mDNS 自动发现并接收 | 验签 → mDNS 解析 host/port → 复用 LAN 传输 |
+| `courier_list_senders()` | 列出附近发送方 | 触发 mDNS browse，返回 code/device/host/port |
 | `courier_cancel(task_id)` | Cancel active task | Emits failure lifecycle + error phase |
 | `export_pot(task_id)` | Ensure PoT exists under `proofs/` and return the path | Replays persisted state if required |
 | `verify_pot(pot_path)` | Validate PoT JSON schema | Structural checks + actionable error messaging |
@@ -217,4 +225,4 @@ CREATE INDEX IF NOT EXISTS idx_transfers_updated_at ON transfers(updated_at);
 
 ## Alignment & Next Steps
 
-The implementation mirrors the “Immediate Action” items of `PROJECT_BLUEPRINT.md`: scaffolding for transport/crypto/signaling, command contract, event wiring, PoT generation, and a mocked adapter. The next milestones (S2/S3) will replace the loopback adapter with real QUIC/WebRTC paths, introduce durable history storage, and harden PoT verification—all without changing the front-end event contract established here.
+Current code完成了蓝图中 “Immediate Action + S1 局域网直连” 的部分：运输/加密/信令骨架、命令契约、事件链路、PoT 生成，以及可在 0.0.0.0 上运行的 LAN/QUIC 管线。接下来的 S2/S3 将补齐自动发现（mDNS）、跨网 WebRTC + TURN、可部署 Relay，以及更耐久的历史存储与 PoT 校验，而无需改变已经稳定的前端事件契约。

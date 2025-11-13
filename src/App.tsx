@@ -18,6 +18,13 @@ type SelectedFile = {
   path?: string;
 };
 
+type SenderInfo = {
+  code: string;
+  deviceName: string;
+  host: string;
+  port: number;
+};
+
 type TransferProgressPayload = {
   taskId: string;
   phase: "preparing" | "pairing" | "connecting" | "transferring" | "finalizing" | "done" | "error";
@@ -197,7 +204,11 @@ const copyPlainText = async (value: string) => {
 };
 
 type TauriDialogApi = {
-  open: (options: { multiple?: boolean; filters?: Array<{ name: string; extensions: string[] }> }) => Promise<string | string[] | null>;
+  open: (options: {
+    multiple?: boolean;
+    directory?: boolean;
+    filters?: Array<{ name: string; extensions: string[] }>;
+  }) => Promise<string | string[] | null>;
 };
 
 type TauriEventApi = {
@@ -300,6 +311,14 @@ export default function App(): JSX.Element {
   const [isUpdatingDevice, setIsUpdatingDevice] = useState(false);
   const [isForgettingIdentity, setIsForgettingIdentity] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [receiveCode, setReceiveCode] = useState("");
+  const [receiveHost, setReceiveHost] = useState("");
+  const [receivePort, setReceivePort] = useState("0");
+  const [receiveDir, setReceiveDir] = useState("");
+  const [isReceiving, setIsReceiving] = useState(false);
+  const [receiveMode, setReceiveMode] = useState<"code" | "scan" | "manual">("code");
+  const [availableSenders, setAvailableSenders] = useState<SenderInfo[]>([]);
+  const [isScanning, setIsScanning] = useState(false);
   const [isRegisteringIdentity, setIsRegisteringIdentity] = useState(false);
   const [isRegisteringDevice, setIsRegisteringDevice] = useState(false);
   const [isUpdatingEntitlement, setIsUpdatingEntitlement] = useState(false);
@@ -1105,6 +1124,203 @@ export default function App(): JSX.Element {
     beginTransferRef.current = beginTransfer;
   }, [beginTransfer]);
 
+  const chooseReceiveDirectory = useCallback(async () => {
+    if (!detectTauri()) {
+      setInfo("请选择保存目录（仅支持桌面端）");
+      return;
+    }
+    try {
+      const tauri = getTauri();
+      const dialogAny = tauri as { dialog?: TauriDialogApi };
+      if (!dialogAny.dialog?.open) {
+        setInfo("未检测到目录选择插件， 请手动输入路径。");
+        return;
+      }
+      const selected = await dialogAny.dialog.open({ directory: true, multiple: false });
+      if (typeof selected === "string") {
+        setReceiveDir(selected);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+    }
+  }, []);
+
+  const handleManualReceive = useCallback(async () => {
+    if (!detectTauri()) {
+      setInfo("接收功能需在 Tauri 桌面端运行。");
+      return;
+    }
+    if (!identity || !identityPrivateKey) {
+      setInfo("请先创建或导入量子身份。");
+      return;
+    }
+    const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
+    if (!activeDevice) {
+      setInfo("请至少登记一个终端设备。");
+      return;
+    }
+    const code = receiveCode.trim();
+    const host = receiveHost.trim();
+    const portValue = Number.parseInt(receivePort, 10);
+    if (!code) {
+      setInfo("请输入 6 位配对码。");
+      return;
+    }
+    if (!host) {
+      setInfo("请输入发送方 IP 地址。");
+      return;
+    }
+    if (!Number.isFinite(portValue) || portValue <= 0 || portValue > 65535) {
+      setInfo("请输入合法端口（1-65535）。");
+      return;
+    }
+    if (!receiveDir.trim()) {
+      setInfo("请选择保存目录。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      setInfo("Tauri invoke API 不可用，无法启动接收。");
+      return;
+    }
+    setIsReceiving(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const signature = await signPurpose("receive", activeDevice.deviceId);
+      await invoke("courier_receive", {
+        auth: {
+          identityId: identity.identityId,
+          deviceId: activeDevice.deviceId,
+          signature,
+          payload: {
+            code,
+            saveDir: receiveDir,
+            host,
+            port: portValue,
+          },
+        },
+      });
+      setTaskCode(code);
+      appendLog("接收流程已启动，等待发送端开始传输…");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      appendLog(`接收启动失败：${message}`);
+    } finally {
+      setIsReceiving(false);
+    }
+  }, [
+    identity,
+    identityPrivateKey,
+    devices,
+    activeDeviceId,
+    receiveCode,
+    receiveHost,
+    receivePort,
+    receiveDir,
+    signPurpose,
+    appendLog,
+  ]);
+
+  const connectByCode = useCallback(
+    async (overrideCode?: string) => {
+      if (!detectTauri()) {
+        setInfo("自动发现仅在 Tauri 桌面端可用。");
+        return;
+      }
+      if (!identity || !identityPrivateKey) {
+        setInfo("请先创建或导入量子身份。");
+        return;
+      }
+      const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
+      if (!activeDevice) {
+        setInfo("请至少登记一个终端设备。");
+        return;
+      }
+      const codeValue = (overrideCode ?? receiveCode).trim();
+      if (!codeValue) {
+        setInfo("请输入 6 位配对码。");
+        return;
+      }
+      if (!receiveDir.trim()) {
+        setInfo("请选择保存目录。");
+        return;
+      }
+      let invoke: TauriInvokeFn;
+      try {
+        invoke = resolveTauriInvoke();
+      } catch (err) {
+        setInfo("Tauri invoke API 不可用，无法启动接收。");
+        return;
+      }
+      setIsReceiving(true);
+      setError(null);
+      setInfo(null);
+      try {
+        const signature = await signPurpose("receive", activeDevice.deviceId);
+        await invoke("courier_connect_by_code", {
+          auth: {
+            identityId: identity.identityId,
+            deviceId: activeDevice.deviceId,
+            signature,
+            payload: {
+              code: codeValue,
+              saveDir: receiveDir,
+            },
+          },
+        });
+        setTaskCode(codeValue);
+        appendLog("已通过 mDNS 自动发现发送方，等待连接…");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        appendLog(`接收启动失败：${message}`);
+      } finally {
+        setIsReceiving(false);
+      }
+    },
+    [
+      identity,
+      identityPrivateKey,
+      devices,
+      activeDeviceId,
+      receiveCode,
+      receiveDir,
+      signPurpose,
+      appendLog,
+    ]
+  );
+
+  const scanSenders = useCallback(async () => {
+    if (!detectTauri()) {
+      setInfo("扫描需在 Tauri 桌面端运行。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      setInfo("Tauri invoke API 不可用，无法扫描发送方。");
+      return;
+    }
+    setIsScanning(true);
+    setError(null);
+    try {
+      const result = (await invoke("courier_list_senders", {})) as SenderInfo[];
+      setAvailableSenders(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      appendLog(`扫描失败：${message}`);
+    } finally {
+      setIsScanning(false);
+    }
+  }, [appendLog]);
+
   const handleCopy = useCallback(
     async (field: string, value: string) => {
       try {
@@ -1160,7 +1376,7 @@ export default function App(): JSX.Element {
               capabilities: heartbeatCapabilities,
             },
           },
-        });
+  });
         await refreshDevices(identity.identityId);
         if (overrideStatus) {
           setEditDeviceStatus(statusValue);
@@ -1393,6 +1609,176 @@ export default function App(): JSX.Element {
           )}
         </div>
       )}
+      <div className="receive-panel" aria-live="polite">
+        <h3>接收（同网模式）</h3>
+        <div className="mode-tabs">
+          <button
+            type="button"
+            className={receiveMode === "code" ? "active" : ""}
+            onClick={() => setReceiveMode("code")}
+          >
+            配对码
+          </button>
+          <button
+            type="button"
+            className={receiveMode === "scan" ? "active" : ""}
+            onClick={() => {
+              setReceiveMode("scan");
+              void scanSenders();
+            }}
+          >
+            扫描
+          </button>
+          <button
+            type="button"
+            className={receiveMode === "manual" ? "active" : ""}
+            onClick={() => setReceiveMode("manual")}
+          >
+            手动
+          </button>
+        </div>
+
+        {receiveMode === "code" && (
+          <div className="code-input-mode">
+            <p>输入 6 位配对码，应用会通过 mDNS 自动发现发送方，无需手动填写 IP。</p>
+            <div className="receive-grid">
+              <label>
+                <span>配对码</span>
+                <input
+                  type="text"
+                  value={receiveCode}
+                  onChange={(event) => setReceiveCode(event.target.value.toUpperCase())}
+                  maxLength={6}
+                  placeholder="例如：QDX9Z3"
+                />
+              </label>
+              <label className="receive-dir">
+                <span>保存目录</span>
+                <div className="dir-field">
+                  <input
+                    type="text"
+                    value={receiveDir}
+                    onChange={(event) => setReceiveDir(event.target.value)}
+                    placeholder="请选择或输入文件夹"
+                  />
+                  <button type="button" onClick={chooseReceiveDirectory} className="secondary">
+                    选择
+                  </button>
+                </div>
+              </label>
+            </div>
+            <div className="actions-row">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void connectByCode()}
+                disabled={isReceiving}
+              >
+                {isReceiving ? "正在连接…" : "开始接收"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {receiveMode === "scan" && (
+          <div className="scan-mode">
+            <div className="actions-row">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void scanSenders()}
+                disabled={isScanning}
+              >
+                {isScanning ? "扫描中…" : "重新扫描"}
+              </button>
+            </div>
+            {availableSenders.length === 0 ? (
+              <p>未发现可用的发送方，请确保对方已启动并在同一网络。</p>
+            ) : (
+              <ul className="sender-list">
+                {availableSenders.map((sender) => (
+                  <li key={`${sender.code}-${sender.host}`}>
+                    <div className="sender-info">
+                      <strong>{sender.deviceName}</strong>
+                      <span className="code">{sender.code}</span>
+                      <span className="addr">
+                        {sender.host}:{sender.port}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => void connectByCode(sender.code)}
+                      disabled={isReceiving}
+                    >
+                      连接
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {receiveMode === "manual" && (
+          <div className="receive-grid manual-mode">
+            <p>让发送方告知 IP 与端口，并选择保存目录即可建立 QUIC 连接。</p>
+            <label>
+              <span>配对码</span>
+              <input
+                type="text"
+                value={receiveCode}
+                onChange={(event) => setReceiveCode(event.target.value.toUpperCase())}
+                maxLength={6}
+                placeholder="例如：QDX9Z3"
+              />
+            </label>
+            <label>
+              <span>发送方 IP</span>
+              <input
+                type="text"
+                value={receiveHost}
+                onChange={(event) => setReceiveHost(event.target.value)}
+                placeholder="192.168.1.10"
+              />
+            </label>
+            <label>
+              <span>端口</span>
+              <input
+                type="number"
+                value={receivePort}
+                onChange={(event) => setReceivePort(event.target.value)}
+                min={1}
+                max={65535}
+              />
+            </label>
+            <label className="receive-dir">
+              <span>保存目录</span>
+              <div className="dir-field">
+                <input
+                  type="text"
+                  value={receiveDir}
+                  onChange={(event) => setReceiveDir(event.target.value)}
+                  placeholder="请选择或输入文件夹"
+                />
+                <button type="button" onClick={chooseReceiveDirectory} className="secondary">
+                  选择
+                </button>
+              </div>
+            </label>
+            <div className="actions-row">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void handleManualReceive()}
+                disabled={isReceiving}
+              >
+                {isReceiving ? "正在连接…" : "开始接收"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
       <div className="identity-panel" aria-live="polite">
         <h3>身份与设备</h3>
         {identity ? (

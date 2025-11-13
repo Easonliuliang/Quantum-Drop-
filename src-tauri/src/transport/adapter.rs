@@ -16,10 +16,24 @@ pub struct SessionDesc {
     pub session_id: String,
     #[cfg(feature = "transport-webrtc")]
     #[serde(default)]
-    pub webrtc: Option<crate::signaling::SessionDesc>,
+    pub webrtc: Option<WebRtcHint>,
     #[cfg(feature = "transport-relay")]
     #[serde(default)]
     pub relay: Option<RelayHint>,
+}
+
+#[cfg(feature = "transport-webrtc")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebRtcRole {
+    Offerer,
+    Answerer,
+}
+
+#[cfg(feature = "transport-webrtc")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebRtcHint {
+    pub role: WebRtcRole,
 }
 
 impl SessionDesc {
@@ -49,6 +63,7 @@ pub enum TransportError {
     Setup(String),
     #[error("transport io error: {0}")]
     Io(String),
+    #[allow(dead_code)]
     #[error("transport timeout: {0}")]
     Timeout(String),
 }

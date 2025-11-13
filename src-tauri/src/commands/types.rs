@@ -37,6 +37,15 @@ pub struct TaskResponse {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SenderInfoDto {
+    pub code: String,
+    pub device_name: String,
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExportPotResponse {
     pub pot_path: String,
 }
@@ -315,6 +324,15 @@ pub struct SignedPathsPayload {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedReceivePayload {
+    pub code: String,
+    pub save_dir: String,
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectByCodePayload {
     pub code: String,
     pub save_dir: String,
 }

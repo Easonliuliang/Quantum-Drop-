@@ -34,13 +34,15 @@ Quantum Drop · 量子快传 将文件传输重新定义为“存在”，而非
 - 身份与设备
   - 本地生成 Ed25519 身份；登记设备；15s 心跳（状态/能力）。
   - 身份/私钥/last-id 在桌面端落盘持久化（浏览器退化到 localStorage）。
-- 传输与事件（演示管线）
+- 传输与事件
   - 传输路由编排器（LAN/QUIC → P2P/WebRTC → Relay/TCP → Mock 兜底），按优先级与超时回退。
+  - 局域网直连（阶段一）：发送端在“事件流”中公布监听 IP 与端口，接收端面板输入配对码 + IP:Port + 保存目录后，即可通过 QUIC 真实传输并生成 PoT。
+  - 局域网自动发现（阶段二）：发送端通过 mDNS 广播配对码、设备名与端口，接收端支持“配对码自动发现”和“扫描附近发送方”两种模式，一键连接并落地文件。
   - 分片发送与事件流：阶段/进度/速率/路由标签（lan|p2p|relay），完成后导出演示版 PoT 路径。
 - 构建与发布
   - Tauri 打包（macOS .app/.dmg 已验证），GitHub Actions 三平台构建与自动发布；仓库体积 ~9MB。
 
-> 说明：当前仓库内的 QUIC/WebRTC/Relay 适配器为本机回环 Demo，用于验证 UI/事件/路由链路。跨设备真实传输将以此为接口骨架逐步替换为生产实现。
+> 说明：LAN/QUIC 已实现真实局域网直连；WebRTC 与 Relay 仍为回环占位，用于保障 UI/事件/路由链路，后续将逐步替换为跨网实现。
 
 ## 已知限制与计划
 
@@ -117,6 +119,60 @@ npm run check
 - `npm run tauri:build`：生成可发布的桌面安装包。
 - `cargo test --manifest-path src-tauri/Cargo.toml`：执行原生单元/集成测试。
 - `npm run preview`：在无 Tauri Shell 的情况下预览编译后的前端。
+
+### 局域网直连（阶段一）操作指引
+
+1. **发送方**
+   - 在“量子快传”面板选择文件后点击“启动传输”，应用会生成 6 位配对码并自动监听 QUIC 服务。
+   - 打开右侧“事件流”，记录类似 `LAN listener on 0.0.0.0:53214 · share IP: ["192.168.1.23"]` 的日志，将配对码与可用 IP/端口告知接收方。
+2. **接收方**
+   - 在“接收（同网手动模式）”区输入配对码、发送方 IP、端口，点击“选择”挑选保存目录，再点击“开始接收”。
+   - UI 会调用 `courier_receive` 命令，向后端提交以下签名负载：
+
+     ```ts
+     await invoke("courier_receive", {
+       auth: {
+         identityId,
+         deviceId,
+         signature, // sign(`receive:${identityId}:${deviceId}`)
+         payload: {
+           code: "QDX9Z3",
+           saveDir: "/Users/me/Downloads",
+           host: "192.168.1.23",
+           port: 53214,
+         },
+       },
+     });
+     ```
+
+   - 连接建立后，“事件流”与“传输状态”会实时显示路由（lan）、速率与 PoT 路径。
+3. **调试建议**
+   - 确保两台设备在同一子网且未被防火墙阻止 UDP 端口；如连接失败，可在 `logs/` 中查看发送端日志。
+   - 若需要重复使用端口，可在发送端重新点击“启动传输”或清理旧任务后再次生成。
+
+### 跨网配置（阶段三预览）
+
+编辑 `app.yaml`（位于 `AppData/config/app.yaml`），即可声明信令与 STUN/TURN 服务器，Router 会在 LAN → P2P → Relay 之间并发探测并自动降级：
+
+```yaml
+s2:
+  transport:
+    preferredRoutes:
+      - lan
+      - p2p
+      - relay
+    signalingUrl: wss://signaling.quantumdrop.dev/ws
+    stun:
+      - stun:stun.l.google.com:19302
+      - stun:stun1.l.google.com:19302
+    turn:
+      urls:
+        - turn:turn.quantumdrop.dev:3478?transport=udp
+      username: quantum
+      credential: drop123
+```
+
+Router 会同时启动 LAN/QUIC、WebRTC（STUN/TURN）与 Relay 探测，最先成功的路径会立刻接管传输，其余任务会被取消；所有失败与成功尝试都会记录在 `transfer_log` 中，便于排障。
 
 ### PoT 与大文件
 

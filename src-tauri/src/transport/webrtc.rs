@@ -1,12 +1,25 @@
 #![cfg(feature = "transport-webrtc")]
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use log::{info, warn};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
+use tokio::time::{timeout, Duration};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::protocol::Message,
+    MaybeTlsStream,
+    WebSocketStream,
+};
+use url::Url;
 use webrtc::{
     api::APIBuilder,
     data_channel::{
@@ -17,31 +30,62 @@ use webrtc::{
     peer_connection::{
         configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
         RTCPeerConnection,
+        sdp::session_description::RTCSessionDescription,
+        sdp::sdp_type::RTCSdpType,
     },
     Error as WebRtcError,
 };
 
-use super::{Frame, SessionDesc, TransportAdapter, TransportError, TransportStream};
+use crate::signaling::{
+    IceCandidate as SignalIceCandidate,
+    SessionDesc as SignalSessionDesc,
+    SessionDescription as SignalSessionDescription,
+    SessionDescriptionType as SignalDescriptionType,
+};
+
+use super::{
+    adapter::{WebRtcHint, WebRtcRole},
+    Frame,
+    SessionDesc,
+    TransportAdapter,
+    TransportError,
+    TransportStream,
+};
+
+type WsWrite = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+type WsRead = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
 const DATA_CHANNEL_LABEL: &str = "courier";
 
 #[derive(Clone)]
 pub struct WebRtcAdapter {
     config: Arc<RTCConfiguration>,
+    #[allow(dead_code)]
+    signaling_url: Option<Arc<String>>,
 }
 
 impl Default for WebRtcAdapter {
     fn default() -> Self {
         Self {
             config: Arc::new(RTCConfiguration::default()),
+            signaling_url: None,
         }
     }
 }
 
 impl WebRtcAdapter {
+    #[allow(dead_code)]
     pub fn new(config: RTCConfiguration) -> Self {
         Self {
             config: Arc::new(config),
+            signaling_url: None,
+        }
+    }
+
+    pub fn with_signaling(config: RTCConfiguration, signaling_url: String) -> Self {
+        Self {
+            config: Arc::new(config),
+            signaling_url: Some(Arc::new(signaling_url)),
         }
     }
 
@@ -55,6 +99,29 @@ impl WebRtcAdapter {
 #[async_trait]
 impl TransportAdapter for WebRtcAdapter {
     async fn connect(
+        &self,
+        session: &SessionDesc,
+    ) -> Result<Box<dyn TransportStream>, TransportError> {
+        if let (Some(hint), Some(url)) = (session.webrtc.as_ref(), self.signaling_url.as_ref()) {
+            match self
+                .connect_signaling(session, hint, url.as_str())
+                .await
+            {
+                Ok(stream) => return Ok(stream),
+                Err(err) => {
+                    warn!(
+                        "webrtc signaling failed for session {}: {err}; falling back to loopback",
+                        session.session_id
+                    );
+                }
+            }
+        }
+        self.connect_loopback(session).await
+    }
+}
+
+impl WebRtcAdapter {
+    async fn connect_loopback(
         &self,
         session: &SessionDesc,
     ) -> Result<Box<dyn TransportStream>, TransportError> {
@@ -149,12 +216,125 @@ impl TransportAdapter for WebRtcAdapter {
 
         open_notify.notified().await;
 
-        Ok(Box::new(WebRtcStream {
+        Ok(Box::new(LoopbackWebRtcStream {
             channel,
             inbound: Arc::new(Mutex::new(inbound_rx)),
             primary,
             loopback,
             ice_tasks,
+        }))
+    }
+
+    async fn connect_signaling(
+        &self,
+        session: &SessionDesc,
+        hint: &WebRtcHint,
+        signaling_url: &str,
+    ) -> Result<Box<dyn TransportStream>, TransportError> {
+        let url = build_signaling_url(signaling_url, &session.session_id)?;
+        let (ws_stream, _) = connect_async(url)
+            .await
+            .map_err(|err| TransportError::Setup(format!("signaling connect failed: {err}")))?;
+        let (ws_write, ws_read) = ws_stream.split();
+        let client = SignalingClient::new(session.session_id.clone(), ws_write);
+
+        let role = hint.role.clone();
+        let pc = self
+            .build_peer_connection()
+            .await
+            .map_err(|err| TransportError::Setup(format!("webrtc pc create failed: {err}")))?;
+        let (inbound_tx, inbound_rx) = mpsc::channel(32);
+        let inbound = Arc::new(Mutex::new(inbound_rx));
+        let channel_slot: Arc<Mutex<Option<Arc<RTCDataChannel>>>> = Arc::new(Mutex::new(None));
+        let open_notify = Arc::new(Notify::new());
+
+        register_ice_handler(&pc, client.clone());
+
+        let offer_notify = Arc::new(Notify::new());
+        let answer_notify = Arc::new(Notify::new());
+        let offer_set = Arc::new(AtomicBool::new(false));
+        let answer_set = Arc::new(AtomicBool::new(false));
+
+        let offer_wait = if matches!(hint.role, WebRtcRole::Answerer) {
+            Some(offer_notify.clone())
+        } else {
+            None
+        };
+        let answer_wait = if matches!(hint.role, WebRtcRole::Offerer) {
+            Some(answer_notify.clone())
+        } else {
+            None
+        };
+        let reader_task = spawn_signaling_reader(
+            ws_read,
+            role.clone(),
+            pc.clone(),
+            client.clone(),
+            offer_wait.clone(),
+            answer_wait.clone(),
+            offer_set.clone(),
+            answer_set.clone(),
+        );
+
+        match role {
+            WebRtcRole::Offerer => {
+                let channel = pc
+                    .create_data_channel(DATA_CHANNEL_LABEL, Some(RTCDataChannelInit::default()))
+                    .await
+                    .map_err(|err| TransportError::Setup(format!("data channel create failed: {err}")))?;
+                setup_data_channel(channel.clone(), inbound_tx.clone(), open_notify.clone());
+                {
+                    let mut slot = channel_slot.lock().await;
+                    *slot = Some(channel.clone());
+                }
+
+                let offer = pc
+                    .create_offer(None)
+                    .await
+                    .map_err(|err| TransportError::Setup(format!("offer create failed: {err}")))?;
+                pc.set_local_description(offer.clone())
+                    .await
+                    .map_err(|err| TransportError::Setup(format!("set local offer failed: {err}")))?;
+                client.send_offer(&offer).await?;
+
+                if let Some(waiter) = answer_wait {
+                    timeout(Duration::from_secs(20), waiter.notified())
+                    .await
+                    .map_err(|_| TransportError::Timeout("waiting for remote answer timed out".into()))?;
+                }
+            }
+            WebRtcRole::Answerer => {
+                install_answer_handler(
+                    &pc,
+                    inbound_tx.clone(),
+                    open_notify.clone(),
+                    channel_slot.clone(),
+                );
+                if let Some(waiter) = offer_wait {
+                    timeout(Duration::from_secs(20), waiter.notified())
+                        .await
+                        .map_err(|_| TransportError::Timeout("waiting for remote offer timed out".into()))?;
+                }
+            }
+        }
+
+        timeout(Duration::from_secs(20), open_notify.notified())
+            .await
+            .map_err(|_| TransportError::Timeout("data channel open timed out".into()))?;
+
+        let channel = {
+            let mut guard = channel_slot.lock().await;
+            guard
+                .take()
+                .ok_or_else(|| TransportError::Setup("data channel unavailable after signaling".into()))?
+        };
+
+        Ok(Box::new(SignaledWebRtcStream {
+            channel,
+            inbound,
+            pc,
+            reader_task,
+            client,
         }))
     }
 }
@@ -267,7 +447,7 @@ async fn perform_handshake(
     Ok(())
 }
 
-struct WebRtcStream {
+struct LoopbackWebRtcStream {
     channel: Arc<RTCDataChannel>,
     inbound: Arc<Mutex<mpsc::Receiver<Frame>>>,
     primary: Arc<RTCPeerConnection>,
@@ -276,7 +456,7 @@ struct WebRtcStream {
 }
 
 #[async_trait]
-impl TransportStream for WebRtcStream {
+impl TransportStream for LoopbackWebRtcStream {
     async fn send(&mut self, frame: Frame) -> Result<(), TransportError> {
         match frame {
             Frame::Control(text) => {
@@ -320,6 +500,357 @@ impl TransportStream for WebRtcStream {
         Ok(())
     }
 }
+
+struct SignaledWebRtcStream {
+    channel: Arc<RTCDataChannel>,
+    inbound: Arc<Mutex<mpsc::Receiver<Frame>>>,
+    pc: Arc<RTCPeerConnection>,
+    reader_task: JoinHandle<()>,
+    client: SignalingClient,
+}
+
+#[async_trait]
+impl TransportStream for SignaledWebRtcStream {
+    async fn send(&mut self, frame: Frame) -> Result<(), TransportError> {
+        match frame {
+            Frame::Control(text) => {
+                self.channel
+                    .send_text(&text)
+                    .await
+                    .map_err(|err| TransportError::Io(format!("webrtc send text failed: {err}")))?;
+                Ok(())
+            }
+            Frame::Data(bytes) => {
+                let data = Bytes::from(bytes);
+                self.channel.send(&data).await.map_err(|err| {
+                    TransportError::Io(format!("webrtc send binary failed: {err}"))
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn recv(&mut self) -> Result<Frame, TransportError> {
+        let mut rx = self.inbound.lock().await;
+        rx.recv().await.ok_or(TransportError::Closed)
+    }
+
+    async fn close(&mut self) -> Result<(), TransportError> {
+        self.channel
+            .close()
+            .await
+            .map_err(|err| TransportError::Io(format!("data channel close failed: {err}")))?;
+        if let Err(err) = self.pc.close().await {
+            warn!("webrtc peer close failed: {err}");
+        }
+        self.reader_task.abort();
+        self.client.close().await;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct SignalingClient {
+    session_id: Arc<String>,
+    writer: Arc<Mutex<WsWrite>>,
+}
+
+impl SignalingClient {
+    fn new(session_id: String, writer: WsWrite) -> Self {
+        Self {
+            session_id: Arc::new(session_id),
+            writer: Arc::new(Mutex::new(writer)),
+        }
+    }
+
+    fn session_id(&self) -> &str {
+        self.session_id.as_ref()
+    }
+
+    async fn send_offer(&self, desc: &RTCSessionDescription) -> Result<(), TransportError> {
+        self.send_update(SignalSessionDesc {
+            session_id: self.session_id.as_ref().clone(),
+            offer: Some(to_signal_description(desc)?),
+            answer: None,
+            candidates: Vec::new(),
+        })
+        .await
+    }
+
+    async fn send_answer(&self, desc: &RTCSessionDescription) -> Result<(), TransportError> {
+        self.send_update(SignalSessionDesc {
+            session_id: self.session_id.as_ref().clone(),
+            offer: None,
+            answer: Some(to_signal_description(desc)?),
+            candidates: Vec::new(),
+        })
+        .await
+    }
+
+    async fn send_candidate(&self, candidate: SignalIceCandidate) -> Result<(), TransportError> {
+        self.send_update(SignalSessionDesc {
+            session_id: self.session_id.as_ref().clone(),
+            offer: None,
+            answer: None,
+            candidates: vec![candidate],
+        })
+        .await
+    }
+
+    async fn send_update(&self, update: SignalSessionDesc) -> Result<(), TransportError> {
+        let text = serde_json::to_string(&update)
+            .map_err(|err| TransportError::Setup(format!("signaling encode failed: {err}")))?;
+        let mut writer = self.writer.lock().await;
+        writer
+            .send(Message::Text(text))
+            .await
+            .map_err(|err| TransportError::Setup(format!("signaling send failed: {err}")))
+    }
+
+    async fn send_raw(&self, message: Message) {
+        let mut writer = self.writer.lock().await;
+        let _ = writer.send(message).await;
+    }
+
+    async fn close(&self) {
+        let mut writer = self.writer.lock().await;
+        let _ = writer.send(Message::Close(None)).await;
+    }
+}
+
+fn build_signaling_url(base: &str, session_id: &str) -> Result<Url, TransportError> {
+    let mut url = Url::parse(base)
+        .map_err(|err| TransportError::Setup(format!("invalid signaling url '{base}': {err}")))?;
+    url.query_pairs_mut().append_pair("sessionId", session_id);
+    Ok(url)
+}
+
+fn setup_data_channel(
+    channel: Arc<RTCDataChannel>,
+    inbound_tx: mpsc::Sender<Frame>,
+    open_notify: Arc<Notify>,
+) {
+    let notify = open_notify.clone();
+    channel.on_open(Box::new(move || {
+        let notify = notify.clone();
+        Box::pin(async move {
+            info!("webrtc data channel '{DATA_CHANNEL_LABEL}' opened");
+            notify.notify_waiters();
+        })
+    }));
+
+    let tx = inbound_tx.clone();
+    channel.on_message(Box::new(move |msg: DataChannelMessage| {
+        let tx = tx.clone();
+        Box::pin(async move {
+            let bytes = msg.data.to_vec();
+            let frame = if msg.is_string {
+                match String::from_utf8(bytes.clone()) {
+                    Ok(text) => Frame::Control(text),
+                    Err(_) => Frame::Data(bytes),
+                }
+            } else {
+                Frame::Data(bytes)
+            };
+            if tx.send(frame).await.is_err() {
+                warn!("webrtc inbound queue closed");
+            }
+        })
+    }));
+}
+
+fn install_answer_handler(
+    pc: &Arc<RTCPeerConnection>,
+    inbound_tx: mpsc::Sender<Frame>,
+    open_notify: Arc<Notify>,
+    slot: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+) {
+    pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
+        setup_data_channel(dc.clone(), inbound_tx.clone(), open_notify.clone());
+        let slot = slot.clone();
+        Box::pin(async move {
+            let mut guard = slot.lock().await;
+            *guard = Some(dc);
+        })
+    }));
+}
+
+fn register_ice_handler(pc: &Arc<RTCPeerConnection>, client: SignalingClient) {
+    pc.on_ice_candidate(Box::new(move |candidate| {
+        let client = client.clone();
+        Box::pin(async move {
+            if let Some(candidate) = candidate {
+                match candidate.to_json() {
+                    Ok(init) => {
+                        if let Err(err) = client.send_candidate(to_signal_candidate(&init)).await {
+                            warn!(
+                                "failed to send ICE candidate for session {}: {}",
+                                client.session_id(),
+                                err
+                            );
+                        }
+                    }
+                    Err(err) => warn!("candidate to_json failed: {err}"),
+                }
+            }
+        })
+    }));
+}
+
+fn spawn_signaling_reader(
+    mut ws_read: WsRead,
+    role: WebRtcRole,
+    pc: Arc<RTCPeerConnection>,
+    client: SignalingClient,
+    offer_ready: Option<Arc<Notify>>,
+    answer_ready: Option<Arc<Notify>>,
+    offer_set: Arc<AtomicBool>,
+    answer_set: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(msg) = ws_read.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    match serde_json::from_str::<SignalSessionDesc>(&text) {
+                        Ok(desc) => {
+                            if let Err(err) = handle_signal_update(
+                                &pc,
+                                &client,
+                                &desc,
+                                role,
+                                offer_ready.as_ref(),
+                                answer_ready.as_ref(),
+                                &offer_set,
+                                &answer_set,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    "signaling update failed for session {}: {}",
+                                    client.session_id(),
+                                    err
+                                );
+                            }
+                        }
+                        Err(err) => warn!("invalid signaling payload: {err}"),
+                    }
+                }
+                Ok(Message::Ping(payload)) => {
+                    client.send_raw(Message::Pong(payload)).await;
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(Message::Pong(_)) => {}
+                Ok(Message::Binary(_)) => {}
+                Ok(Message::Frame(_)) => {}
+                Err(err) => {
+                    warn!("signaling stream error: {err}");
+                    break;
+                }
+            }
+        }
+    })
+}
+
+async fn handle_signal_update(
+    pc: &Arc<RTCPeerConnection>,
+    client: &SignalingClient,
+    update: &SignalSessionDesc,
+    role: WebRtcRole,
+    offer_ready: Option<&Arc<Notify>>,
+    answer_ready: Option<&Arc<Notify>>,
+    offer_set: &Arc<AtomicBool>,
+    answer_set: &Arc<AtomicBool>,
+) -> Result<(), TransportError> {
+    if let Some(offer) = &update.offer {
+        if matches!(role, WebRtcRole::Answerer) && !offer_set.swap(true, Ordering::SeqCst) {
+            let rtc_offer = rtc_from_signal_description(offer)?;
+            pc.set_remote_description(rtc_offer)
+                .await
+                .map_err(|err| TransportError::Setup(format!("set remote offer failed: {err}")))?;
+            let answer = pc
+                .create_answer(None)
+                .await
+                .map_err(|err| TransportError::Setup(format!("answer create failed: {err}")))?;
+            pc.set_local_description(answer.clone())
+                .await
+                .map_err(|err| TransportError::Setup(format!("set local answer failed: {err}")))?;
+            client.send_answer(&answer).await?;
+            if let Some(notify) = offer_ready {
+                notify.notify_waiters();
+            }
+        }
+    }
+
+    if let Some(answer) = &update.answer {
+        if matches!(role, WebRtcRole::Offerer) && !answer_set.swap(true, Ordering::SeqCst) {
+            let rtc_answer = rtc_from_signal_description(answer)?;
+            pc.set_remote_description(rtc_answer)
+                .await
+                .map_err(|err| TransportError::Setup(format!("set remote answer failed: {err}")))?;
+            if let Some(notify) = answer_ready {
+                notify.notify_waiters();
+            }
+        }
+    }
+
+    for candidate in &update.candidates {
+        let init = rtc_candidate_from_signal(candidate);
+        if let Err(err) = pc.add_ice_candidate(init).await {
+            warn!("failed to apply remote ICE candidate: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+fn to_signal_description(
+    desc: &RTCSessionDescription,
+) -> Result<SignalSessionDescription, TransportError> {
+    let kind = match desc.sdp_type {
+        RTCSdpType::Offer => SignalDescriptionType::Offer,
+        RTCSdpType::Answer => SignalDescriptionType::Answer,
+        RTCSdpType::Pranswer => SignalDescriptionType::Pranswer,
+        other => {
+            return Err(TransportError::Setup(format!(
+                "unsupported SDP type {:?}",
+                other
+            )))
+        }
+    };
+    Ok(SignalSessionDescription {
+        kind,
+        sdp: desc.sdp.clone(),
+    })
+}
+
+fn rtc_from_signal_description(
+    desc: &SignalSessionDescription,
+) -> Result<RTCSessionDescription, TransportError> {
+    let rtc = match desc.kind {
+        SignalDescriptionType::Offer => RTCSessionDescription::offer(desc.sdp.clone()),
+        SignalDescriptionType::Answer => RTCSessionDescription::answer(desc.sdp.clone()),
+        SignalDescriptionType::Pranswer => RTCSessionDescription::pranswer(desc.sdp.clone()),
+    };
+    rtc.map_err(|err| TransportError::Setup(format!("invalid SDP: {err}")))
+}
+
+fn to_signal_candidate(init: &RTCIceCandidateInit) -> SignalIceCandidate {
+    SignalIceCandidate {
+        candidate: init.candidate.clone(),
+        sdp_mline_index: init.sdp_mline_index.map(|value| value as u32),
+        sdp_mid: init.sdp_mid.clone(),
+    }
+}
+
+fn rtc_candidate_from_signal(candidate: &SignalIceCandidate) -> RTCIceCandidateInit {
+    RTCIceCandidateInit {
+        candidate: candidate.candidate.clone(),
+        sdp_mid: candidate.sdp_mid.clone(),
+        sdp_mline_index: candidate.sdp_mline_index.map(|value| value as u16),
+        ..Default::default()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

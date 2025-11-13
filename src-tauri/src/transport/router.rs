@@ -2,6 +2,7 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::{stream::FuturesUnordered, StreamExt};
 use log::warn;
 use serde::Deserialize;
 use serde_json::Value;
@@ -49,8 +50,35 @@ type AdapterHandle = Arc<dyn TransportAdapter>;
 struct TransportPreferences {
     routes: Vec<RouteKind>,
     stun: Vec<String>,
+    turn: Vec<TurnServerConfig>,
+    signaling: Option<String>,
+    timeouts: RouteTimeouts,
     #[cfg(feature = "transport-relay")]
     relay: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TurnServerConfig {
+    urls: Vec<String>,
+    username: Option<String>,
+    credential: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct RouteTimeouts {
+    lan: Duration,
+    p2p: Duration,
+    relay: Duration,
+}
+
+impl Default for RouteTimeouts {
+    fn default() -> Self {
+        Self {
+            lan: Duration::from_secs(3),
+            p2p: Duration::from_secs(10),
+            relay: Duration::from_secs(8),
+        }
+    }
 }
 
 pub struct Router {
@@ -59,6 +87,7 @@ pub struct Router {
     lan: Option<AdapterHandle>,
     p2p: Option<AdapterHandle>,
     relay: Option<AdapterHandle>,
+    timeouts: RouteTimeouts,
     #[cfg(feature = "transport-relay")]
     relay_hint: Option<RelayHint>,
 }
@@ -66,22 +95,14 @@ pub struct Router {
 impl Router {
     pub fn from_app(app: &AppHandle) -> Self {
         let prefs = read_transport_preferences(app);
-        Self::build_router(
-            prefs.routes,
-            prefs.stun,
-            #[cfg(feature = "transport-relay")]
-            prefs.relay,
-        )
+        Self::build_router(prefs)
     }
 
     #[allow(dead_code)]
     pub fn new(preferred: Vec<RouteKind>) -> Self {
-        Self::build_router(
-            preferred,
-            Vec::new(),
-            #[cfg(feature = "transport-relay")]
-            None,
-        )
+        let mut prefs = TransportPreferences::default();
+        prefs.routes = preferred;
+        Self::build_router(prefs)
     }
 
     pub fn preferred_routes(&self) -> &[RouteKind] {
@@ -90,19 +111,13 @@ impl Router {
 
     pub fn p2p_only(app: &AppHandle) -> Self {
         let prefs = read_transport_preferences(app);
-        Self::build_router(
-            vec![RouteKind::P2p],
-            prefs.stun,
-            #[cfg(feature = "transport-relay")]
-            prefs.relay,
-        )
+        let mut prefs = prefs;
+        prefs.routes = vec![RouteKind::P2p];
+        Self::build_router(prefs)
     }
 
-    fn build_router(
-        mut preferred: Vec<RouteKind>,
-        stun: Vec<String>,
-        #[cfg(feature = "transport-relay")] relay: Option<String>,
-    ) -> Self {
+    fn build_router(prefs: TransportPreferences) -> Self {
+        let mut preferred = prefs.routes.clone();
         if preferred.is_empty() {
             preferred = vec![RouteKind::Lan, RouteKind::P2p, RouteKind::Relay];
         }
@@ -129,10 +144,14 @@ impl Router {
         };
 
         #[cfg(feature = "transport-webrtc")]
-        let p2p: Option<AdapterHandle> = build_webrtc_adapter(&stun).map(|adapter| {
+        let p2p: Option<AdapterHandle> = build_webrtc_adapter(&prefs).map(|adapter| {
             let handle: AdapterHandle = Arc::new(adapter);
             handle
         });
+        #[cfg(feature = "transport-webrtc")]
+        if p2p.is_none() && preferred.iter().any(|route| route == &RouteKind::P2p) {
+            warn!("signaling url missing; p2p route unavailable");
+        }
         #[cfg(not(feature = "transport-webrtc"))]
         let p2p: Option<AdapterHandle> = {
             if preferred.iter().any(|route| route == &RouteKind::P2p) {
@@ -153,7 +172,8 @@ impl Router {
         };
 
         #[cfg(feature = "transport-relay")]
-        let relay_hint = relay
+        let relay_hint = prefs
+            .relay
             .as_ref()
             .and_then(|endpoint| match parse_relay_hint(endpoint) {
                 Ok(hint) => Some(hint),
@@ -169,176 +189,105 @@ impl Router {
             lan,
             p2p,
             relay: relay_adapter,
+            timeouts: prefs.timeouts,
             #[cfg(feature = "transport-relay")]
             relay_hint,
         }
     }
 
     pub async fn connect(&self, session: &SessionDesc) -> Result<SelectedRoute, TransportError> {
-        let mut last_error: Option<TransportError> = None;
-        let mut attempt_notes: Vec<String> = Vec::new();
-        let mut attempted_real_route = false;
+        let mut notes = Vec::new();
+        let mut tasks = FuturesUnordered::new();
+        let mut real_routes = 0usize;
 
         for route in &self.preferred {
-            match route {
-                RouteKind::Lan => {
-                    if let Some(adapter) = &self.lan {
-                        attempted_real_route = true;
-                        let started = Instant::now();
-                        match timeout(Duration::from_secs(3), adapter.connect(session)).await {
-                            Ok(Ok(stream)) => {
-                                let elapsed_ms = started.elapsed().as_millis();
-                                attempt_notes.push(format!("lan success in {}ms", elapsed_ms));
-                                return Ok(SelectedRoute {
-                                    route: RouteKind::Lan,
-                                    stream,
-                                    attempt_notes,
-                                });
-                            }
-                            Ok(Err(err)) => {
-                                let elapsed_ms = started.elapsed().as_millis();
-                                let err_msg = err.to_string();
-                                attempt_notes
-                                    .push(format!("lan error after {}ms: {}", elapsed_ms, err_msg));
-                                last_error = Some(err);
-                            }
-                            Err(_) => {
-                                let elapsed_ms = started.elapsed().as_millis();
-                                attempt_notes.push(format!("lan timeout after {}ms", elapsed_ms));
-                                last_error = Some(TransportError::Timeout(
-                                    "lan route timed out after 3s".into(),
-                                ));
-                            }
-                        }
-                    } else {
-                        attempt_notes.push("lan adapter unavailable".into());
-                    }
-                }
-                RouteKind::P2p => {
-                    if let Some(adapter) = &self.p2p {
-                        attempted_real_route = true;
-                        let started = Instant::now();
-                        match timeout(Duration::from_secs(6), adapter.connect(session)).await {
-                            Ok(Ok(stream)) => {
-                                let elapsed_ms = started.elapsed().as_millis();
-                                attempt_notes.push(format!("p2p success in {}ms", elapsed_ms));
-                                return Ok(SelectedRoute {
-                                    route: RouteKind::P2p,
-                                    stream,
-                                    attempt_notes,
-                                });
-                            }
-                            Ok(Err(err)) => {
-                                let elapsed_ms = started.elapsed().as_millis();
-                                let err_msg = err.to_string();
-                                attempt_notes
-                                    .push(format!("p2p error after {}ms: {}", elapsed_ms, err_msg));
-                                last_error = Some(err);
-                            }
-                            Err(_) => {
-                                let elapsed_ms = started.elapsed().as_millis();
-                                attempt_notes.push(format!("p2p timeout after {}ms", elapsed_ms));
-                                last_error = Some(TransportError::Timeout(
-                                    "p2p route timed out after 6s".into(),
-                                ));
-                            }
-                        }
-                    } else {
-                        attempt_notes.push("p2p adapter unavailable".into());
-                    }
-                }
-                RouteKind::Relay => {
+            if *route == RouteKind::MockLocal {
+                continue;
+            }
+            if let Some(adapter) = self.adapter_for(route) {
+                real_routes += 1;
+                let session_clone = {
                     #[cfg(feature = "transport-relay")]
                     {
-                        if let Some(relay) = &self.relay {
-                            attempted_real_route = true;
-                            let started = Instant::now();
-                            let relay_session =
-                                session_with_relay_hint(session, self.relay_hint.as_ref());
-                            match timeout(Duration::from_secs(8), relay.connect(&relay_session))
-                                .await
-                            {
-                                Ok(Ok(stream)) => {
-                                    let elapsed_ms = started.elapsed().as_millis();
-                                    attempt_notes
-                                        .push(format!("relay success in {}ms", elapsed_ms));
-                                    return Ok(SelectedRoute {
-                                        route: RouteKind::Relay,
-                                        stream,
-                                        attempt_notes,
-                                    });
-                                }
-                                Ok(Err(err)) => {
-                                    let elapsed_ms = started.elapsed().as_millis();
-                                    let err_msg = err.to_string();
-                                    attempt_notes.push(format!(
-                                        "relay error after {}ms: {}",
-                                        elapsed_ms, err_msg
-                                    ));
-                                    last_error = Some(err);
-                                }
-                                Err(_) => {
-                                    let elapsed_ms = started.elapsed().as_millis();
-                                    attempt_notes
-                                        .push(format!("relay timeout after {}ms", elapsed_ms));
-                                    last_error = Some(TransportError::Timeout(
-                                        "relay route timed out after 8s".into(),
-                                    ));
-                                }
-                            }
+                        if *route == RouteKind::Relay {
+                            session_with_relay_hint(session, self.relay_hint.as_ref())
                         } else {
-                            attempt_notes.push("relay adapter unavailable".into());
+                            session.clone()
                         }
                     }
                     #[cfg(not(feature = "transport-relay"))]
                     {
-                        let _ = session;
-                        attempt_notes.push("relay feature disabled".into());
+                        session.clone()
                     }
-                }
-                RouteKind::MockLocal => {
-                    attempt_notes.push("mock route pending fallback".into());
-                }
+                };
+                tasks.push(run_route_attempt(
+                    route.clone(),
+                    adapter.clone(),
+                    session_clone,
+                    self.timeout_for(route),
+                ));
             }
         }
 
-        if attempted_real_route {
-            if let Some(err) = last_error.take() {
-                let summary = attempt_notes.join(" | ");
-                return Err(TransportError::Setup(format!(
-                    "all transport routes failed ({summary}); last error: {err}"
-                )));
+        while let Some(result) = tasks.next().await {
+            match result {
+                Ok((route, stream, note)) => {
+                    notes.push(note);
+                    return Ok(SelectedRoute {
+                        route,
+                        stream,
+                        attempt_notes: notes,
+                    });
+                }
+                Err(note) => notes.push(note),
             }
         }
 
-        let stream = match self.mock.connect(session).await {
-            Ok(stream) => stream,
-            Err(err) => {
-                if let Some(previous) = last_error {
-                    return Err(previous);
+        if self.preferred.iter().any(|route| route == &RouteKind::MockLocal) {
+            let started = Instant::now();
+            match self.mock.connect(session).await {
+                Ok(stream) => {
+                    let elapsed_ms = started.elapsed().as_millis();
+                    notes.push(format!("mock success in {}ms", elapsed_ms));
+                    return Ok(SelectedRoute {
+                        route: RouteKind::MockLocal,
+                        stream,
+                        attempt_notes: notes,
+                    });
                 }
-                return Err(err);
+                Err(err) => {
+                    notes.push(format!("mock failed: {}", err));
+                }
             }
+        } else if real_routes == 0 {
+            notes.push("no transport routes available".into());
+        }
+
+        let summary = if notes.is_empty() {
+            "transport selection failed".to_string()
+        } else {
+            format!("transport selection failed: {}", notes.join(" | "))
         };
-
-        attempt_notes.push("mock fallback selected".into());
-        Ok(SelectedRoute {
-            route: RouteKind::MockLocal,
-            stream,
-            attempt_notes,
-        })
+        Err(TransportError::Setup(summary))
     }
-}
 
-#[cfg(feature = "transport-relay")]
-fn session_with_relay_hint(session: &SessionDesc, hint: Option<&RelayHint>) -> SessionDesc {
-    if session.relay.is_some() {
-        return session.clone();
+    fn adapter_for(&self, route: &RouteKind) -> Option<&AdapterHandle> {
+        match route {
+            RouteKind::Lan => self.lan.as_ref(),
+            RouteKind::P2p => self.p2p.as_ref(),
+            RouteKind::Relay => self.relay.as_ref(),
+            RouteKind::MockLocal => Some(&self.mock),
+        }
     }
-    let mut clone = session.clone();
-    let fallback = hint.cloned().unwrap_or_else(default_local_relay_hint);
-    clone.relay = Some(fallback);
-    clone
+
+    fn timeout_for(&self, route: &RouteKind) -> Duration {
+        match route {
+            RouteKind::Lan => self.timeouts.lan,
+            RouteKind::P2p => self.timeouts.p2p,
+            RouteKind::Relay => self.timeouts.relay,
+            RouteKind::MockLocal => Duration::from_secs(1),
+        }
+    }
 }
 
 #[cfg(feature = "transport-relay")]
@@ -383,6 +332,17 @@ fn default_local_relay_hint() -> RelayHint {
     }
 }
 
+#[cfg(feature = "transport-relay")]
+fn session_with_relay_hint(session: &SessionDesc, hint: Option<&RelayHint>) -> SessionDesc {
+    if session.relay.is_some() {
+        return session.clone();
+    }
+    let mut clone = session.clone();
+    let fallback = hint.cloned().unwrap_or_else(default_local_relay_hint);
+    clone.relay = Some(fallback);
+    clone
+}
+
 fn read_transport_preferences(app: &AppHandle) -> TransportPreferences {
     if let Some(store) = app.try_state::<ConfigStore>() {
         let settings = store.get();
@@ -417,39 +377,12 @@ fn read_transport_preferences(app: &AppHandle) -> TransportPreferences {
 
 fn extract_transport_preferences(config: &Value) -> TransportPreferences {
     let pointer = "/app/s2/transport";
-    let mut prefs = TransportPreferences::default();
     if let Some(node) = config.pointer(pointer) {
-        if let Some(routes) = node
-            .get("preferredRoutes")
-            .and_then(|value| value.as_array())
-        {
-            for value in routes {
-                if let Some(route_str) = value.as_str() {
-                    if let Some(route) = parse_route(route_str) {
-                        prefs.routes.push(route);
-                    }
-                }
-            }
-        }
-        if let Some(stun) = node.get("stun").and_then(|value| value.as_array()) {
-            for value in stun {
-                if let Some(url) = value.as_str() {
-                    let trimmed = url.trim();
-                    if !trimmed.is_empty() {
-                        prefs.stun.push(trimmed.to_string());
-                    }
-                }
-            }
-        }
-        #[cfg(feature = "transport-relay")]
-        if let Some(relay) = node.get("relayEndpoint").and_then(|value| value.as_str()) {
-            let trimmed = relay.trim();
-            if !trimmed.is_empty() {
-                prefs.relay = Some(trimmed.to_string());
-            }
+        if let Ok(transport) = serde_json::from_value::<TransportYaml>(node.clone()) {
+            return transport.into();
         }
     }
-    prefs
+    TransportPreferences::default()
 }
 
 fn parse_route(route: &str) -> Option<RouteKind> {
@@ -468,56 +401,41 @@ fn read_transport_from_app_yaml(app: &AppHandle) -> Option<TransportPreferences>
     let contents = fs::read_to_string(path).ok()?;
     let parsed: AppYaml = serde_yaml::from_str(&contents).ok()?;
     let transport = parsed.s2?.transport?;
-    let routes = transport
-        .preferred_routes
-        .into_iter()
-        .filter_map(|value| parse_route(&value))
-        .collect();
-    let stun = transport
-        .stun
-        .into_iter()
-        .filter(|value| !value.trim().is_empty())
-        .collect();
-    #[cfg(feature = "transport-relay")]
-    let relay = transport.relay_endpoint.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
-    Some(TransportPreferences {
-        routes,
-        stun,
-        #[cfg(feature = "transport-relay")]
-        relay,
-    })
+    Some(transport.into())
 }
 
 #[cfg(feature = "transport-webrtc")]
-fn build_webrtc_adapter(stun: &[String]) -> Option<WebRtcAdapter> {
+fn build_webrtc_adapter(prefs: &TransportPreferences) -> Option<WebRtcAdapter> {
     use webrtc::ice_transport::ice_server::RTCIceServer;
     use webrtc::peer_connection::configuration::RTCConfiguration;
 
-    if stun.is_empty() {
-        return Some(WebRtcAdapter::default());
-    }
+    let signaling = prefs.signaling.clone()?;
 
-    let ice_servers = stun
-        .iter()
-        .filter(|value| !value.trim().is_empty())
-        .map(|url| RTCIceServer {
+    let mut ice_servers = Vec::new();
+    for url in prefs.stun.iter().filter(|value| !value.trim().is_empty()) {
+        ice_servers.push(RTCIceServer {
             urls: vec![url.clone()],
             ..Default::default()
-        })
-        .collect::<Vec<_>>();
+        });
+    }
+
+    for entry in &prefs.turn {
+        if entry.urls.is_empty() {
+            continue;
+        }
+        ice_servers.push(RTCIceServer {
+            urls: entry.urls.clone(),
+            username: entry.username.clone().unwrap_or_default(),
+            credential: entry.credential.clone().unwrap_or_default(),
+            ..Default::default()
+        });
+    }
 
     let mut config = RTCConfiguration::default();
     if !ice_servers.is_empty() {
         config.ice_servers = ice_servers;
     }
-    Some(WebRtcAdapter::new(config))
+    Some(WebRtcAdapter::with_signaling(config, signaling))
 }
 
 #[cfg(test)]
@@ -705,7 +623,168 @@ struct TransportYaml {
     preferred_routes: Vec<String>,
     #[serde(default)]
     stun: Vec<String>,
+    #[serde(rename = "signalingUrl", default)]
+    signaling_url: Option<String>,
+    #[serde(default)]
+    turn: Option<TurnSection>,
+    #[serde(default)]
+    timeouts: Option<RouteTimeoutYaml>,
     #[cfg(feature = "transport-relay")]
     #[serde(rename = "relayEndpoint", default)]
     relay_endpoint: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TurnSection {
+    #[serde(default)]
+    urls: Vec<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    credential: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RouteTimeoutYaml {
+    #[serde(default)]
+    lan: Option<String>,
+    #[serde(default)]
+    p2p: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
+}
+
+impl From<TransportYaml> for TransportPreferences {
+    fn from(value: TransportYaml) -> Self {
+        let routes = value
+            .preferred_routes
+            .into_iter()
+            .filter_map(|route| parse_route(&route))
+            .collect();
+        let stun = value
+            .stun
+            .into_iter()
+            .map(|entry| entry.trim().to_string())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        let signaling = value
+            .signaling_url
+            .and_then(|url| {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+        let mut turn = Vec::new();
+        if let Some(section) = value.turn {
+            let urls = section
+                .urls
+                .into_iter()
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect::<Vec<_>>();
+            if !urls.is_empty() {
+                let username = section
+                    .username
+                    .and_then(|value| {
+                        let trimmed = value.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    });
+                let credential = section
+                    .credential
+                    .and_then(|value| {
+                        let trimmed = value.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    });
+                turn.push(TurnServerConfig {
+                    urls,
+                    username,
+                    credential,
+                });
+            }
+        }
+        let mut timeouts = RouteTimeouts::default();
+        if let Some(custom) = value.timeouts {
+            if let Some(raw) = custom.lan.as_deref().and_then(parse_duration_str) {
+                timeouts.lan = raw;
+            }
+            if let Some(raw) = custom.p2p.as_deref().and_then(parse_duration_str) {
+                timeouts.p2p = raw;
+            }
+            if let Some(raw) = custom.relay.as_deref().and_then(parse_duration_str) {
+                timeouts.relay = raw;
+            }
+        }
+        #[cfg(feature = "transport-relay")]
+        let relay = value.relay_endpoint.and_then(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        TransportPreferences {
+            routes,
+            stun,
+            turn,
+            signaling,
+            timeouts,
+            #[cfg(feature = "transport-relay")]
+            relay,
+        }
+    }
+}
+
+fn parse_duration_str(value: &str) -> Option<Duration> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    humantime::parse_duration(trimmed)
+        .or_else(|_| trimmed.parse::<u64>().map(Duration::from_secs))
+        .ok()
+}
+
+async fn run_route_attempt(
+    route: RouteKind,
+    adapter: AdapterHandle,
+    session: SessionDesc,
+    timeout_duration: Duration,
+) -> Result<(RouteKind, Box<dyn TransportStream>, String), String> {
+    let started = Instant::now();
+    match timeout(timeout_duration, adapter.connect(&session)).await {
+        Ok(Ok(stream)) => {
+            let elapsed = started.elapsed().as_millis();
+            Ok((
+                route.clone(),
+                stream,
+                format!("{} success in {}ms", route.label(), elapsed),
+            ))
+        }
+        Ok(Err(err)) => {
+            let elapsed = started.elapsed().as_millis();
+            Err(format!(
+                "{} error after {}ms: {}",
+                route.label(),
+                elapsed,
+                err
+            ))
+        }
+        Err(_) => Err(format!(
+            "{} timed out after {:?}",
+            route.label(),
+            timeout_duration
+        )),
+    }
 }
