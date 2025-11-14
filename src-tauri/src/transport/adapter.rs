@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Frame {
     Control(String),
     Data(Vec<u8>),
@@ -34,6 +34,14 @@ pub enum WebRtcRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebRtcHint {
     pub role: WebRtcRole,
+    #[serde(default)]
+    pub identity_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
+    pub signer_public_key: Option<String>,
 }
 
 impl SessionDesc {

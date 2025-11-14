@@ -13,6 +13,7 @@ use quinn::{
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::RootCertStore;
+use sha2::{Digest, Sha256};
 use tokio::{task::JoinHandle, try_join};
 
 use super::adapter::TransportError;
@@ -30,10 +31,8 @@ struct QuicCredentials {
 impl QuicCredentials {
     fn new(server_name: impl Into<String>) -> Result<Self, TransportError> {
         let domain = server_name.into();
-        let CertifiedKey { cert, key_pair } =
-            generate_simple_self_signed(vec![domain.clone()]).map_err(|err| {
-                TransportError::Setup(format!("failed to generate dev cert: {err}"))
-            })?;
+        let CertifiedKey { cert, key_pair } = generate_simple_self_signed(vec![domain.clone()])
+            .map_err(|err| TransportError::Setup(format!("failed to generate dev cert: {err}")))?;
         let cert_der = cert.der().as_ref().to_vec();
         let key_der = key_pair.serialize_der();
         Ok(Self {
@@ -69,6 +68,11 @@ impl QuicCredentials {
         client_config.transport_config(Arc::new(transport));
 
         Ok(client_config)
+    }
+
+    fn fingerprint_hex(&self) -> String {
+        let digest = Sha256::digest(self.cert_der.as_ref());
+        hex::encode(digest)
     }
 }
 
@@ -290,16 +294,21 @@ impl LanQuic {
         })
     }
 
+    pub fn certificate_fingerprint(&self) -> String {
+        self.creds.fingerprint_hex()
+    }
+
     pub async fn bind(&self, addr: SocketAddr) -> Result<LanQuicListener, TransportError> {
-        let endpoint = Endpoint::server(self.creds.build_server_config()?, addr).map_err(|err| {
-            TransportError::Setup(format!("failed to bind lan listener: {err}"))
-        })?;
+        let endpoint = Endpoint::server(self.creds.build_server_config()?, addr)
+            .map_err(|err| TransportError::Setup(format!("failed to bind lan listener: {err}")))?;
         Ok(LanQuicListener { endpoint })
     }
 
     pub async fn connect(&self, remote: SocketAddr) -> Result<LanQuicStream, TransportError> {
-        let mut endpoint = Endpoint::client(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
-            .map_err(|err| TransportError::Setup(format!("failed to create client endpoint: {err}")))?;
+        let mut endpoint =
+            Endpoint::client(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).map_err(|err| {
+                TransportError::Setup(format!("failed to create client endpoint: {err}"))
+            })?;
         endpoint.set_default_client_config(self.creds.build_client_config()?);
         let connecting = endpoint
             .connect(remote, self.creds.server_name.as_str())
@@ -338,7 +347,12 @@ impl LanQuicListener {
             .accept_bi()
             .await
             .map_err(|err| TransportError::Setup(format!("server stream failed: {err}")))?;
-        Ok(LanQuicStream::new(send, recv, self.endpoint.clone(), connection))
+        Ok(LanQuicStream::new(
+            send,
+            recv,
+            self.endpoint.clone(),
+            connection,
+        ))
     }
 }
 

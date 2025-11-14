@@ -11,18 +11,31 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{Signature as EdSignature, Verifier, VerifyingKey};
+use futures::{stream::FuturesUnordered, StreamExt};
 use if_addrs::{get_if_addrs, IfAddr};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
-use tokio::{fs::File, io::{AsyncReadExt, AsyncWriteExt}};
 use tokio::time::{sleep, timeout};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt},
+    task::spawn_blocking,
+};
 
 use crate::{
     attestation::{compute_file_attestation, write_proof_of_transition, ProofOfTransition},
+    audit::{log_simple_event, AuditLogger},
     config::{AdaptiveChunkPolicy, ConfigStore, RuntimeSettings},
-    crypto,
+    crypto::{
+        self, decode_public_key, encode_public_key_hex, SessionCipher, SessionPublicKey,
+        SessionSecretBytes,
+    },
+    license::{LicenseError, LicenseManager},
+    metrics::RouteMetricsRegistry,
     resume::{derive_chunk_size, ChunkCatalog, ResumeStore},
+    security::SecurityConfig,
     services::mdns::{MdnsRegistry, SenderInfo as MdnsSenderInfo},
     signaling::SessionTicket,
     store::{
@@ -31,28 +44,34 @@ use crate::{
     },
     transport::{
         adapter::{WebRtcHint, WebRtcRole},
-        Frame, LanQuic, RouteKind, Router, SelectedRoute, SessionDesc, TransportStream,
+        Frame, LanQuic, RouteKind, Router, SelectedRoute, SessionDesc, TransportError,
+        TransportStream,
     },
 };
 
 use state::{LanMode, TrackedFile, TransferTask};
 use types::{
-    AuthenticatedPayload, ChunkPolicyPayload, CommandError, ConnectByCodePayload,
-    DeviceRegistrationPayload, DeviceResponse, DevicesQueryPayload, DevicesResponse,
-    DeviceUpdatePayload, EntitlementDto, EntitlementUpdatePayload, ErrorCode, ExportPotResponse,
+    AuditLogDto, AuthenticatedPayload, ChunkPolicyPayload, CommandError, ConnectByCodePayload,
+    DeviceRegistrationPayload, DeviceResponse, DeviceUpdatePayload, DevicesQueryPayload,
+    DevicesResponse, EntitlementDto, EntitlementUpdatePayload, ErrorCode, ExportPotResponse,
     GenerateCodeResponse, HeartbeatPayload, IdentityRefPayload, IdentityRegistrationPayload,
-    IdentityResponse, P2pSmokeTestResponse, ResumeProgressDto, SenderInfoDto, SettingsPayload,
-    SignedPathsPayload, SignedReceivePayload, TaskResponse, TransferDirection,
-    TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute, TransferStatus,
-    TransferSummary, VerifyPotResponse,
+    IdentityResponse, LicenseActivatePayload, LicenseStatusDto, P2pSmokeTestResponse,
+    ResumeProgressDto, RouteMetricsDto, SenderInfoDto, SettingsPayload, SignedPathsPayload,
+    SignedReceivePayload, TaskResponse, TransferDirection, TransferLifecycleEvent, TransferPhase,
+    TransferProgressEvent, TransferRoute, TransferStatsDto, TransferStatus, TransferSummary,
+    VerifyPotResponse, WebRtcReceiverPayload, WebRtcSenderPayload,
 };
 
 const MOCK_RECEIVE_FILE_SIZE: u64 = 2 * 1024 * 1024;
+const MULTI_STREAM_THRESHOLD: u64 = 64 * 1024 * 1024;
+const DEFAULT_PARALLEL_CHUNKS: usize = 2;
+const MAX_PARALLEL_CHUNKS: usize = 4;
 
 pub use state::AppState as SharedState;
 
 #[tauri::command]
 pub async fn auth_register_identity(
+    app: AppHandle,
     store: State<'_, IdentityStore>,
     payload: IdentityRegistrationPayload,
 ) -> Result<IdentityResponse, CommandError> {
@@ -62,13 +81,22 @@ pub async fn auth_register_identity(
     if payload.public_key.trim().is_empty() {
         return Err(CommandError::invalid("public_key is required"));
     }
+    let identity_id = payload.identity_id.trim().to_string();
     let record = store
         .register_identity(
-            payload.identity_id.trim(),
+            identity_id.as_str(),
             payload.public_key.trim(),
             payload.label.as_deref(),
         )
         .map_err(CommandError::from)?;
+    log_simple_event(
+        &app,
+        "identity.registered",
+        Some(identity_id.as_str()),
+        None,
+        None,
+        json!({ "label": payload.label }),
+    );
     Ok(to_identity_response(&record))
 }
 
@@ -76,6 +104,7 @@ pub async fn auth_register_identity(
 pub async fn auth_register_device(
     app: AppHandle,
     store: State<'_, IdentityStore>,
+    license: State<'_, LicenseManager>,
     payload: DeviceRegistrationPayload,
 ) -> Result<DeviceResponse, CommandError> {
     if payload.identity_id.trim().is_empty() {
@@ -109,6 +138,13 @@ pub async fn auth_register_device(
 
     verify_device_signature(&identity, device_id, public_key, signature)?;
 
+    let license_record = license
+        .active_license(payload.identity_id.trim())
+        .map_err(CommandError::from)?;
+    license
+        .enforce_device_limit(&license_record)
+        .map_err(CommandError::license_violation)?;
+
     let record = store
         .register_device(
             &identity.identity_id,
@@ -119,6 +155,14 @@ pub async fn auth_register_device(
         )
         .map_err(CommandError::from)?;
     emit_devices_update(&app, &store, &identity.identity_id);
+    log_simple_event(
+        &app,
+        "device.registered",
+        Some(identity.identity_id.as_str()),
+        Some(record.device_id.as_str()),
+        None,
+        json!({ "name": record.name, "status": record.status }),
+    );
     Ok(to_device_response(&record))
 }
 
@@ -252,6 +296,7 @@ pub async fn auth_update_device(
 
 #[tauri::command]
 pub async fn courier_generate_code(
+    app: AppHandle,
     state: State<'_, SharedState>,
     config: State<'_, ConfigStore>,
     identity_store: State<'_, IdentityStore>,
@@ -268,14 +313,36 @@ pub async fn courier_generate_code(
         return Err(CommandError::invalid("At least one file is required"));
     }
     let files = collect_files(&auth.payload.paths).map_err(CommandError::from)?;
+    let total_size: u64 = files.iter().map(|file| file.size).sum();
+    let license_snapshot = license
+        .active_license(auth.identity_id.trim())
+        .map_err(CommandError::from)?;
+    license
+        .enforce_file_size(&license_snapshot, total_size)
+        .map_err(CommandError::license_violation)?;
+    let identity_record = identity_store
+        .get_identity(auth.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let device_record = identity_store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+    let (session_secret, session_public) = SessionSecretBytes::generate();
     let code = crypto::generate_task_code(6);
     let session_key = crypto::derive_mock_session_key();
-    let task = TransferTask::new(
+    let mut task = TransferTask::new(
         TransferDirection::Send,
         Some(code.clone()),
         files,
         session_key,
     );
+    task.session_secret = Some(session_secret.clone());
+    task.public_key = Some(session_public.clone());
+    task.identity_id = Some(auth.identity_id.clone());
+    task.identity_public_key = Some(identity_record.public_key.clone());
+    task.device_id = Some(auth.device_id.clone());
+    task.device_name = device_record.name.clone();
     let task = state.insert_task(task).await;
 
     let settings = config.get();
@@ -291,7 +358,19 @@ pub async fn courier_generate_code(
         task_id: task.task_id,
         code: ticket.code,
         qr_data_url: None,
+        public_key: encode_public_key_hex(&session_public),
     };
+    log_simple_event(
+        &app,
+        "pairing_code.generated",
+        Some(auth.identity_id.trim()),
+        Some(auth.device_id.trim()),
+        Some(response.task_id.as_str()),
+        json!({
+            "code": response.code,
+            "files": auth.payload.paths.len(),
+        }),
+    );
     Ok(response)
 }
 
@@ -300,6 +379,7 @@ pub async fn courier_send(
     app: AppHandle,
     state: State<'_, SharedState>,
     store: State<'_, IdentityStore>,
+    license: State<'_, LicenseManager>,
     auth: AuthenticatedPayload<SignedPathsPayload>,
     code: String,
 ) -> Result<TaskResponse, CommandError> {
@@ -334,6 +414,7 @@ pub async fn courier_send(
                 task.lan_mode = Some(LanMode::Sender {
                     device_name: Some(device_label.clone()),
                 });
+                task.device_name = Some(device_label.clone());
             })
             .await
             .unwrap_or(existing)
@@ -342,6 +423,17 @@ pub async fn courier_send(
     };
 
     spawn_transfer_runner(&app, state.inner().clone(), task.task_id.clone());
+    log_simple_event(
+        &app,
+        "transfer.send.requested",
+        Some(auth.identity_id.trim()),
+        Some(auth.device_id.trim()),
+        Some(task.task_id.as_str()),
+        json!({
+            "code": code,
+            "files": task.files.len(),
+        }),
+    );
 
     Ok(TaskResponse {
         task_id: task.task_id,
@@ -370,17 +462,56 @@ pub async fn courier_receive(
     if auth.payload.port == 0 {
         return Err(CommandError::invalid("port must be non-zero"));
     }
+    let identity_record = store
+        .get_identity(auth.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let device_record = store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+    let sender_key = decode_public_key(&auth.payload.sender_public_key)
+        .map_err(|err| CommandError::invalid(format!("invalid sender public key: {err}")))?;
+    let cert_fp_str = auth.payload.sender_cert_fingerprint.trim();
+    if cert_fp_str.len() != 64 {
+        return Err(CommandError::invalid(
+            "sender_cert_fingerprint must be 64 hex characters",
+        ));
+    }
+    hex::decode(cert_fp_str)
+        .map_err(|_| CommandError::invalid("sender_cert_fingerprint must be hex"))?;
+    let cert_fp = cert_fp_str.to_string();
+    let (session_secret, session_public_key) = SessionSecretBytes::generate();
 
     let updated_task = init_receive_task(
         state.inner(),
+        &auth.identity_id,
+        &identity_record.public_key,
+        &auth.device_id,
+        device_record.name.clone(),
         &auth.payload.code,
         &save_dir_path,
         host.to_string(),
         auth.payload.port,
+        session_secret,
+        session_public_key,
+        sender_key,
+        Some(cert_fp),
     )
     .await?;
 
     spawn_transfer_runner(&app, state.inner().clone(), updated_task.task_id.clone());
+    log_simple_event(
+        &app,
+        "transfer.receive.manual",
+        Some(auth.identity_id.trim()),
+        Some(auth.device_id.trim()),
+        Some(updated_task.task_id.as_str()),
+        json!({
+            "host": host,
+            "port": auth.payload.port,
+        }),
+    );
 
     Ok(TaskResponse {
         task_id: updated_task.task_id,
@@ -403,28 +534,245 @@ pub async fn courier_connect_by_code(
         "receive",
     )?;
     let save_dir_path = prepare_save_dir(&auth.payload.save_dir)?;
-    let addr = mdns
+    let identity_record = store
+        .get_identity(auth.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let device_record = store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+    let sender_info = mdns
         .discover_sender(&auth.payload.code, Duration::from_secs(10))
         .await
         .map_err(|err| CommandError::route_unreachable(format!("{err}")))?;
+    let peer_key = decode_public_key(&sender_info.public_key)
+        .map_err(|err| CommandError::invalid(format!("invalid sender public key: {err}")))?;
+    let (session_secret, session_public_key) = SessionSecretBytes::generate();
 
     let updated_task = init_receive_task(
         state.inner(),
+        &auth.identity_id,
+        &identity_record.public_key,
+        &auth.device_id,
+        device_record.name.clone(),
         &auth.payload.code,
         &save_dir_path,
-        addr.ip().to_string(),
-        addr.port(),
+        sender_info.host.clone(),
+        sender_info.port,
+        session_secret,
+        session_public_key,
+        peer_key,
+        if sender_info.cert_fingerprint.is_empty() {
+            None
+        } else {
+            Some(sender_info.cert_fingerprint.clone())
+        },
     )
     .await?;
 
     emit_log(
         &app,
         &updated_task.task_id,
-        format!("Discovered sender at {}", addr),
+        format!(
+            "Discovered sender at {}:{}, device {}",
+            sender_info.host, sender_info.port, sender_info.device_name
+        ),
     );
     spawn_transfer_runner(&app, state.inner().clone(), updated_task.task_id.clone());
+    log_simple_event(
+        &app,
+        "transfer.receive.auto",
+        Some(auth.identity_id.trim()),
+        Some(auth.device_id.trim()),
+        Some(updated_task.task_id.as_str()),
+        json!({
+            "code": auth.payload.code,
+            "host": sender_info.host,
+            "port": sender_info.port,
+        }),
+    );
     Ok(TaskResponse {
         task_id: updated_task.task_id,
+    })
+}
+
+#[tauri::command]
+pub async fn courier_start_webrtc_sender(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    store: State<'_, IdentityStore>,
+    license: State<'_, LicenseManager>,
+    auth: AuthenticatedPayload<WebRtcSenderPayload>,
+) -> Result<TaskResponse, CommandError> {
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "webrtc_send",
+    )?;
+    if auth.payload.file_paths.is_empty() {
+        return Err(CommandError::invalid("至少需要选择一个文件"));
+    }
+    let code = auth.payload.code.trim().to_ascii_uppercase();
+    if code.is_empty() {
+        return Err(CommandError::invalid("code is required"));
+    }
+    let files = collect_files(&auth.payload.file_paths).map_err(CommandError::from)?;
+    let total_size: u64 = files.iter().map(|file| file.size).sum();
+    let license_snapshot = license
+        .active_license(auth.identity_id.trim())
+        .map_err(CommandError::from)?;
+    license
+        .enforce_file_size(&license_snapshot, total_size)
+        .map_err(CommandError::license_violation)?;
+    let usage_snapshot = license
+        .ensure_p2p_quota(&license_snapshot)
+        .map_err(CommandError::license_violation)?;
+    let identity_record = store
+        .get_identity(auth.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let device_record = store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+    let (session_secret, session_public) = SessionSecretBytes::generate();
+    let session_key = crypto::derive_mock_session_key();
+
+    let mut task = TransferTask::new(
+        TransferDirection::Send,
+        Some(code.clone()),
+        files,
+        session_key,
+    );
+    task.session_secret = Some(session_secret);
+    task.public_key = Some(session_public);
+    task.identity_id = Some(auth.identity_id.clone());
+    task.identity_public_key = Some(identity_record.public_key.clone());
+    task.device_id = Some(auth.device_id.clone());
+    let device_label = auth
+        .payload
+        .device_name
+        .clone()
+        .or(device_record.name.clone())
+        .unwrap_or_else(|| device_record.device_id.clone());
+    task.device_name = Some(device_label.clone());
+    task.preferred_routes = Some(vec![RouteKind::P2p]);
+
+    let task = state.insert_task(task).await;
+    state.track_code(&code, &task.task_id).await;
+
+    emit_log(
+        &app,
+        &task.task_id,
+        format!("WebRTC 发送任务启动，设备：{device_label} · 配对码 {code}"),
+    );
+
+    spawn_transfer_runner(&app, state.inner().clone(), task.task_id.clone());
+    license
+        .record_p2p_usage(&usage_snapshot)
+        .map_err(|err| CommandError::unknown(format!("record license usage failed: {err}")))?;
+    log_simple_event(
+        &app,
+        "transfer.webrtc.send",
+        Some(auth.identity_id.trim()),
+        Some(auth.device_id.trim()),
+        Some(task.task_id.as_str()),
+        json!({
+            "code": code,
+            "files": task.files.len(),
+        }),
+    );
+    Ok(TaskResponse {
+        task_id: task.task_id,
+    })
+}
+
+#[tauri::command]
+pub async fn courier_start_webrtc_receiver(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    store: State<'_, IdentityStore>,
+    license: State<'_, LicenseManager>,
+    auth: AuthenticatedPayload<WebRtcReceiverPayload>,
+) -> Result<TaskResponse, CommandError> {
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "webrtc_receive",
+    )?;
+    let code = auth.payload.code.trim().to_ascii_uppercase();
+    if code.is_empty() {
+        return Err(CommandError::invalid("code is required"));
+    }
+    let save_dir_path = prepare_save_dir(&auth.payload.save_dir)?;
+    let license_snapshot = license
+        .active_license(auth.identity_id.trim())
+        .map_err(CommandError::from)?;
+    license
+        .ensure_p2p_quota(&license_snapshot)
+        .map_err(CommandError::license_violation)?;
+    let identity_record = store
+        .get_identity(auth.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let device_record = store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+    let (session_secret, session_public) = SessionSecretBytes::generate();
+    let session_key = crypto::derive_mock_session_key();
+
+    let mut task = TransferTask::new(
+        TransferDirection::Receive,
+        Some(code.clone()),
+        Vec::new(),
+        session_key,
+    );
+    task.session_secret = Some(session_secret);
+    task.public_key = Some(session_public);
+    task.save_dir = Some(save_dir_path.clone());
+    task.identity_id = Some(auth.identity_id.clone());
+    task.identity_public_key = Some(identity_record.public_key.clone());
+    task.device_id = Some(auth.device_id.clone());
+    let device_label = auth
+        .payload
+        .device_name
+        .clone()
+        .or(device_record.name.clone())
+        .unwrap_or_else(|| device_record.device_id.clone());
+    task.device_name = Some(device_label.clone());
+    task.preferred_routes = Some(vec![RouteKind::P2p]);
+
+    let task = state.insert_task(task).await;
+    state.track_code(&code, &task.task_id).await;
+
+    emit_log(
+        &app,
+        &task.task_id,
+        format!(
+            "WebRTC 接收任务就绪，设备：{device_label} · 配对码 {code} · 保存目录 {}",
+            save_dir_path.display()
+        ),
+    );
+
+    spawn_transfer_runner(&app, state.inner().clone(), task.task_id.clone());
+    log_simple_event(
+        &app,
+        "transfer.webrtc.receive",
+        Some(auth.identity_id.trim()),
+        Some(auth.device_id.trim()),
+        Some(task.task_id.as_str()),
+        json!({
+            "code": code,
+        }),
+    );
+    Ok(TaskResponse {
+        task_id: task.task_id,
     })
 }
 
@@ -437,6 +785,114 @@ pub async fn courier_list_senders(
         .await
         .map_err(|err| CommandError::route_unreachable(format!("{err}")))?;
     Ok(items.into_iter().map(SenderInfoDto::from).collect())
+}
+
+#[tauri::command]
+pub async fn license_get_status(
+    store: State<'_, IdentityStore>,
+    license: State<'_, LicenseManager>,
+    payload: IdentityRefPayload,
+) -> Result<LicenseStatusDto, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    store
+        .get_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let status = license
+        .status(payload.identity_id.trim())
+        .map_err(CommandError::from)?;
+    Ok(status.into())
+}
+
+#[tauri::command]
+pub async fn license_activate(
+    store: State<'_, IdentityStore>,
+    license: State<'_, LicenseManager>,
+    app: AppHandle,
+    payload: LicenseActivatePayload,
+) -> Result<LicenseStatusDto, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    store
+        .get_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    license
+        .activate_license(payload.identity_id.trim(), &payload.license_blob)
+        .map_err(CommandError::license_violation)?;
+    let status = license
+        .status(payload.identity_id.trim())
+        .map_err(CommandError::from)?;
+    log_simple_event(
+        &app,
+        "license.activated",
+        Some(payload.identity_id.trim()),
+        None,
+        None,
+        json!({
+            "tier": status.tier,
+            "expiresAt": status.expires_at,
+        }),
+    );
+    Ok(status.into())
+}
+
+#[tauri::command]
+pub async fn transfer_stats(
+    store: State<'_, TransferStore>,
+    identities: State<'_, IdentityStore>,
+    payload: IdentityRefPayload,
+) -> Result<TransferStatsDto, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    identities
+        .get_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let stats = store
+        .stats_for_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?;
+    Ok(stats.into())
+}
+
+#[tauri::command]
+pub async fn audit_get_logs(
+    store: State<'_, IdentityStore>,
+    audit: State<'_, AuditLogger>,
+    payload: IdentityRefPayload,
+    limit: Option<u32>,
+) -> Result<Vec<AuditLogDto>, CommandError> {
+    if payload.identity_id.trim().is_empty() {
+        return Err(CommandError::invalid("identity_id is required"));
+    }
+    store
+        .get_identity(payload.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let capped = limit.unwrap_or(100).min(500) as usize;
+    let entries = audit
+        .query(payload.identity_id.trim(), Some(capped))
+        .map_err(CommandError::from)?;
+    Ok(entries.into_iter().map(AuditLogDto::from).collect())
+}
+
+#[tauri::command]
+pub async fn security_get_config(
+    security: State<'_, SecurityConfig>,
+) -> Result<SecurityConfig, CommandError> {
+    Ok(security.inner().clone())
+}
+
+#[tauri::command]
+pub async fn courier_route_metrics(
+    metrics: State<'_, RouteMetricsRegistry>,
+) -> Result<Vec<RouteMetricsDto>, CommandError> {
+    let snapshots = metrics.snapshot();
+    Ok(snapshots.into_iter().map(RouteMetricsDto::from).collect())
 }
 
 #[tauri::command]
@@ -476,6 +932,7 @@ pub async fn courier_cancel(
 pub async fn courier_resume(
     app: AppHandle,
     state: State<'_, SharedState>,
+    license: State<'_, LicenseManager>,
     task_id: String,
 ) -> Result<TaskResponse, CommandError> {
     let existing = state
@@ -487,6 +944,19 @@ pub async fn courier_resume(
         TransferStatus::Completed | TransferStatus::Cancelled
     ) {
         return Err(CommandError::invalid("Transfer already finalised"));
+    }
+    let identity_id = existing
+        .identity_id
+        .clone()
+        .ok_or_else(|| CommandError::invalid("task missing identity context"))?;
+    let license_snapshot = license
+        .active_license(identity_id.trim())
+        .map_err(CommandError::from)?;
+    if !license_snapshot.limits.resume_enabled {
+        return Err(CommandError::license_violation(LicenseError::new(
+            "RESUME_DISABLED",
+            "当前权益不支持断点续传，请升级到 Pro 版以启用该功能。",
+        )));
     }
     state.set_status(&task_id, TransferStatus::Pending).await;
     spawn_transfer_runner(&app, state.inner().clone(), task_id.clone());
@@ -1025,8 +1495,8 @@ mod tests {
         let (_guard, store) = setup_identity_store();
         let (identity_key, identity_id, device_id) = register_identity_and_device(&store);
 
-        let heartbeat_signature = identity_key
-            .sign(format!("heartbeat:{identity_id}:{device_id}").as_bytes());
+        let heartbeat_signature =
+            identity_key.sign(format!("heartbeat:{identity_id}:{device_id}").as_bytes());
         super::verify_request(
             &store,
             &identity_id,
@@ -1047,8 +1517,8 @@ mod tests {
             )
             .expect("touch device");
 
-        let update_signature = identity_key
-            .sign(format!("update_device:{identity_id}:{device_id}").as_bytes());
+        let update_signature =
+            identity_key.sign(format!("update_device:{identity_id}:{device_id}").as_bytes());
         super::verify_request(
             &store,
             &identity_id,
@@ -1111,7 +1581,6 @@ mod tests {
         assert_eq!(snapshot.status, "active");
         assert_eq!(snapshot.capabilities, capabilities);
     }
-
 
     #[test]
     fn verify_pot_command_validates_success() {
@@ -1212,6 +1681,7 @@ fn spawn_transfer_runner(app: &AppHandle, state: SharedState, task_id: String) {
                     bytes_total: None,
                     speed_bps: None,
                     route: None,
+                    route_attempts: None,
                     message: Some(display_message.clone()),
                     resume: None,
                 },
@@ -1250,7 +1720,11 @@ async fn simulate_transfer(
         format!("Transfer session key {}", task.session_key),
     );
 
-    let router = Router::from_app(&app);
+    let router = if let Some(routes) = task.preferred_routes.clone() {
+        Router::from_app_with_routes(&app, routes)
+    } else {
+        Router::from_app(&app)
+    };
     let candidate_labels: Vec<String> = router
         .preferred_routes()
         .iter()
@@ -1284,6 +1758,7 @@ async fn simulate_transfer(
             bytes_total: None,
             speed_bps: None,
             route: None,
+            route_attempts: None,
             message: Some("Preparing transfer context".into()),
             resume: None,
         },
@@ -1300,6 +1775,7 @@ async fn simulate_transfer(
             bytes_total: None,
             speed_bps: None,
             route: None,
+            route_attempts: Some(candidate_labels.clone()),
             message: Some("Exchanging pairing code".into()),
             resume: None,
         },
@@ -1315,11 +1791,17 @@ async fn simulate_transfer(
         } else {
             WebRtcRole::Answerer
         };
-        session.webrtc = Some(WebRtcHint { role });
+        session.webrtc = Some(WebRtcHint {
+            role,
+            identity_id: task.identity_id.clone(),
+            device_id: task.device_id.clone(),
+            device_name: task.device_name.clone(),
+            signer_public_key: task.identity_public_key.clone(),
+        });
     }
     let SelectedRoute {
         route: selected_route,
-        mut stream,
+        stream,
         attempt_notes,
     } = router.connect(&session).await.map_err(|err| {
         CommandError::route_unreachable(format!("transport selection failed: {err}"))
@@ -1334,29 +1816,32 @@ async fn simulate_transfer(
         emit_log(&app, &task_id, format!("Route attempt · {}", note));
     }
 
-    let handshake_start = Instant::now();
-    stream
-        .send(Frame::Control("handshake".into()))
-        .await
-        .map_err(|err| {
-            CommandError::route_unreachable(format!("transport handshake failed: {err}"))
-        })?;
-    let handshake_elapsed = match stream.recv().await {
-        Ok(frame) => {
-            let elapsed = handshake_start.elapsed();
-            emit_log(&app, &task_id, format!("Control frame echo: {:?}", frame));
-            elapsed
-        }
+    let result = secure_router_stream(&app, stream, &task, &selected_route, state.clone()).await;
+    let (mut stream, peer_public, handshake_elapsed) = match result {
+        Ok(tuple) => tuple,
         Err(err) => {
-            let elapsed = handshake_start.elapsed();
-            emit_log(
-                &app,
-                &task_id,
-                format!("Handshake acknowledgement missing: {err}"),
-            );
-            elapsed
+            if let Some(registry) = app.try_state::<RouteMetricsRegistry>() {
+                registry.record(
+                    selected_route.clone(),
+                    Duration::ZERO,
+                    false,
+                    Some(&err.message),
+                );
+            }
+            return Err(err);
         }
     };
+    emit_log(
+        &app,
+        &task_id,
+        format!(
+            "Encrypted session established · peer key {}",
+            encode_public_key_hex(&peer_public)
+        ),
+    );
+    if let Some(registry) = app.try_state::<RouteMetricsRegistry>() {
+        registry.record(selected_route.clone(), handshake_elapsed, true, None);
+    }
 
     emit_progress(
         &app,
@@ -1368,6 +1853,7 @@ async fn simulate_transfer(
             bytes_total: None,
             speed_bps: None,
             route: Some(route.clone()),
+            route_attempts: Some(candidate_labels.clone()),
             message: Some(format!(
                 "{} route established",
                 route_label(&route).to_uppercase()
@@ -1383,12 +1869,21 @@ async fn simulate_transfer(
         total_bytes = MOCK_RECEIVE_FILE_SIZE;
     }
     let settings = app.state::<ConfigStore>().get();
-    let weak_network = matches!(selected_route, RouteKind::Relay)
-        || handshake_elapsed > Duration::from_millis(250);
+    let observed_latency = if let Some(registry) = app.try_state::<RouteMetricsRegistry>() {
+        if let Some(avg) = registry.avg_latency(&selected_route) {
+            (avg + handshake_elapsed) / 2
+        } else {
+            handshake_elapsed
+        }
+    } else {
+        handshake_elapsed
+    };
+    let weak_network =
+        matches!(selected_route, RouteKind::Relay) || observed_latency > Duration::from_millis(250);
     let suggested_chunk = derive_chunk_size(
         &settings.chunk_policy,
         &selected_route,
-        handshake_elapsed,
+        observed_latency,
         weak_network,
     );
     let resume_store = ResumeStore::from_app(&app).map_err(CommandError::from)?;
@@ -1462,6 +1957,7 @@ async fn simulate_transfer(
                 bytes_total: Some(bytes_total),
                 speed_bps: Some(8 * 1024 * 1024),
                 route: Some(route.clone()),
+                route_attempts: None,
                 message: Some(format!(
                     "Resuming transfer · {} remaining chunks",
                     pending_indices.len()
@@ -1471,35 +1967,55 @@ async fn simulate_transfer(
         );
     }
 
-    for chunk_index in pending_indices.iter() {
-        let chunk_len = catalog.chunk_length(*chunk_index);
-        let mut payload = vec![0u8; chunk_len as usize];
-        for (offset, byte) in payload.iter_mut().enumerate() {
-            *byte = ((*chunk_index as usize + offset) % 251) as u8;
+    let mut chunk_iter = pending_indices.into_iter();
+    let mut pending_jobs: FuturesUnordered<_> = FuturesUnordered::new();
+    let desired_parallel = if bytes_total >= MULTI_STREAM_THRESHOLD {
+        MAX_PARALLEL_CHUNKS
+    } else if bytes_total >= 8 * 1024 * 1024 {
+        DEFAULT_PARALLEL_CHUNKS
+    } else {
+        1
+    };
+    let parallelism = desired_parallel.min(MAX_PARALLEL_CHUNKS).max(1);
+    let mut active_workers = 0usize;
+    while active_workers < parallelism {
+        if let Some(index) = chunk_iter.next() {
+            let len = catalog.chunk_length(index);
+            pending_jobs.push(spawn_blocking(move || prepare_mock_chunk(index, len)));
+            active_workers += 1;
+        } else {
+            break;
         }
-        let mut hasher = Sha256::new();
-        hasher.update(&payload);
-        let digest = hasher.finalize();
-        let digest_hex = hex::encode(digest);
+    }
+
+    while let Some(result) = pending_jobs.next().await {
+        let chunk = result.map_err(|err| {
+            CommandError::route_unreachable(format!("chunk worker failed: {err}"))
+        })?;
+        let PreparedChunk {
+            index,
+            len,
+            payload,
+            digest_hex,
+        } = chunk;
+
         stream
             .send(Frame::Data(payload))
             .await
             .map_err(|err| CommandError::route_unreachable(format!("transport failed: {err}")))?;
-        catalog.mark_received(*chunk_index);
+        catalog.mark_received(index);
         resume_store
             .store(&task_id, &catalog)
             .map_err(CommandError::from)?;
-        acknowledged_bytes = acknowledged_bytes
-            .saturating_add(chunk_len)
-            .min(bytes_total);
+        acknowledged_bytes = acknowledged_bytes.saturating_add(len).min(bytes_total);
         emit_log(
             &app,
             &task_id,
             format!(
                 "Chunk {}/{} confirmed ({} bytes, sha256:{})",
-                *chunk_index + 1,
+                index + 1,
                 total_chunks,
-                chunk_len,
+                len,
                 digest_hex
             ),
         );
@@ -1518,15 +2034,19 @@ async fn simulate_transfer(
                 bytes_total: Some(bytes_total),
                 speed_bps: Some(8 * 1024 * 1024),
                 route: Some(route.clone()),
+                route_attempts: None,
                 message: Some(format!(
                     "Streaming payload · chunk {}/{}",
-                    *chunk_index + 1,
+                    index + 1,
                     total_chunks
                 )),
                 resume: Some(resume_snapshot(&catalog)),
             },
         );
-        sleep(Duration::from_millis(180)).await;
+        if let Some(next_index) = chunk_iter.next() {
+            let len = catalog.chunk_length(next_index);
+            pending_jobs.push(spawn_blocking(move || prepare_mock_chunk(next_index, len)));
+        }
     }
 
     if catalog.is_complete() {
@@ -1561,6 +2081,7 @@ async fn simulate_transfer(
             bytes_total: Some(bytes_total),
             speed_bps: Some(4 * 1024 * 1024),
             route: Some(route.clone()),
+            route_attempts: None,
             message: Some("Finalising transfer & generating proof".into()),
             resume: Some(resume_snapshot(&catalog)),
         },
@@ -1606,6 +2127,7 @@ async fn simulate_transfer(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(route.clone()),
+            route_attempts: None,
             message: Some("Transfer completed".into()),
             resume: Some(resume_snapshot(&catalog)),
         },
@@ -1684,6 +2206,14 @@ async fn run_lan_sender_impl(
         return Err(CommandError::invalid("no files to send"));
     }
     let task_id = task.task_id.clone();
+    let session_secret = task
+        .session_secret
+        .clone()
+        .ok_or_else(|| CommandError::invalid("sender session secret missing"))?;
+    let sender_public_key = task
+        .public_key
+        .clone()
+        .ok_or_else(|| CommandError::invalid("sender public key missing"))?;
     let files = task.files.clone();
     let bytes_total: u64 = files.iter().map(|f| f.size).sum();
 
@@ -1697,6 +2227,7 @@ async fn run_lan_sender_impl(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(TransferRoute::Lan),
+            route_attempts: None,
             message: Some("Preparing LAN transfer context".into()),
             resume: None,
         },
@@ -1712,6 +2243,7 @@ async fn run_lan_sender_impl(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(TransferRoute::Lan),
+            route_attempts: None,
             message: Some("Waiting for receiver to connect".into()),
             resume: None,
         },
@@ -1722,6 +2254,12 @@ async fn run_lan_sender_impl(
         .bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
         .await
         .map_err(|err| CommandError::route_unreachable(format!("lan bind failed: {err}")))?;
+    let cert_fingerprint = quic.certificate_fingerprint();
+    state
+        .update_task(&task_id, |pending| {
+            pending.cert_fingerprint = Some(cert_fingerprint.clone());
+        })
+        .await;
     let listen_addr = listener
         .local_addr()
         .map_err(|err| CommandError::route_unreachable(format!("lan addr failed: {err}")))?;
@@ -1729,36 +2267,64 @@ async fn run_lan_sender_impl(
     emit_log(
         &app,
         &task_id,
-        format!("LAN listener on {} · share IP: {:?}", listen_addr, interfaces),
+        format!(
+            "LAN listener on {} · share IP: {:?}",
+            listen_addr, interfaces
+        ),
     );
+    emit_log(
+        &app,
+        &task_id,
+        format!("Certificate fingerprint {}", cert_fingerprint),
+    );
+    let sender_public_hex = Some(encode_public_key_hex(&sender_public_key));
     if let Some(code) = task.code.clone() {
         let device_label = match &task.lan_mode {
             Some(LanMode::Sender { device_name }) => device_name.clone(),
             _ => None,
         };
-        if let Err(err) = cleanup
-            .register(&code, &task_id, listen_addr.port(), &interfaces, device_label)
-            .await
-        {
+        if let Some(pub_hex) = sender_public_hex.as_ref() {
+            if let Err(err) = cleanup
+                .register(
+                    &code,
+                    &task_id,
+                    listen_addr.port(),
+                    &interfaces,
+                    device_label,
+                    pub_hex,
+                    Some(&cert_fingerprint),
+                )
+                .await
+            {
+                emit_log(
+                    &app,
+                    &task_id,
+                    format!("mDNS registration skipped: {}", err.message),
+                );
+            }
+        } else {
             emit_log(
                 &app,
                 &task_id,
-                format!("mDNS registration skipped: {}", err.message),
+                "mDNS registration skipped: missing sender public key".into(),
             );
         }
     }
 
-    let mut stream = timeout(Duration::from_secs(60), listener.accept())
+    let mut raw_stream = timeout(Duration::from_secs(60), listener.accept())
         .await
         .map_err(|_| CommandError::route_unreachable("receiver did not connect in time"))?
         .map_err(|err| CommandError::route_unreachable(format!("lan accept failed: {err}")))?;
 
-    let hello = stream.recv().await.map_err(|err| {
+    let hello = raw_stream.recv().await.map_err(|err| {
         CommandError::route_unreachable(format!("lan handshake read failed: {err}"))
     })?;
-    match hello {
+    let receiver_public = match hello {
         Frame::Control(text) => match decode_control_message(&text)? {
-            LanControlMessage::ReceiverReady => {}
+            LanControlMessage::ReceiverReady { public_key } => decode_public_key(&public_key)
+                .map_err(|err| {
+                    CommandError::invalid(format!("invalid receiver public key: {err}"))
+                })?,
             other => {
                 return Err(CommandError::route_unreachable(format!(
                     "unexpected control {:?} during handshake",
@@ -1771,15 +2337,25 @@ async fn run_lan_sender_impl(
                 "receiver did not initiate handshake",
             ));
         }
-    }
+    };
+    state
+        .update_task(&task_id, |pending| {
+            pending.peer_public_key = Some(receiver_public.clone());
+        })
+        .await;
 
-    stream
+    raw_stream
         .send(encode_control_message(&LanControlMessage::SenderReady {
             addresses: interfaces.clone(),
             port: listen_addr.port(),
+            public_key: encode_public_key_hex(&sender_public_key),
+            cert_fingerprint: cert_fingerprint.clone(),
         })?)
         .await
         .map_err(|err| CommandError::route_unreachable(format!("lan handshake failed: {err}")))?;
+
+    let shared = session_secret.derive_shared(&receiver_public);
+    let mut stream = SecureStream::new(Box::new(raw_stream), SessionCipher::new(shared));
 
     emit_progress(
         &app,
@@ -1791,6 +2367,7 @@ async fn run_lan_sender_impl(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(TransferRoute::Lan),
+            route_attempts: None,
             message: Some("Receiver connected via LAN".into()),
             resume: None,
         },
@@ -1824,6 +2401,7 @@ async fn run_lan_sender_impl(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(TransferRoute::Lan),
+            route_attempts: None,
             message: Some("Sending files over QUIC".into()),
             resume: None,
         },
@@ -1857,13 +2435,14 @@ async fn run_lan_sender_impl(
             stream
                 .send(Frame::Data(buffer[..read].to_vec()))
                 .await
-                .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+                .map_err(|err| {
+                    CommandError::route_unreachable(format!("lan send failed: {err}"))
+                })?;
             bytes_sent += read as u64;
             if last_emit.elapsed() > Duration::from_millis(350) {
                 let elapsed = started.elapsed().as_secs_f32().max(0.001);
                 let speed = (bytes_sent as f32 / elapsed) as u64;
-                let progress = 0.3
-                    + 0.55 * ((bytes_sent as f32 / bytes_total as f32).min(1.0));
+                let progress = 0.3 + 0.55 * ((bytes_sent as f32 / bytes_total as f32).min(1.0));
                 emit_progress(
                     &app,
                     TransferProgressEvent {
@@ -1874,6 +2453,7 @@ async fn run_lan_sender_impl(
                         bytes_total: Some(bytes_total),
                         speed_bps: Some(speed),
                         route: Some(TransferRoute::Lan),
+                        route_attempts: None,
                         message: Some(format!("Sending {}", file.name)),
                         resume: None,
                     },
@@ -1916,6 +2496,18 @@ async fn run_lan_receiver(
         .clone()
         .ok_or_else(|| CommandError::invalid("save_dir missing for receive task"))?;
     let task_id = task.task_id.clone();
+    let session_secret = task
+        .session_secret
+        .clone()
+        .ok_or_else(|| CommandError::invalid("receiver session secret missing"))?;
+    let receiver_public_key = task
+        .public_key
+        .clone()
+        .ok_or_else(|| CommandError::invalid("receiver public key missing"))?;
+    let expected_sender_key = task
+        .peer_public_key
+        .clone()
+        .ok_or_else(|| CommandError::invalid("sender public key missing"))?;
     let ip: IpAddr = host
         .parse()
         .map_err(|_| CommandError::invalid("invalid host address"))?;
@@ -1931,28 +2523,51 @@ async fn run_lan_receiver(
             bytes_total: None,
             speed_bps: None,
             route: Some(TransferRoute::Lan),
+            route_attempts: None,
             message: Some(format!("Connecting to sender {}", remote_addr)),
             resume: None,
         },
     );
 
     let quic = LanQuic::new().map_err(|err| CommandError::route_unreachable(err.to_string()))?;
-    let mut stream = quic
+    let mut raw_stream = quic
         .connect(remote_addr)
         .await
         .map_err(|err| CommandError::route_unreachable(format!("lan connect failed: {err}")))?;
 
-    stream
-        .send(encode_control_message(&LanControlMessage::ReceiverReady)?)
+    raw_stream
+        .send(encode_control_message(&LanControlMessage::ReceiverReady {
+            public_key: encode_public_key_hex(&receiver_public_key),
+        })?)
         .await
         .map_err(|err| CommandError::route_unreachable(format!("lan handshake failed: {err}")))?;
 
-    let ready = stream.recv().await.map_err(|err| {
+    let ready = raw_stream.recv().await.map_err(|err| {
         CommandError::route_unreachable(format!("lan handshake read failed: {err}"))
     })?;
     match ready {
         Frame::Control(text) => match decode_control_message(&text)? {
-            LanControlMessage::SenderReady { addresses, port } => {
+            LanControlMessage::SenderReady {
+                addresses,
+                port,
+                public_key,
+                cert_fingerprint,
+            } => {
+                let sender_key = decode_public_key(&public_key).map_err(|err| {
+                    CommandError::invalid(format!("invalid sender public key: {err}"))
+                })?;
+                if sender_key != expected_sender_key {
+                    return Err(CommandError::invalid(
+                        "sender public key mismatch, please verify the code and key",
+                    ));
+                }
+                if let Some(expected_fp) = task.expected_cert_fingerprint.as_ref() {
+                    if expected_fp != &cert_fingerprint {
+                        return Err(CommandError::invalid(
+                            "sender certificate fingerprint mismatch",
+                        ));
+                    }
+                }
                 emit_log(
                     &app,
                     &task_id,
@@ -1967,11 +2582,12 @@ async fn run_lan_receiver(
             }
         },
         _ => {
-            return Err(CommandError::route_unreachable(
-                "sender handshake missing",
-            ));
+            return Err(CommandError::route_unreachable("sender handshake missing"));
         }
     }
+
+    let shared = session_secret.derive_shared(&expected_sender_key);
+    let mut stream = SecureStream::new(Box::new(raw_stream), SessionCipher::new(shared));
 
     let manifest_msg = stream.recv().await.map_err(|err| {
         CommandError::route_unreachable(format!("failed to read manifest: {err}"))
@@ -2004,6 +2620,7 @@ async fn run_lan_receiver(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(TransferRoute::Lan),
+            route_attempts: None,
             message: Some(format!("Receiving {} files", manifest.len())),
             resume: None,
         },
@@ -2026,21 +2643,24 @@ async fn run_lan_receiver(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(TransferRoute::Lan),
+            route_attempts: None,
             message: Some("Receiving data".into()),
             resume: None,
         },
     );
 
     loop {
-        let frame = stream.recv().await.map_err(|err| {
-            CommandError::route_unreachable(format!("lan receive failed: {err}"))
-        })?;
+        let frame = stream
+            .recv()
+            .await
+            .map_err(|err| CommandError::route_unreachable(format!("lan receive failed: {err}")))?;
         match frame {
             Frame::Control(text) => match decode_control_message(&text)? {
                 LanControlMessage::FileStart { name, size } => {
-                    let entry = manifest_iter
-                        .next()
-                        .unwrap_or(LanFileManifestEntry { name: name.clone(), size });
+                    let entry = manifest_iter.next().unwrap_or(LanFileManifestEntry {
+                        name: name.clone(),
+                        size,
+                    });
                     let dest = unique_destination_path(&save_dir, &entry.name);
                     let file = File::create(&dest).await.map_err(|err| {
                         CommandError::from_io(&err, format!("failed to create {}", dest.display()))
@@ -2057,13 +2677,11 @@ async fn run_lan_receiver(
                         active_file.take()
                     {
                         if current_name != name {
-                            return Err(CommandError::route_unreachable(
-                                "file order mismatch",
-                            ));
+                            return Err(CommandError::route_unreachable("file order mismatch"));
                         }
-                        file.flush().await.map_err(|err| {
-                            CommandError::from_io(&err, "failed to flush file")
-                        })?;
+                        file.flush()
+                            .await
+                            .map_err(|err| CommandError::from_io(&err, "failed to flush file"))?;
                         received_files.push(TrackedFile {
                             name: current_name,
                             size: written,
@@ -2075,11 +2693,7 @@ async fn run_lan_receiver(
                     break;
                 }
                 other => {
-                    emit_log(
-                        &app,
-                        &task_id,
-                        format!("lan control {:?}", other),
-                    );
+                    emit_log(&app, &task_id, format!("lan control {:?}", other));
                 }
             },
             Frame::Data(bytes) => {
@@ -2092,8 +2706,8 @@ async fn run_lan_receiver(
                     if last_emit.elapsed() > Duration::from_millis(350) {
                         let elapsed = start.elapsed().as_secs_f32().max(0.001);
                         let speed = (bytes_received as f32 / elapsed) as u64;
-                        let progress = 0.3
-                            + 0.55 * ((bytes_received as f32 / bytes_total as f32).min(1.0));
+                        let progress =
+                            0.3 + 0.55 * ((bytes_received as f32 / bytes_total as f32).min(1.0));
                         emit_progress(
                             &app,
                             TransferProgressEvent {
@@ -2104,6 +2718,7 @@ async fn run_lan_receiver(
                                 bytes_total: Some(bytes_total),
                                 speed_bps: Some(speed),
                                 route: Some(TransferRoute::Lan),
+                                route_attempts: None,
                                 message: Some(format!(
                                     "Receiving {} ({}/{})",
                                     name, *written, total
@@ -2127,11 +2742,7 @@ async fn run_lan_receiver(
         })
         .await;
 
-    emit_log(
-        &app,
-        &task_id,
-        format!("Received {} bytes", bytes_received),
-    );
+    emit_log(&app, &task_id, format!("Received {} bytes", bytes_received));
 
     finalize_lan_success(&app, &state, &task_id, TransferRoute::Lan, bytes_received).await
 }
@@ -2158,6 +2769,7 @@ fn persist_transfer_snapshot(
     let sent = bytes_sent.or(total);
     let record = TransferRecord {
         id: task.task_id.clone(),
+        identity_id: task.identity_id.clone(),
         code: task.code.clone(),
         direction: task.direction.clone(),
         status: task.status.clone(),
@@ -2254,6 +2866,22 @@ fn resume_snapshot(catalog: &ChunkCatalog) -> ResumeProgressDto {
     }
 }
 
+fn prepare_mock_chunk(index: u64, len: u64) -> PreparedChunk {
+    let mut payload = vec![0u8; len as usize];
+    for (offset, byte) in payload.iter_mut().enumerate() {
+        *byte = ((index as usize + offset) % 251) as u8;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(&payload);
+    let digest_hex = hex::encode(hasher.finalize());
+    PreparedChunk {
+        index,
+        len,
+        payload,
+        digest_hex,
+    }
+}
+
 async fn materialise_mock_payload(files: &[TrackedFile]) -> Result<Vec<TrackedFile>> {
     let mut results = Vec::new();
     for tracked in files {
@@ -2291,18 +2919,30 @@ fn prepare_save_dir(path: &str) -> Result<PathBuf, CommandError> {
 
 async fn init_receive_task(
     state: &SharedState,
+    identity_id: &str,
+    identity_public_key: &str,
+    device_id: &str,
+    device_name: Option<String>,
     code: &str,
     save_dir_path: &Path,
     host: String,
     port: u16,
+    session_secret: SessionSecretBytes,
+    session_public_key: SessionPublicKey,
+    peer_public_key: SessionPublicKey,
+    cert_fingerprint: Option<String>,
 ) -> Result<TransferTask, CommandError> {
     let session_key = crypto::derive_mock_session_key();
-    let task = TransferTask::new(
+    let mut task = TransferTask::new(
         TransferDirection::Receive,
         Some(code.to_string()),
         Vec::new(),
         session_key,
     );
+    task.identity_id = Some(identity_id.to_string());
+    task.identity_public_key = Some(identity_public_key.to_string());
+    task.device_id = Some(device_id.to_string());
+    task.device_name = device_name.clone();
     let task = state.insert_task(task).await;
     state.track_code(code, &task.task_id).await;
     let save_dir_owned = save_dir_path.to_path_buf();
@@ -2314,6 +2954,11 @@ async fn init_receive_task(
                 port,
             });
             pending.status = TransferStatus::InProgress;
+            pending.session_secret = Some(session_secret.clone());
+            pending.public_key = Some(session_public_key.clone());
+            pending.peer_public_key = Some(peer_public_key.clone());
+            pending.expected_cert_fingerprint = cert_fingerprint.clone();
+            pending.device_name = device_name.clone();
         })
         .await
         .unwrap_or(task);
@@ -2327,6 +2972,8 @@ impl From<MdnsSenderInfo> for SenderInfoDto {
             device_name: value.device_name,
             host: value.host,
             port: value.port,
+            public_key: value.public_key,
+            cert_fingerprint: value.cert_fingerprint,
         }
     }
 }
@@ -2334,11 +2981,25 @@ impl From<MdnsSenderInfo> for SenderInfoDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum LanControlMessage {
-    ReceiverReady,
-    SenderReady { addresses: Vec<String>, port: u16 },
-    Manifest { files: Vec<LanFileManifestEntry> },
-    FileStart { name: String, size: u64 },
-    FileEnd { name: String },
+    ReceiverReady {
+        public_key: String,
+    },
+    SenderReady {
+        addresses: Vec<String>,
+        port: u16,
+        public_key: String,
+        cert_fingerprint: String,
+    },
+    Manifest {
+        files: Vec<LanFileManifestEntry>,
+    },
+    FileStart {
+        name: String,
+        size: u64,
+    },
+    FileEnd {
+        name: String,
+    },
     Done,
 }
 
@@ -2348,6 +3009,149 @@ struct LanFileManifestEntry {
     size: u64,
 }
 
+struct PreparedChunk {
+    index: u64,
+    len: u64,
+    payload: Vec<u8>,
+    digest_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum TransportHandshake {
+    KeyExchange {
+        #[serde(rename = "publicKey")]
+        public_key: String,
+    },
+}
+
+struct SecureStream {
+    inner: Box<dyn TransportStream>,
+    cipher: SessionCipher,
+}
+
+impl SecureStream {
+    fn new(inner: Box<dyn TransportStream>, cipher: SessionCipher) -> Self {
+        Self { inner, cipher }
+    }
+
+    async fn send(&mut self, frame: Frame) -> Result<(), TransportError> {
+        let ciphertext = self
+            .cipher
+            .encrypt_frame(frame)
+            .map_err(|err| TransportError::Io(format!("encrypt frame failed: {err}")))?;
+        self.inner.send(Frame::Data(ciphertext)).await
+    }
+
+    async fn recv(&mut self) -> Result<Frame, TransportError> {
+        match self.inner.recv().await? {
+            Frame::Data(bytes) => self
+                .cipher
+                .decrypt_frame(bytes)
+                .map_err(|err| TransportError::Io(format!("decrypt frame failed: {err}"))),
+            Frame::Control(text) => Err(TransportError::Io(format!(
+                "unexpected plaintext control frame after secure session: {text}"
+            ))),
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close().await
+    }
+}
+
+async fn secure_router_stream(
+    app: &AppHandle,
+    mut stream: Box<dyn TransportStream>,
+    task: &TransferTask,
+    route: &RouteKind,
+    state: SharedState,
+) -> Result<(SecureStream, SessionPublicKey, Duration), CommandError> {
+    let start = Instant::now();
+    let session_secret = task
+        .session_secret
+        .clone()
+        .ok_or_else(|| CommandError::invalid("session secret missing for encrypted route"))?;
+    let local_public = task
+        .public_key
+        .clone()
+        .ok_or_else(|| CommandError::invalid("session public key missing for encrypted route"))?;
+
+    let hello = TransportHandshake::KeyExchange {
+        public_key: encode_public_key_hex(&local_public),
+    };
+    let payload = serde_json::to_string(&hello).map_err(|err| {
+        CommandError::route_unreachable(format!("handshake encode failed: {err}"))
+    })?;
+
+    let metrics = app.try_state::<RouteMetricsRegistry>();
+    let record_result = |success: bool, elapsed: Duration, error: Option<&str>| {
+        if let Some(registry) = metrics.as_ref() {
+            registry.record(route.clone(), elapsed, success, error);
+        }
+    };
+
+    stream.send(Frame::Control(payload)).await.map_err(|err| {
+        record_result(false, start.elapsed(), Some(&err.to_string()));
+        CommandError::route_unreachable(format!("handshake send failed: {err}"))
+    })?;
+
+    let peer_message = stream.recv().await.map_err(|err| {
+        record_result(false, start.elapsed(), Some(&err.to_string()));
+        CommandError::route_unreachable(format!("handshake receive failed: {err}"))
+    })?;
+    let peer_public_hex = match peer_message {
+        Frame::Control(text) => {
+            let parsed: TransportHandshake = serde_json::from_str(&text).map_err(|err| {
+                record_result(false, start.elapsed(), Some(&err.to_string()));
+                CommandError::route_unreachable(format!("handshake decode failed: {err}"))
+            })?;
+            match parsed {
+                TransportHandshake::KeyExchange { public_key } => public_key,
+            }
+        }
+        Frame::Data(_) => {
+            record_result(
+                false,
+                start.elapsed(),
+                Some("received data frame during handshake"),
+            );
+            return Err(CommandError::route_unreachable(
+                "handshake expected control frame, received data",
+            ));
+        }
+    };
+
+    let peer_public = decode_public_key(&peer_public_hex).map_err(|err| {
+        record_result(false, start.elapsed(), Some(&err.to_string()));
+        CommandError::invalid(format!("peer public key invalid: {err}"))
+    })?;
+
+    if let Some(expected) = task.peer_public_key.as_ref() {
+        if expected != &peer_public {
+            record_result(false, start.elapsed(), Some("peer public key mismatch"));
+            return Err(CommandError::invalid(
+                "peer public key mismatch, please recheck the pairing code",
+            ));
+        }
+    }
+
+    let shared = session_secret.derive_shared(&peer_public);
+    state
+        .update_task(&task.task_id, |pending| {
+            pending.peer_public_key = Some(peer_public.clone());
+        })
+        .await;
+
+    let elapsed = start.elapsed();
+    record_result(true, elapsed, None);
+    Ok((
+        SecureStream::new(stream, SessionCipher::new(shared)),
+        peer_public,
+        elapsed,
+    ))
+}
+
 fn encode_control_message(message: &LanControlMessage) -> Result<Frame, CommandError> {
     serde_json::to_string(message)
         .map(Frame::Control)
@@ -2355,9 +3159,8 @@ fn encode_control_message(message: &LanControlMessage) -> Result<Frame, CommandE
 }
 
 fn decode_control_message(payload: &str) -> Result<LanControlMessage, CommandError> {
-    serde_json::from_str(payload).map_err(|err| {
-        CommandError::route_unreachable(format!("control decode failed: {err}"))
-    })
+    serde_json::from_str(payload)
+        .map_err(|err| CommandError::route_unreachable(format!("control decode failed: {err}")))
 }
 
 fn collect_lan_interfaces() -> Vec<String> {
@@ -2416,6 +3219,7 @@ async fn finalize_lan_success(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(route.clone()),
+            route_attempts: None,
             message: Some("Generating PoT".into()),
             resume: None,
         },
@@ -2461,6 +3265,7 @@ async fn finalize_lan_success(
             bytes_total: Some(bytes_total),
             speed_bps: None,
             route: Some(route.clone()),
+            route_attempts: None,
             message: Some("Transfer completed".into()),
             resume: None,
         },
@@ -2506,13 +3311,21 @@ impl MdnsCleanup {
         port: u16,
         addresses: &[String],
         device_name: Option<String>,
+        public_key_hex: &str,
+        cert_fingerprint: Option<&str>,
     ) -> Result<(), CommandError> {
         let mdns = self.app.state::<MdnsRegistry>();
-        mdns.register_sender(code, task_id, port, addresses, device_name)
-            .await
-            .map_err(|err| {
-                CommandError::route_unreachable(format!("mDNS register failed: {err}"))
-            })?;
+        mdns.register_sender(
+            code,
+            task_id,
+            port,
+            addresses,
+            device_name,
+            public_key_hex,
+            cert_fingerprint,
+        )
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("mDNS register failed: {err}")))?;
         self.code = Some(code.to_string());
         Ok(())
     }

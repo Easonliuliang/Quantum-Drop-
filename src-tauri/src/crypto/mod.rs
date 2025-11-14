@@ -1,5 +1,11 @@
 //! Minimal cryptographic facade for the S1 milestone.
 
+pub mod session;
+
+pub use session::{
+    decode_public_key, encode_public_key_hex, SessionCipher, SessionPublicKey, SessionSecretBytes,
+};
+
 use rand::Rng;
 
 const CODE_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";

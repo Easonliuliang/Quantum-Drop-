@@ -26,7 +26,9 @@ pub fn run_legacy_migration(app: &AppHandle) {
         return;
     }
 
-    let Some(parent) = new_dir.parent() else { return; };
+    let Some(parent) = new_dir.parent() else {
+        return;
+    };
 
     // Candidate legacy folder names to probe (sibling of new_dir).
     // Order matters: exact identifier, then product name variants.
@@ -37,7 +39,7 @@ pub fn run_legacy_migration(app: &AppHandle) {
         "courier-agent",
     ];
 
-    for name in candidates {        
+    for name in candidates {
         let legacy_dir = parent.join(name);
         if !legacy_dir.exists() || !legacy_dir.is_dir() {
             continue;
@@ -84,7 +86,12 @@ fn copy_dir_recursively(src: &Path, dst: &Path) -> io::Result<()> {
             if !to.exists() {
                 // Try copy; ignore errors on a per-file basis to be resilient.
                 if let Err(err) = fs::copy(&from, &to) {
-                    warn!("failed to copy '{}' -> '{}': {}", from.display(), to.display(), err);
+                    warn!(
+                        "failed to copy '{}' -> '{}': {}",
+                        from.display(),
+                        to.display(),
+                        err
+                    );
                 }
             }
         }

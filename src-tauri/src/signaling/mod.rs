@@ -64,6 +64,14 @@ pub struct SessionDesc {
     pub answer: Option<SessionDescription>,
     #[serde(default)]
     pub candidates: Vec<IceCandidate>,
+    #[serde(default)]
+    pub signer_device_id: Option<String>,
+    #[serde(default)]
+    pub signer_device_name: Option<String>,
+    #[serde(default)]
+    pub signer_public_key: Option<String>,
+    #[serde(default)]
+    pub signature: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -74,6 +82,10 @@ impl SessionDesc {
             offer: None,
             answer: None,
             candidates: Vec::new(),
+            signer_device_id: None,
+            signer_device_name: None,
+            signer_public_key: None,
+            signature: None,
         }
     }
 

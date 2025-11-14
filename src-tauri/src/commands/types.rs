@@ -2,7 +2,14 @@ use std::{fmt, io};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::{
+    audit::AuditEntry,
+    license::{LicenseError, LicenseLimits, LicenseStatus},
+    metrics::RouteMetricsSnapshot,
+    store::TransferStatsRecord,
+};
 fn default_true() -> bool {
     true
 }
@@ -28,6 +35,7 @@ pub struct GenerateCodeResponse {
     pub task_id: String,
     pub code: String,
     pub qr_data_url: Option<String>,
+    pub public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +50,68 @@ pub struct SenderInfoDto {
     pub device_name: String,
     pub host: String,
     pub port: u16,
+    pub public_key: String,
+    pub cert_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteMetricsDto {
+    pub route: String,
+    pub attempts: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub success_rate: Option<f32>,
+    pub avg_latency_ms: Option<f32>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStatsDto {
+    pub total_transfers: u64,
+    pub total_bytes: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub success_rate: f32,
+    pub lan_percent: f32,
+    pub p2p_percent: f32,
+    pub relay_percent: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditLogDto {
+    pub id: String,
+    pub timestamp: i64,
+    pub event_type: String,
+    pub identity_id: Option<String>,
+    pub device_id: Option<String>,
+    pub task_id: Option<String>,
+    pub details: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenseStatusDto {
+    pub identity_id: String,
+    pub tier: String,
+    pub license_key: Option<String>,
+    pub issued_at: i64,
+    pub expires_at: Option<i64>,
+    pub limits: LicenseLimitsDto,
+    pub p2p_used: u32,
+    pub p2p_quota: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenseLimitsDto {
+    pub p2p_monthly_quota: Option<u32>,
+    pub max_file_size_mb: Option<u64>,
+    pub max_devices: Option<usize>,
+    pub resume_enabled: bool,
+    pub history_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,6 +211,20 @@ impl TransferRoute {
     }
 }
 
+impl From<RouteMetricsSnapshot> for RouteMetricsDto {
+    fn from(value: RouteMetricsSnapshot) -> Self {
+        Self {
+            route: value.route,
+            attempts: value.attempts,
+            successes: value.successes,
+            failures: value.failures,
+            success_rate: value.success_rate,
+            avg_latency_ms: value.avg_latency_ms,
+            last_error: value.last_error,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeProgressDto {
@@ -158,6 +242,7 @@ pub struct TransferProgressEvent {
     pub bytes_total: Option<u64>,
     pub speed_bps: Option<u64>,
     pub route: Option<TransferRoute>,
+    pub route_attempts: Option<Vec<String>>,
     pub message: Option<String>,
     pub resume: Option<ResumeProgressDto>,
 }
@@ -238,6 +323,13 @@ pub struct EntitlementUpdatePayload {
     pub features: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenseActivatePayload {
+    pub identity_id: String,
+    pub license_blob: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntitlementDto {
@@ -296,6 +388,7 @@ pub enum ErrorCode {
     EDiskFull,
     EVerifyFail,
     EPermDenied,
+    ELicense,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +421,8 @@ pub struct SignedReceivePayload {
     pub save_dir: String,
     pub host: String,
     pub port: u16,
+    pub sender_public_key: String,
+    pub sender_cert_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -335,6 +430,24 @@ pub struct SignedReceivePayload {
 pub struct ConnectByCodePayload {
     pub code: String,
     pub save_dir: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebRtcSenderPayload {
+    pub code: String,
+    pub file_paths: Vec<String>,
+    pub device_public_key: String,
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebRtcReceiverPayload {
+    pub code: String,
+    pub save_dir: String,
+    pub device_public_key: String,
+    pub device_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -392,6 +505,13 @@ impl CommandError {
         Self::new(ErrorCode::EUnknown, message)
     }
 
+    pub fn license_violation(error: LicenseError) -> Self {
+        Self::new(
+            ErrorCode::ELicense,
+            format!("{}: {}", error.code, error.message),
+        )
+    }
+
     pub fn from_io(err: &io::Error, context: impl Into<String>) -> Self {
         let context_str = context.into();
         match err.kind() {
@@ -422,6 +542,69 @@ where
     fn from(value: E) -> Self {
         let err = value.into();
         CommandError::unknown(err.to_string())
+    }
+}
+
+impl From<LicenseStatus> for LicenseStatusDto {
+    fn from(value: LicenseStatus) -> Self {
+        Self {
+            identity_id: value.identity_id,
+            tier: value.tier,
+            license_key: value.license_key,
+            issued_at: value.issued_at,
+            expires_at: value.expires_at,
+            limits: value.limits.into(),
+            p2p_used: value.p2p_used,
+            p2p_quota: value.p2p_quota,
+        }
+    }
+}
+
+impl From<TransferStatsRecord> for TransferStatsDto {
+    fn from(value: TransferStatsRecord) -> Self {
+        let total = value.total_transfers.max(1);
+        let percent = |count: u64| (count as f32 / total as f32) * 100.0;
+        let success_rate = if value.total_transfers == 0 {
+            0.0
+        } else {
+            value.success_count as f32 / value.total_transfers as f32
+        };
+        Self {
+            total_transfers: value.total_transfers,
+            total_bytes: value.total_bytes,
+            success_count: value.success_count,
+            failure_count: value.failure_count,
+            success_rate,
+            lan_percent: percent(value.lan_count),
+            p2p_percent: percent(value.p2p_count),
+            relay_percent: percent(value.relay_count),
+        }
+    }
+}
+
+impl From<AuditEntry> for AuditLogDto {
+    fn from(value: AuditEntry) -> Self {
+        Self {
+            id: value.id,
+            timestamp: value.timestamp,
+            event_type: value.event_type,
+            identity_id: value.identity_id,
+            device_id: value.device_id,
+            task_id: value.task_id,
+            details: value.details,
+        }
+    }
+}
+
+impl From<LicenseLimits> for LicenseLimitsDto {
+    fn from(value: LicenseLimits) -> Self {
+        Self {
+            p2p_monthly_quota: value.p2p_monthly_quota,
+            max_file_size_mb: value.max_file_size_mb,
+            max_devices: value.max_devices,
+            resume_enabled: value.resume_enabled,
+            history_days: value.history_days,
+        }
     }
 }
 

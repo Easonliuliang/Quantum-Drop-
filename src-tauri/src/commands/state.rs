@@ -4,6 +4,11 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::{
+    crypto::{SessionPublicKey, SessionSecretBytes},
+    transport::RouteKind,
+};
+
 use super::types::{TransferDirection, TransferFileSummary, TransferStatus, TransferSummary};
 
 #[derive(Debug, Clone)]
@@ -32,6 +37,16 @@ pub struct TransferTask {
     pub session_key: String,
     pub save_dir: Option<PathBuf>,
     pub lan_mode: Option<LanMode>,
+    pub session_secret: Option<SessionSecretBytes>,
+    pub public_key: Option<SessionPublicKey>,
+    pub peer_public_key: Option<SessionPublicKey>,
+    pub cert_fingerprint: Option<String>,
+    pub expected_cert_fingerprint: Option<String>,
+    pub identity_id: Option<String>,
+    pub identity_public_key: Option<String>,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub preferred_routes: Option<Vec<RouteKind>>,
 }
 
 impl TransferTask {
@@ -54,6 +69,16 @@ impl TransferTask {
             session_key,
             save_dir: None,
             lan_mode: None,
+            session_secret: None,
+            public_key: None,
+            peer_public_key: None,
+            cert_fingerprint: None,
+            expected_cert_fingerprint: None,
+            identity_id: None,
+            identity_public_key: None,
+            device_id: None,
+            device_name: None,
+            preferred_routes: None,
         }
     }
 

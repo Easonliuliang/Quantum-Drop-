@@ -170,9 +170,80 @@ s2:
         - turn:turn.quantumdrop.dev:3478?transport=udp
       username: quantum
       credential: drop123
+    timeouts:
+      lan: 3s
+      p2p: 10s
+      relay: 8s
+
+security:
+  enforceSignatureVerification: true
+  disconnectOnVerificationFail: true
+  enableAuditLog: true
 ```
 
-Router 会同时启动 LAN/QUIC、WebRTC（STUN/TURN）与 Relay 探测，最先成功的路径会立刻接管传输，其余任务会被取消；所有失败与成功尝试都会记录在 `transfer_log` 中，便于排障。
+> 💡 Tauri 桌面端的“传输统计”面板提供了“刷新权益 / 激活 License / 刷新安全策略”按钮，可直接查看 `enforceSignatureVerification`、`disconnectOnVerificationFail`、`enableAuditLog` 的实时状态并输入 License Key，无需手动编辑文件。开发环境默认放宽验签（`debug` 构建），生产构建或配置/环境变量会自动启用严格模式。
+
+Router 会按 “LAN → P2P → Relay → Mock” 的顺序逐条尝试；某条路由成功即终止后续尝试，其余失败信息会记录在 `transfer_log`，便于排障。如果配置中禁用了某条路径，日志会标记 `adapter unavailable` 以提示原因。
+
+示例日志：
+
+```
+12:30:01 route candidates: ["lan","p2p","relay","mock"]
+12:30:02 lan success in 42ms
+```
+
+```
+12:55:10 route candidates: ["lan","p2p","relay","mock"]
+12:55:13 lan timed out after 3s
+12:55:23 p2p error after 10023ms: signaling handshake failed
+12:55:26 relay success in 287ms
+```
+
+### 单机 WebRTC 测试
+
+即便只有一台电脑，也可以验证信令签名与 TOFU 流程：
+
+1. 启动两个 Quantum Drop 窗口（`npm run tauri:dev` 启动后，再运行一次启动第二个实例）。  
+2. 在窗口 A 选择任意小文件，点击“WebRTC 跨网实验 → 启动 WebRTC 发送”，日志会显示自动生成的 6 位配对码。  
+3. 在窗口 B 的“接收（配对码模式）”中输入相同的配对码并选择保存目录，再点击“启动 WebRTC 接收”。  
+4. 两端都会收到 `peer_discovered` 事件：若签名验证通过，则直接提示“已签名验证”；否则会弹出指纹核对对话框，确认后加入受信列表。  
+5. 受信设备会持久化到 `localStorage["courier.trustedPeers"]`；后续相同指纹会自动信任，可在“已信任设备”面板查看。  
+
+更多安全细节、配置参数与手动测试脚本，见 [`docs/SECURITY.md`](docs/SECURITY.md)。
+
+### License 与权益限制
+
+| License | 限制（默认） | 说明 |
+| --- | --- | --- |
+| Free | P2P 10 次/月<br>单文件 2 GB<br>最多 3 台设备<br>❌ 断点续传 | 触发限制时 UI 会弹出升级提示；后端也会拒绝超额请求 |
+| Pro | 无限 P2P<br>无限文件大小<br>设备无限<br>✅ 断点续传 | 可通过输入 License Key 激活 |
+| Enterprise | 自定义 | 支持私有 Relay、审计导出、API 等定制能力 |
+
+#### 限制触发行为
+
+* **设备数量**：注册第 4 台设备时，前端会提示升级；后端 `auth_register_device` 同样会返回 `DEVICE_LIMIT_EXCEEDED`。  
+* **文件大小**：拖入超过配额的文件或多选总计超过限制时，会立即弹出升级提示；LAN/WebRTC 命令在后端再次校验，确保无法绕过。  
+* **P2P 次数**：WebRTC 发送/接收在提交前检查月度配额；后端 `courier_start_webrtc_*` 也会拒绝超额请求。  
+* **断点续传**：免费版不可点击“继续传输”，CLI/Tauri 命令会返回 `RESUME_DISABLED`。  
+
+#### License 激活
+
+1. 在桌面端“传输统计 → 权益信息”面板输入 License Key（示例：`QD-PRO-XXXX-YYYY`），点击“激活 License”。  
+2. 激活成功会显示当前套餐、到期日、配额使用情况；失败会提示具体错误（签名错误、身份不匹配等）。  
+3. 后端会记录 `license.activated` 审计事件，包含套餐/到期时间，方便统计。  
+4. 也可以在终端运行：  
+
+```sh
+tauri invoke license_activate --payload '{"identityId":"id_xxx","licenseBlob":"QD-PRO-XXXX-YYYY"}'
+```
+
+#### 支付/发行规划
+
+* License 由 Ed25519 签名，Server 端提供支付 Webhook → License 下发 → 邮件通知。  
+* 仓库自带 `server/payment-gateway`（Express + TweetNaCl），提供 `/webhook/wechat` / `/webhook/alipay` / `/admin/issue` 等示例端点，可直接在支付平台配置回调进行联调。  
+* 计划接入微信/支付宝（国内）与 Stripe/PayPal（全球），支付成功后自动发放 Key。  
+* 官网：Next.js + Tailwind，包含 Landing / Pricing / Docs，并提供下载与客服入口。  
+* 客户端“升级 Pro”按钮将跳转至定价页面或内嵌 WebView 完成支付。
 
 ### PoT 与大文件
 

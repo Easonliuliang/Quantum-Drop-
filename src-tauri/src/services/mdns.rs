@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr},
     time::Duration,
 };
 
@@ -18,6 +18,8 @@ pub struct SenderInfo {
     pub device_name: String,
     pub host: String,
     pub port: u16,
+    pub public_key: String,
+    pub cert_fingerprint: String,
 }
 
 pub struct MdnsRegistry {
@@ -41,6 +43,8 @@ impl MdnsRegistry {
         port: u16,
         addresses: &[String],
         device_name: Option<String>,
+        public_key_hex: &str,
+        cert_fingerprint: Option<&str>,
     ) -> Result<()> {
         let mut props = HashMap::new();
         props.insert("code".into(), code.to_string());
@@ -53,6 +57,10 @@ impl MdnsRegistry {
             props.insert("addr_list".into(), addresses.join(","));
         }
         props.insert("version".into(), VERSION.into());
+        props.insert("pubkey".into(), public_key_hex.into());
+        if let Some(fp) = cert_fingerprint {
+            props.insert("certfp".into(), fp.to_string());
+        }
 
         let ip = addresses
             .iter()
@@ -62,15 +70,8 @@ impl MdnsRegistry {
         let service_name = format!("quantumdrop-{}", code);
         let host_label = format!("{}.local.", service_name);
 
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            &service_name,
-            &host_label,
-            ip,
-            port,
-            props,
-        )
-        .map_err(|err| anyhow!("failed to build mDNS info: {err}"))?;
+        let info = ServiceInfo::new(SERVICE_TYPE, &service_name, &host_label, ip, port, props)
+            .map_err(|err| anyhow!("failed to build mDNS info: {err}"))?;
 
         self.daemon
             .register(info.clone())
@@ -91,7 +92,7 @@ impl MdnsRegistry {
         Ok(())
     }
 
-    pub async fn discover_sender(&self, code: &str, timeout: Duration) -> Result<SocketAddr> {
+    pub async fn discover_sender(&self, code: &str, timeout: Duration) -> Result<SenderInfo> {
         let target = format!("quantumdrop-{}", code);
         let receiver = self
             .daemon
@@ -109,7 +110,9 @@ impl MdnsRegistry {
                         Ok(ServiceEvent::ServiceResolved(info)) => {
                             if info.get_fullname().starts_with(&target) {
                                 if let Some(addr) = pick_addr(&info) {
-                                    return Ok(SocketAddr::new(addr, info.get_port()));
+                                    if let Some(sender) = sender_info_from(&info, addr) {
+                                        return Ok(sender);
+                                    }
                                 }
                             }
                         }
@@ -165,10 +168,17 @@ fn sender_info_from(info: &ServiceInfo, addr: IpAddr) -> Option<SenderInfo> {
         .get_property_val_str("device")
         .map(|s| s.to_string())
         .unwrap_or_else(|| "unknown".into());
+    let public_key = info.get_property_val_str("pubkey").map(|s| s.to_string())?;
+    let cert_fingerprint = info
+        .get_property_val_str("certfp")
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     Some(SenderInfo {
         code,
         device_name,
         host: addr.to_string(),
         port: info.get_port(),
+        public_key,
+        cert_fingerprint,
     })
 }

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use rusqlite::{named_params, OptionalExtension, Row};
+use rusqlite::{named_params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -42,6 +42,10 @@ pub struct EntitlementRecord {
     pub expires_at: Option<i64>,
     pub features: Vec<String>,
     pub updated_at: i64,
+    pub license_key: Option<String>,
+    pub license_signature: Option<String>,
+    pub license_limits: Option<String>,
+    pub issued_at: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,11 +112,16 @@ impl IdentityStore {
                 expires_at INTEGER,
                 features TEXT,
                 updated_at INTEGER NOT NULL,
+                license_key TEXT,
+                signature TEXT,
+                limits TEXT,
+                issued_at INTEGER,
                 FOREIGN KEY(identity_id) REFERENCES identities(id)
             );
         "#,
         )
         .context("failed to run identity migrations")?;
+        Self::ensure_entitlement_columns(&conn)?;
         Ok(())
     }
 
@@ -296,7 +305,8 @@ impl IdentityStore {
         let conn = self.open()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT identity_id, plan, expires_at, features, updated_at
+            SELECT identity_id, plan, expires_at, features, updated_at,
+                   license_key, signature, limits, issued_at
             FROM entitlements
             WHERE identity_id = ?1
         "#,
@@ -345,6 +355,10 @@ impl IdentityStore {
             expires_at,
             features: features.to_vec(),
             updated_at: now,
+            license_key: None,
+            license_signature: None,
+            license_limits: None,
+            issued_at: None,
         })
     }
 
@@ -377,6 +391,10 @@ impl IdentityStore {
             expires_at: row.get(2)?,
             features: parsed,
             updated_at: row.get(4)?,
+            license_key: row.get(5)?,
+            license_signature: row.get(6)?,
+            license_limits: row.get(7)?,
+            issued_at: row.get(8)?,
         })
     }
 
@@ -402,6 +420,45 @@ impl IdentityStore {
             label: row.get(2)?,
             created_at: row.get(3)?,
         })
+    }
+
+    pub fn count_devices(&self, identity_id: &str) -> Result<usize> {
+        let conn = self.open()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM devices WHERE identity_id = ?1",
+                [identity_id],
+                |row| row.get(0),
+            )
+            .context("failed to count devices")?;
+        Ok(count as usize)
+    }
+
+    pub(crate) fn raw_connection(&self) -> Result<Connection> {
+        self.open()
+    }
+
+    pub fn db_path(&self) -> PathBuf {
+        self.db_path.clone()
+    }
+
+    fn ensure_entitlement_columns(conn: &Connection) -> Result<()> {
+        for (name, ty) in [
+            ("license_key", "TEXT"),
+            ("signature", "TEXT"),
+            ("limits", "TEXT"),
+            ("issued_at", "INTEGER"),
+        ] {
+            let statement = format!("ALTER TABLE entitlements ADD COLUMN {name} {ty}");
+            if let Err(err) = conn.execute(&statement, []) {
+                let msg = err.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(err)
+                        .context(format!("failed to add column '{name}' to entitlements"));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

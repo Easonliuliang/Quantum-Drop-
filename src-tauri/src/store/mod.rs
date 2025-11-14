@@ -19,9 +19,21 @@ pub struct TransferStore {
     db_path: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+pub struct TransferStatsRecord {
+    pub total_transfers: u64,
+    pub total_bytes: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub lan_count: u64,
+    pub p2p_count: u64,
+    pub relay_count: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TransferRecord {
     pub id: String,
+    pub identity_id: Option<String>,
     pub code: Option<String>,
     pub direction: TransferDirection,
     pub status: TransferStatus,
@@ -65,11 +77,12 @@ impl TransferStore {
         conn.execute(
             r#"
             INSERT INTO transfers (
-                id, code, direction, status, bytes_total, bytes_sent, route, pot_path, created_at, updated_at
+                id, identity_id, code, direction, status, bytes_total, bytes_sent, route, pot_path, created_at, updated_at
             ) VALUES (
-                :id, :code, :direction, :status, :bytes_total, :bytes_sent, :route, :pot_path, :created_at, :updated_at
+                :id, :identity_id, :code, :direction, :status, :bytes_total, :bytes_sent, :route, :pot_path, :created_at, :updated_at
             )
             ON CONFLICT(id) DO UPDATE SET
+                identity_id = excluded.identity_id,
                 code = excluded.code,
                 direction = excluded.direction,
                 status = excluded.status,
@@ -81,6 +94,7 @@ impl TransferStore {
         "#,
             named_params! {
                 ":id": &record.id,
+                ":identity_id": record.identity_id.as_deref(),
                 ":code": record.code.as_deref(),
                 ":direction": direction_to_str(&record.direction),
                 ":status": status_to_str(&record.status),
@@ -105,7 +119,7 @@ impl TransferStore {
         let mut stmt = conn
             .prepare(
                 r#"
-                SELECT id, code, direction, status, bytes_total, bytes_sent, route, pot_path, created_at, updated_at
+                SELECT id, identity_id, code, direction, status, bytes_total, bytes_sent, route, pot_path, created_at, updated_at
                 FROM transfers
                 ORDER BY updated_at DESC
                 LIMIT ?1 OFFSET ?2
@@ -125,13 +139,73 @@ impl TransferStore {
         Ok(results)
     }
 
+    pub fn stats_for_identity(&self, identity_id: &str) -> Result<TransferStatsRecord> {
+        let conn = self.open()?;
+        let (total, total_bytes): (i64, Option<i64>) = conn.query_row(
+            r#"
+            SELECT COUNT(*), SUM(COALESCE(bytes_total, 0))
+            FROM transfers
+            WHERE identity_id = ?1
+        "#,
+            [identity_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let success: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM transfers
+            WHERE identity_id = ?1 AND status = ?2
+        "#,
+            params![identity_id, status_to_str(&TransferStatus::Completed)],
+            |row| row.get(0),
+        )?;
+
+        let failure: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM transfers
+            WHERE identity_id = ?1 AND status IN (?2, ?3)
+        "#,
+            params![
+                identity_id,
+                status_to_str(&TransferStatus::Failed),
+                status_to_str(&TransferStatus::Cancelled)
+            ],
+            |row| row.get(0),
+        )?;
+
+        let (lan, p2p, relay): (i64, i64, i64) = conn.query_row(
+            r#"
+            SELECT
+                SUM(CASE WHEN route = 'lan' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN route = 'p2p' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN route = 'relay' THEN 1 ELSE 0 END)
+            FROM transfers
+            WHERE identity_id = ?1
+        "#,
+            [identity_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        Ok(TransferStatsRecord {
+            total_transfers: total.max(0) as u64,
+            total_bytes: total_bytes.unwrap_or(0).max(0) as u64,
+            success_count: success.max(0) as u64,
+            failure_count: failure.max(0) as u64,
+            lan_count: lan.max(0) as u64,
+            p2p_count: p2p.max(0) as u64,
+            relay_count: relay.max(0) as u64,
+        })
+    }
+
     #[allow(dead_code)]
     pub fn get(&self, id: &str) -> Result<Option<TransferRecord>> {
         let conn = self.open()?;
         let mut stmt = conn
             .prepare(
                 r#"
-            SELECT id, code, direction, status, bytes_total, bytes_sent, route, pot_path, created_at, updated_at
+            SELECT id, identity_id, code, direction, status, bytes_total, bytes_sent, route, pot_path, created_at, updated_at
             FROM transfers
             WHERE id = ?1
         "#,
@@ -181,6 +255,7 @@ impl TransferStore {
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS transfers (
                 id TEXT PRIMARY KEY,
+                identity_id TEXT,
                 code TEXT,
                 direction TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -195,6 +270,7 @@ impl TransferStore {
         "#,
         )
         .context("failed to run migrations")?;
+        self.ensure_transfer_columns(&conn)?;
         Ok(())
     }
 
@@ -202,11 +278,26 @@ impl TransferStore {
         Connection::open(&self.db_path).context("failed to open sqlite connection")
     }
 
+    fn ensure_transfer_columns(&self, conn: &Connection) -> Result<()> {
+        for (name, ty) in [("identity_id", "TEXT")] {
+            let statement = format!("ALTER TABLE transfers ADD COLUMN {name} {ty}");
+            if let Err(err) = conn.execute(&statement, []) {
+                let msg = err.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(err)
+                        .context(format!("failed to add column '{name}' to transfers table"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn map_row(row: &Row<'_>) -> rusqlite::Result<TransferRecord> {
         let direction_str: String = row.get("direction")?;
         let status_str: String = row.get("status")?;
         Ok(TransferRecord {
             id: row.get("id")?,
+            identity_id: row.get("identity_id")?,
             code: row.get::<_, Option<String>>("code")?,
             direction: direction_from_str(&direction_str).unwrap_or(TransferDirection::Send),
             status: status_from_str(&status_str).unwrap_or(TransferStatus::Failed),

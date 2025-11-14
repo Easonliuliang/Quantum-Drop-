@@ -5,7 +5,22 @@ s2:
       - lan
       - p2p
       - relay
-    relayEndpoint: tcp://127.0.0.1:6200
+    signalingUrl: wss://signaling.quantumdrop.dev/ws
     stun:
       - stun:stun.l.google.com:19302
-      - turn:turn.relay.example:3478?transport=udp
+      - stun:stun1.l.google.com:19302
+    turn:
+      urls:
+        - turn:turn.quantumdrop.dev:3478?transport=udp
+      username: quantum
+      credential: drop123
+    timeouts:
+      lan: 3s
+      p2p: 10s
+      relay: 8s
+    relayEndpoint: tcp://127.0.0.1:6200
+
+security:
+  enforceSignatureVerification: true
+  disconnectOnVerificationFail: true
+  enableAuditLog: true

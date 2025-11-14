@@ -11,6 +11,15 @@ import {
   forgetIdentity,
   clearLastIdentityId,
 } from "./lib/identityVault";
+import { UpgradePrompt } from "./components/UpgradePrompt";
+import {
+  FRIENDLY_ERROR_MESSAGES,
+  LICENSE_REASON_MAP,
+  UPGRADE_CONFIG,
+  UPGRADE_MESSAGES,
+  UPGRADE_URL,
+  type UpgradeReason,
+} from "./lib/upgrade";
 
 type SelectedFile = {
   name: string;
@@ -23,6 +32,8 @@ type SenderInfo = {
   deviceName: string;
   host: string;
   port: number;
+  publicKey: string;
+  certFingerprint: string;
 };
 
 type TransferProgressPayload = {
@@ -33,6 +44,7 @@ type TransferProgressPayload = {
   bytesTotal?: number;
   speedBps?: number;
   route?: "lan" | "p2p" | "relay" | "cache";
+  routeAttempts?: string[];
   message?: string;
 };
 
@@ -119,6 +131,139 @@ type DeviceState = {
   capabilities: string[];
 };
 
+type PeerDiscoveredPayload = {
+  sessionId: string;
+  deviceId: string;
+  deviceName?: string | null;
+  fingerprint?: string | null;
+  verified: boolean;
+};
+
+type NormalizedCommandError = {
+  code?: string;
+  message: string;
+  reason?: string;
+};
+
+const extractReasonToken = (message?: string) => {
+  if (!message) {
+    return undefined;
+  }
+  const match = message.match(/^([A-Z_]+):/);
+  return match ? match[1] : undefined;
+};
+
+const DOCS_URL = "https://quantumdrop.com/docs/troubleshooting";
+
+type ErrorActionKey =
+  | "copyLogs"
+  | "openDocs"
+  | "refreshStats"
+  | "refreshAudit"
+  | "refreshRoutes"
+  | "refreshSecurity"
+  | "refreshLicense"
+  | "openPricing";
+
+const ERROR_ACTION_LABELS: Record<ErrorActionKey, string> = {
+  copyLogs: "复制最近日志",
+  openDocs: "查看排障文档",
+  refreshStats: "刷新传输统计",
+  refreshAudit: "刷新审计日志",
+  refreshRoutes: "刷新路由统计",
+  refreshSecurity: "刷新安全策略",
+  refreshLicense: "刷新权益信息",
+  openPricing: "升级到 Pro",
+};
+
+const ERROR_ACTION_SUGGESTIONS: Record<string, ErrorActionKey[]> = {
+  E_ROUTE_UNREACH: ["copyLogs", "refreshRoutes", "openDocs"],
+  E_CODE_EXPIRED: ["openDocs"],
+  E_DISK_FULL: ["openDocs", "copyLogs"],
+  P2P_QUOTA_EXCEEDED: ["openPricing"],
+  FILE_SIZE_EXCEEDED: ["openPricing"],
+  DEVICE_LIMIT_EXCEEDED: ["openPricing"],
+  RESUME_DISABLED: ["openPricing"],
+  AUDIT_UNAVAILABLE: ["refreshAudit", "copyLogs"],
+  STATS_UNAVAILABLE: ["refreshStats", "copyLogs"],
+  SECURITY_UNAVAILABLE: ["refreshSecurity", "copyLogs"],
+  LICENSE_UNAVAILABLE: ["refreshLicense", "copyLogs"],
+  DEFAULT: ["copyLogs", "openDocs"],
+};
+
+const DEFAULT_ERROR_ACTIONS = ERROR_ACTION_SUGGESTIONS.DEFAULT;
+
+const deriveErrorActionKeys = (code?: string, reason?: string): ErrorActionKey[] => {
+  if (reason && ERROR_ACTION_SUGGESTIONS[reason]) {
+    return ERROR_ACTION_SUGGESTIONS[reason];
+  }
+  if (code && ERROR_ACTION_SUGGESTIONS[code]) {
+    return ERROR_ACTION_SUGGESTIONS[code];
+  }
+  return DEFAULT_ERROR_ACTIONS;
+};
+
+type TaskResponseDto = {
+  taskId?: string;
+  task_id?: string;
+};
+
+type RouteMetricsDto = {
+  route: string;
+  attempts: number;
+  successes: number;
+  failures: number;
+  successRate?: number | null;
+  avgLatencyMs?: number | null;
+  lastError?: string | null;
+};
+
+type TransferStatsDto = {
+  totalTransfers: number;
+  totalBytes: number;
+  successCount: number;
+  failureCount: number;
+  successRate: number;
+  lanPercent: number;
+  p2pPercent: number;
+  relayPercent: number;
+};
+
+type AuditLogEntryDto = {
+  id: string;
+  timestamp: number;
+  eventType: string;
+  identityId?: string | null;
+  deviceId?: string | null;
+  taskId?: string | null;
+  details?: Record<string, unknown> | null;
+};
+
+type LicenseLimitsDto = {
+  p2pMonthlyQuota?: number | null;
+  maxFileSizeMb?: number | null;
+  maxDevices?: number | null;
+  resumeEnabled: boolean;
+  historyDays?: number | null;
+};
+
+type LicenseStatusDto = {
+  identityId: string;
+  tier: string;
+  licenseKey?: string | null;
+  issuedAt: number;
+  expiresAt?: number | null;
+  limits: LicenseLimitsDto;
+  p2pUsed: number;
+  p2pQuota?: number | null;
+};
+
+type SecurityConfigDto = {
+  enforceSignatureVerification: boolean;
+  disconnectOnVerificationFail: boolean;
+  enableAuditLog: boolean;
+};
+
 type IdentityDevicesEventPayload = {
   identityId?: string;
   items?: DeviceResponseDto[];
@@ -139,6 +284,26 @@ const generateRandomHex = (bytes: number) => {
   return output;
 };
 
+const PAIRING_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const TRUSTED_PEERS_KEY = "courier.trustedPeers";
+
+const generatePairingCode = (length = 6) => {
+  if (length <= 0) {
+    return "";
+  }
+  if (typeof crypto !== "undefined" && "getRandomValues" in crypto) {
+    const randomBytes = new Uint8Array(length);
+    crypto.getRandomValues(randomBytes);
+    return Array.from(randomBytes, (value) => PAIRING_ALPHABET[value % PAIRING_ALPHABET.length]).join("");
+  }
+  let code = "";
+  for (let index = 0; index < length; index += 1) {
+    const rand = Math.floor(Math.random() * PAIRING_ALPHABET.length);
+    code += PAIRING_ALPHABET[rand];
+  }
+  return code;
+};
+
 const bytesToHex = (bytes: Uint8Array) => Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 
 const hexToBytes = (hex: string): Uint8Array => {
@@ -155,6 +320,106 @@ const hexToBytes = (hex: string): Uint8Array => {
     }
   }
   return array;
+};
+
+const normalizeFingerprint = (value: string) =>
+  value
+    .replace(/[^a-f0-9]/gi, "")
+    .toUpperCase();
+
+const formatBytes = (bytes: number) => {
+  if (bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** exponent;
+  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+};
+
+const maskLicenseKey = (value?: string | null) => {
+  if (!value) {
+    return "—";
+  }
+  if (value.length <= 8) {
+    return value;
+  }
+  return `${value.slice(0, 4)}****${value.slice(-4)}`;
+};
+
+const formatAbsoluteTime = (timestamp: number) => {
+  if (!Number.isFinite(timestamp)) {
+    return "-";
+  }
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+  return date.toLocaleString();
+};
+
+const summarizeAuditDetails = (details: unknown) => {
+  if (!details) {
+    return "";
+  }
+  if (typeof details === "string") {
+    return details;
+  }
+  if (Array.isArray(details)) {
+    return details
+      .slice(0, 3)
+      .map((item) => {
+        if (item === null) {
+          return "null";
+        }
+        if (typeof item === "object") {
+          try {
+            return JSON.stringify(item);
+          } catch {
+            return "[object]";
+          }
+        }
+        return String(item);
+      })
+      .join(" · ");
+  }
+  if (typeof details === "object") {
+    const entries = Object.entries(details as Record<string, unknown>)
+      .filter(([, value]) => value !== null && typeof value !== "object")
+      .map(([key, value]) => `${key}: ${String(value)}`)
+      .slice(0, 3);
+    if (entries.length > 0) {
+      return entries.join(" · ");
+    }
+    try {
+      return JSON.stringify(details);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+};
+
+const normalizeLicenseStatus = (raw: unknown, fallbackId: string): LicenseStatusDto => {
+  const source = (raw as Record<string, any>) || {};
+  const limitsSource = (source.limits as Record<string, any>) || {};
+  const limits: LicenseLimitsDto = {
+    p2pMonthlyQuota: limitsSource.p2pMonthlyQuota ?? limitsSource.p2p_monthly_quota ?? null,
+    maxFileSizeMb: limitsSource.maxFileSizeMb ?? limitsSource.max_file_size_mb ?? null,
+    maxDevices: limitsSource.maxDevices ?? limitsSource.max_devices ?? null,
+    resumeEnabled: Boolean(limitsSource.resumeEnabled ?? limitsSource.resume_enabled ?? false),
+    historyDays: limitsSource.historyDays ?? limitsSource.history_days ?? null,
+  };
+  return {
+    identityId: source.identityId ?? source.identity_id ?? fallbackId,
+    tier: source.tier ?? "free",
+    licenseKey: source.licenseKey ?? source.license_key ?? null,
+    issuedAt: source.issuedAt ?? source.issued_at ?? Date.now(),
+    expiresAt: source.expiresAt ?? source.expires_at ?? null,
+    limits,
+    p2pUsed: source.p2pUsed ?? source.p2p_used ?? 0,
+    p2pQuota: source.p2pQuota ?? source.p2p_quota ?? limits.p2pMonthlyQuota ?? null,
+  };
 };
 
 const formatRelativeTime = (timestamp: number) => {
@@ -299,6 +564,25 @@ export default function App(): JSX.Element {
   const [pendingPaths, setPendingPaths] = useState<string[]>([]);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [taskCode, setTaskCode] = useState<string | null>(null);
+  const [senderPublicKey, setSenderPublicKey] = useState<string | null>(null);
+  const [routeAttempts, setRouteAttempts] = useState<string[] | null>(null);
+  const [routeMetrics, setRouteMetrics] = useState<RouteMetricsDto[] | null>(null);
+  const [isRouteMetricsLoading, setIsRouteMetricsLoading] = useState(false);
+  const [transferStats, setTransferStats] = useState<TransferStatsDto | null>(null);
+  const [isStatsLoading, setIsStatsLoading] = useState(false);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntryDto[]>([]);
+  const [isAuditLoading, setIsAuditLoading] = useState(false);
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatusDto | null>(null);
+  const [isLicenseLoading, setIsLicenseLoading] = useState(false);
+  const [licenseInput, setLicenseInput] = useState("");
+  const [isActivatingLicense, setIsActivatingLicense] = useState(false);
+  const [securityConfig, setSecurityConfig] = useState<SecurityConfigDto | null>(null);
+  const [isSecurityLoading, setIsSecurityLoading] = useState(false);
+  const [peerPrompt, setPeerPrompt] = useState<PeerDiscoveredPayload | null>(null);
+  const [peerFingerprintInput, setPeerFingerprintInput] = useState("");
+  const [trustedPeers, setTrustedPeers] = useState<Record<string, PeerDiscoveredPayload>>({});
+  const [upgradeReason, setUpgradeReason] = useState<UpgradeReason | null>(null);
+  const trustedPeersRef = useRef<Record<string, PeerDiscoveredPayload>>({});
   const [progress, setProgress] = useState<TransferProgressPayload | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [identity, setIdentity] = useState<IdentityState | null>(null);
@@ -319,13 +603,16 @@ export default function App(): JSX.Element {
   const [receiveMode, setReceiveMode] = useState<"code" | "scan" | "manual">("code");
   const [availableSenders, setAvailableSenders] = useState<SenderInfo[]>([]);
   const [isScanning, setIsScanning] = useState(false);
+  const [receiveSenderKey, setReceiveSenderKey] = useState("");
+  const [receiveSenderFingerprint, setReceiveSenderFingerprint] = useState("");
   const [isRegisteringIdentity, setIsRegisteringIdentity] = useState(false);
   const [isRegisteringDevice, setIsRegisteringDevice] = useState(false);
   const [isUpdatingEntitlement, setIsUpdatingEntitlement] = useState(false);
   const [isImportingIdentity, setIsImportingIdentity] = useState(false);
   const [importIdentityId, setImportIdentityId] = useState("");
   const [importPrivateKey, setImportPrivateKey] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<string | null>(null);
+  const [errorActionKeys, setErrorActionKeys] = useState<ErrorActionKey[]>([]);
   const [info, setInfo] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [absorbing, setAbsorbing] = useState(false);
@@ -339,6 +626,52 @@ export default function App(): JSX.Element {
     }
     return devices.find((device) => device.deviceId === activeDeviceId) ?? null;
   }, [activeDeviceId, devices]);
+
+  const showError = useCallback((message: string, actions: ErrorActionKey[] = DEFAULT_ERROR_ACTIONS) => {
+    setErrorState(message);
+    setErrorActionKeys(actions);
+  }, []);
+
+  const clearError = useCallback(() => {
+    setErrorState(null);
+    setErrorActionKeys([]);
+  }, []);
+
+  const normalizeCommandError = useCallback(
+    (error: unknown, fallback: string): NormalizedCommandError => {
+      if (error && typeof error === "object") {
+        const anyError = error as Record<string, unknown>;
+        const code = typeof anyError.code === "string" ? anyError.code : undefined;
+        const message = typeof anyError.message === "string" ? anyError.message : fallback;
+        const reason = extractReasonToken(message);
+        return { code, message, reason };
+      }
+      const message = typeof error === "string" ? error : fallback;
+      return { message, reason: extractReasonToken(message) };
+    },
+    []
+  );
+
+  const handleCommandError = useCallback(
+    (error: unknown, fallback: string) => {
+      const info = normalizeCommandError(error, fallback);
+      const upgrade = info.reason ? LICENSE_REASON_MAP[info.reason] : undefined;
+      if (upgrade) {
+        setUpgradeReason(upgrade);
+        setInfo(null);
+        clearError();
+        return {
+          handled: true,
+          message: UPGRADE_MESSAGES[upgrade],
+        };
+      }
+      const friendly = (info.reason && FRIENDLY_ERROR_MESSAGES[info.reason]) || info.message || fallback;
+      const actions = deriveErrorActionKeys(info.code, info.reason);
+      showError(friendly, actions);
+      return { handled: false, message: friendly };
+    },
+    [normalizeCommandError, showError, clearError, setInfo]
+  );
 
   const captureFiles = useCallback((list: FileList | null) => {
     if (!list) {
@@ -362,6 +695,383 @@ export default function App(): JSX.Element {
       return next;
     });
   }, []);
+
+  const copyRecentLogs = useCallback(async () => {
+    const snapshot = logs.slice(-20).join("\n");
+    const text = snapshot.length > 0 ? snapshot : "暂无日志";
+    await copyPlainText(text);
+    setInfo("最近日志已复制。");
+    appendLog("📋 已复制最近日志。");
+  }, [logs, appendLog]);
+
+  const openDocs = useCallback(() => {
+    if (typeof window !== "undefined") {
+      window.open(DOCS_URL, "_blank", "noopener,noreferrer");
+    }
+      appendLog("📖 打开故障排查文档。");
+    }, [appendLog]);
+
+  const removeTrustedPeer = useCallback(
+    (deviceId: string) => {
+      setTrustedPeers((prev) => {
+        if (!prev[deviceId]) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
+      appendLog(`🗑️ 已移除信任设备 ${deviceId}`);
+    },
+    [appendLog]
+  );
+
+  const totalSelectedBytes = useMemo(
+    () => files.reduce((sum, file) => sum + (file.size ?? 0), 0),
+    [files]
+  );
+
+  const largestSelectedBytes = useMemo(
+    () => files.reduce((max, file) => Math.max(max, file.size ?? 0), 0),
+    [files]
+  );
+
+  const clearTrustedPeers = useCallback(() => {
+    if (Object.keys(trustedPeersRef.current).length === 0) {
+      setInfo("当前没有已信任的设备。");
+      return;
+    }
+    setTrustedPeers({});
+    appendLog("🧼 已清空所有信任设备。");
+  }, [setInfo, appendLog]);
+
+  const copySampleLicense = useCallback(() => {
+    void copyPlainText("QD-PRO-XXXX-YYYY-ZZZZ");
+    setInfo("示例 License Key 已复制。");
+    appendLog("📋 已复制示例 License Key。");
+  }, [appendLog]);
+
+  const promptUpgrade = useCallback(
+    (reason: UpgradeReason, fallback?: string) => {
+      setUpgradeReason(reason);
+      if (fallback) {
+        showError(fallback, ["openPricing"]);
+      }
+    },
+    [showError]
+  );
+
+  const checkDeviceLimit = useCallback(() => {
+    if (!licenseStatus?.limits?.maxDevices) {
+      return true;
+    }
+    if (devices.length < licenseStatus.limits.maxDevices) {
+      return true;
+    }
+    promptUpgrade("device_limit", "当前权益设备数量已达上限，请升级以添加更多设备。");
+    return false;
+  }, [licenseStatus?.limits?.maxDevices, devices.length, promptUpgrade]);
+
+  const incrementP2pUsage = useCallback(() => {
+    setLicenseStatus((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      return {
+        ...prev,
+        p2pUsed: prev.p2pUsed + 1,
+      };
+    });
+  }, []);
+
+  const checkP2pQuota = useCallback(() => {
+    if (!licenseStatus?.p2pQuota) {
+      return true;
+    }
+    if (licenseStatus.p2pUsed < licenseStatus.p2pQuota) {
+      return true;
+    }
+    promptUpgrade("p2p_quota", "本月跨网配额已用完，请升级到 Pro 版。");
+    return false;
+  }, [licenseStatus?.p2pQuota, licenseStatus?.p2pUsed, promptUpgrade]);
+
+  const checkFileSizeLimit = useCallback(() => {
+    if (!licenseStatus?.limits?.maxFileSizeMb) {
+      return true;
+    }
+    if (largestSelectedBytes === 0) {
+      return true;
+    }
+    const limitBytes = licenseStatus.limits.maxFileSizeMb * 1024 * 1024;
+    if (largestSelectedBytes > limitBytes) {
+      promptUpgrade(
+        "file_size",
+        `当前选择的最大文件大小为 ${formatBytes(largestSelectedBytes)}，已超过配额 ${formatBytes(limitBytes)}。`
+      );
+      return false;
+    }
+    if (totalSelectedBytes > limitBytes) {
+      promptUpgrade(
+        "file_size",
+        `本次传输总大小为 ${formatBytes(totalSelectedBytes)}，已超过配额 ${formatBytes(limitBytes)}。`
+      );
+      return false;
+    }
+    return true;
+  }, [licenseStatus?.limits?.maxFileSizeMb, largestSelectedBytes, totalSelectedBytes, promptUpgrade]);
+
+  const handleUpgradeDismiss = useCallback(() => {
+    setUpgradeReason(null);
+  }, []);
+
+  const handleUpgradeCTA = useCallback(() => {
+    if (typeof window !== "undefined") {
+      window.open(UPGRADE_URL, "_blank", "noopener,noreferrer");
+    }
+    appendLog("💎 已打开定价页面了解 Pro 计划。");
+    setUpgradeReason(null);
+  }, [appendLog]);
+
+  const refreshRouteMetrics = useCallback(async () => {
+    if (!detectTauri()) {
+      setInfo("路由统计仅在 Tauri 桌面端可用。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      setInfo("Tauri invoke API 不可用，无法获取路由统计。");
+      return;
+    }
+    setIsRouteMetricsLoading(true);
+    try {
+      const metrics = (await invoke("courier_route_metrics", {})) as RouteMetricsDto[];
+      setRouteMetrics(metrics);
+      if (!metrics || metrics.length === 0) {
+        setInfo("暂无路由统计数据。");
+      }
+    } catch (err) {
+      const result = handleCommandError(err, "路由统计加载失败");
+      appendLog(`路由统计加载失败：${result.message}`);
+    } finally {
+      setIsRouteMetricsLoading(false);
+    }
+  }, [appendLog, handleCommandError, setInfo]);
+
+  const refreshTransferStats = useCallback(async () => {
+    if (!identity) {
+      setTransferStats(null);
+      return;
+    }
+    if (!isTauri) {
+      setInfo("传输统计仅在 Tauri 桌面端可用。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      console.warn("refreshTransferStats: invoke unavailable", err);
+      setInfo("Tauri invoke API 不可用，无法获取传输统计。");
+      return;
+    }
+    setIsStatsLoading(true);
+    try {
+      const stats = (await invoke("transfer_stats", {
+        payload: { identityId: identity.identityId },
+      })) as TransferStatsDto;
+      setTransferStats(stats);
+    } catch (err) {
+      const result = handleCommandError(err, "传输统计加载失败");
+      appendLog(`传输统计加载失败：${result.message}`);
+    } finally {
+      setIsStatsLoading(false);
+    }
+  }, [identity, isTauri, appendLog, handleCommandError, setInfo]);
+
+  const refreshAuditLogs = useCallback(async () => {
+    if (!identity) {
+      setAuditLogs([]);
+      return;
+    }
+    if (!isTauri) {
+      setInfo("审计日志仅在 Tauri 桌面端可用。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      console.warn("refreshAuditLogs: invoke unavailable", err);
+      setInfo("Tauri invoke API 不可用，无法获取审计日志。");
+      return;
+    }
+    setIsAuditLoading(true);
+    try {
+      const logs = (await invoke("audit_get_logs", {
+        payload: { identityId: identity.identityId },
+        limit: 80,
+      })) as AuditLogEntryDto[];
+      setAuditLogs(logs);
+    } catch (err) {
+      const result = handleCommandError(err, "审计日志加载失败");
+      appendLog(`审计日志加载失败：${result.message}`);
+    } finally {
+      setIsAuditLoading(false);
+    }
+  }, [identity, isTauri, appendLog, handleCommandError, setInfo]);
+
+  const refreshLicenseStatus = useCallback(async () => {
+    if (!identity) {
+      setLicenseStatus(null);
+      return;
+    }
+    if (!isTauri) {
+      setInfo("权益信息仅在 Tauri 桌面端可用。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      console.warn("refreshLicenseStatus: invoke unavailable", err);
+      setInfo("Tauri invoke API 不可用，无法获取权益信息。");
+      return;
+    }
+    setIsLicenseLoading(true);
+    try {
+      const raw = await invoke("license_get_status", {
+        payload: { identityId: identity.identityId },
+      });
+      const status = normalizeLicenseStatus(raw, identity.identityId);
+      setLicenseStatus(status);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      showError(message, ["refreshLicense", "copyLogs"]);
+      appendLog(`⚠️ 获取权益信息失败：${message}`);
+    } finally {
+      setIsLicenseLoading(false);
+    }
+  }, [identity, isTauri, appendLog, setInfo, showError]);
+
+  const refreshSecurityConfig = useCallback(async () => {
+    if (!isTauri) {
+      setInfo("安全策略仅在 Tauri 桌面端可查询。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      showError("Tauri invoke API 不可用，无法读取安全策略。", ["refreshSecurity", "copyLogs"]);
+      return;
+    }
+    setIsSecurityLoading(true);
+    try {
+      const config = (await invoke("security_get_config", {})) as SecurityConfigDto;
+      setSecurityConfig(config);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      showError(message, ["refreshSecurity", "copyLogs"]);
+      appendLog(`⚠️ 读取安全策略失败：${message}`);
+    } finally {
+      setIsSecurityLoading(false);
+    }
+  }, [isTauri, appendLog, showError, setInfo]);
+
+  const errorActionHandlers = useMemo<Record<ErrorActionKey, () => void>>(
+    () => ({
+      copyLogs: copyRecentLogs,
+      openDocs,
+      refreshStats: () => {
+        void refreshTransferStats();
+      },
+      refreshAudit: () => {
+        void refreshAuditLogs();
+      },
+      refreshRoutes: () => {
+        void refreshRouteMetrics();
+      },
+      refreshSecurity: () => {
+        void refreshSecurityConfig();
+      },
+      refreshLicense: () => {
+        void refreshLicenseStatus();
+      },
+      openPricing: () => {
+        handleUpgradeCTA();
+      },
+    }),
+    [
+      copyRecentLogs,
+      openDocs,
+      refreshTransferStats,
+      refreshAuditLogs,
+      refreshRouteMetrics,
+      refreshSecurityConfig,
+      refreshLicenseStatus,
+      handleUpgradeCTA,
+    ]
+  );
+
+  const activateLicense = useCallback(async () => {
+    if (!isTauri) {
+      setInfo("License 激活需在 Tauri 桌面端运行。");
+      return;
+    }
+    if (!identity) {
+      setInfo("请先注册或导入身份，再激活 License。");
+      return;
+    }
+    const trimmed = licenseInput.trim();
+    if (!trimmed) {
+      showError("请输入 License Key。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      showError("Tauri invoke API 不可用，无法激活 License。");
+      return;
+    }
+    setIsActivatingLicense(true);
+    clearError();
+    try {
+      await invoke("license_activate", {
+        payload: {
+          identityId: identity.identityId,
+          licenseBlob: trimmed,
+        },
+      });
+      setLicenseInput("");
+      appendLog("🔏 License 激活成功");
+      setInfo("License 激活成功。");
+      await refreshLicenseStatus();
+    } catch (err) {
+      const result = handleCommandError(err, "License 激活失败");
+      appendLog(`⚠️ License 激活失败：${result.message}`);
+    } finally {
+      setIsActivatingLicense(false);
+    }
+  }, [
+    identity,
+    isTauri,
+    licenseInput,
+    appendLog,
+    refreshLicenseStatus,
+    handleCommandError,
+    showError,
+    clearError,
+    setInfo,
+  ]);
+
+  useEffect(() => {
+    if (progress?.phase === "done") {
+      refreshRouteMetrics().catch((err) => console.warn("refreshRouteMetrics", err));
+    }
+  }, [progress?.phase, refreshRouteMetrics]);
 
   useEffect(() => {
     let mounted = true;
@@ -460,12 +1170,12 @@ export default function App(): JSX.Element {
     });
   } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setError((prev) => prev ?? message);
-        appendLog(`⚠️ 拉取设备失败：${message}`);
-      }
-    },
-    [appendLog, identity]
-  );
+    showError(message);
+    appendLog(`⚠️ 拉取设备失败：${message}`);
+  }
+},
+[appendLog, identity, showError]
+);
 
   const refreshEntitlement = useCallback(
     async (targetIdentityId?: string) => {
@@ -491,11 +1201,11 @@ export default function App(): JSX.Element {
         setEntitlement(normalized);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setError((prev) => prev ?? message);
+        showError(message);
         appendLog(`⚠️ 拉取权益失败：${message}`);
       }
     },
-    [appendLog, identity]
+    [appendLog, identity, showError]
   );
 
   const registerIdentity = useCallback(async () => {
@@ -508,7 +1218,7 @@ export default function App(): JSX.Element {
       return;
     }
     setIsRegisteringIdentity(true);
-    setError(null);
+    clearError();
     try {
       ensureEd25519Hash();
       const privateKeyBytes = ed25519Utils.randomPrivateKey();
@@ -541,12 +1251,12 @@ export default function App(): JSX.Element {
       await refreshEntitlement(resolvedId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
+      showError(message);
       appendLog(`⚠️ 身份注册失败：${message}`);
     } finally {
       setIsRegisteringIdentity(false);
     }
-  }, [appendLog, refreshEntitlement, rememberIdentity, rememberLastIdentityId]);
+  }, [appendLog, refreshEntitlement, rememberIdentity, rememberLastIdentityId, clearError, showError]);
 
   const registerDevice = useCallback(async () => {
     let invoke: TauriInvokeFn;
@@ -562,11 +1272,14 @@ export default function App(): JSX.Element {
       return;
     }
     if (!identityPrivateKey) {
-      setError("当前会话缺少身份私钥，请重新注册或导入身份。");
+      showError("当前会话缺少身份私钥，请重新注册或导入身份。");
+      return;
+    }
+    if (!checkDeviceLimit()) {
       return;
     }
     setIsRegisteringDevice(true);
-    setError(null);
+    clearError();
     try {
       ensureEd25519Hash();
       const deviceId = `dev_${generateRandomHex(10)}`;
@@ -591,13 +1304,12 @@ export default function App(): JSX.Element {
       setActiveDeviceId(resolvedId);
       await sendHeartbeat("active");
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      appendLog(`⚠️ 设备登记失败：${message}`);
+      const result = handleCommandError(err, "设备登记失败");
+      appendLog(`⚠️ 设备登记失败：${result.message}`);
     } finally {
       setIsRegisteringDevice(false);
     }
-  }, [appendLog, devices.length, identity, identityPrivateKey, refreshDevices, sendHeartbeat]);
+  }, [appendLog, devices.length, identity, identityPrivateKey, refreshDevices, sendHeartbeat, checkDeviceLimit]);
 
   const upgradeEntitlement = useCallback(
     async (plan: string) => {
@@ -614,7 +1326,7 @@ export default function App(): JSX.Element {
         return;
       }
       setIsUpdatingEntitlement(true);
-      setError(null);
+      clearError();
       try {
         const response = (await invoke("auth_update_entitlement", {
           payload: {
@@ -634,13 +1346,13 @@ export default function App(): JSX.Element {
         appendLog(`✨ 权益已更新为 ${normalized.plan}`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setError(message);
+        showError(message);
         appendLog(`⚠️ 权益更新失败：${message}`);
       } finally {
         setIsUpdatingEntitlement(false);
       }
     },
-    [appendLog, identity]
+    [appendLog, identity, clearError, showError]
   );
 
   const exportPrivateKey = useCallback(async () => {
@@ -663,9 +1375,9 @@ export default function App(): JSX.Element {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
+      showError(message);
     }
-  }, [identity, identityPrivateKey, rememberIdentity]);
+  }, [identity, identityPrivateKey, rememberIdentity, showError]);
 
   const importIdentity = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -673,15 +1385,15 @@ export default function App(): JSX.Element {
       const identityId = importIdentityId.trim();
       const privateHex = importPrivateKey.trim();
       if (!identityId) {
-        setError("请输入身份标识");
+        showError("请输入身份标识");
         return;
       }
       if (!privateHex) {
-        setError("请输入私钥十六进制");
+        showError("请输入私钥十六进制");
         return;
       }
     setIsImportingIdentity(true);
-    setError(null);
+    clearError();
     try {
       ensureEd25519Hash();
       const privateBytes = hexToBytes(privateHex);
@@ -718,13 +1430,13 @@ export default function App(): JSX.Element {
         await refreshDevices(resolvedId);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setError(message);
+        showError(message);
         appendLog(`⚠️ 身份导入失败：${message}`);
       } finally {
         setIsImportingIdentity(false);
       }
     },
-    [appendLog, importIdentityId, importPrivateKey, refreshDevices, refreshEntitlement, rememberIdentity, rememberLastIdentityId]
+    [appendLog, importIdentityId, importPrivateKey, refreshDevices, refreshEntitlement, rememberIdentity, rememberLastIdentityId, clearError, showError]
   );
 
   useEffect(() => {
@@ -791,6 +1503,18 @@ export default function App(): JSX.Element {
   }, [identity, refreshDevices, refreshEntitlement, isTauri]);
 
   useEffect(() => {
+    if (!identity || !isTauri) {
+      setTransferStats(null);
+      setAuditLogs([]);
+      return;
+    }
+    refreshTransferStats();
+    refreshAuditLogs();
+    refreshLicenseStatus();
+    refreshSecurityConfig();
+  }, [identity, isTauri, refreshTransferStats, refreshAuditLogs, refreshLicenseStatus, refreshSecurityConfig]);
+
+  useEffect(() => {
     if (devices.length === 0) {
       setActiveDeviceId(null);
       return;
@@ -846,8 +1570,14 @@ export default function App(): JSX.Element {
       setPendingPaths(paths);
       setTaskId(null);
       setTaskCode(null);
+      setSenderPublicKey(null);
+      setRouteAttempts(null);
+      setRouteMetrics(null);
       setProgress(null);
       setLogs([]);
+      setPeerPrompt(null);
+      setTrustedPeers({});
+      setPeerFingerprintInput("");
       setAbsorbing(true);
       window.setTimeout(() => setAbsorbing(false), 900);
       const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
@@ -948,6 +1678,9 @@ export default function App(): JSX.Element {
       setPendingPaths([]);
       setTaskId(null);
       setTaskCode(null);
+      setSenderPublicKey(null);
+      setRouteAttempts(null);
+      setRouteMetrics(null);
       setProgress(null);
       setLogs([]);
       // 吸入动效（拖拽场景不自动发送）
@@ -972,7 +1705,7 @@ export default function App(): JSX.Element {
   }, []);
 
   const handleBrowse = useCallback(async () => {
-    setError(null);
+    clearError();
     setInfo(null);
     if (detectTauri()) {
       try {
@@ -1000,6 +1733,9 @@ export default function App(): JSX.Element {
         setPendingPaths(normalized);
         setTaskId(null);
         setTaskCode(null);
+        setSenderPublicKey(null);
+        setRouteAttempts(null);
+        setRouteMetrics(null);
         setProgress(null);
         setLogs([]);
         // 动效与自动传输
@@ -1032,6 +1768,9 @@ export default function App(): JSX.Element {
     setPendingPaths([]);
     setTaskId(null);
     setTaskCode(null);
+    setSenderPublicKey(null);
+    setRouteAttempts(null);
+    setRouteMetrics(null);
     setProgress(null);
     setLogs([]);
     // 仅播放吸入动效（input 回退场景无法拿到绝对路径，不自动发送）
@@ -1076,9 +1815,14 @@ export default function App(): JSX.Element {
       setInfo("请选择至少一个文件。");
       return;
     }
+    if (!checkFileSizeLimit()) {
+      return;
+    }
     setIsSending(true);
-    setError(null);
+    clearError();
     setInfo(null);
+    setRouteAttempts(null);
+    setRouteMetrics(null);
     try {
       appendLog("准备生成取件码…");
       const signatureGenerate = await signPurpose("generate", activeDevice.deviceId);
@@ -1092,10 +1836,12 @@ export default function App(): JSX.Element {
             expireSec: undefined,
           },
         },
-      })) as { taskId?: string; task_id?: string; code: string };
+      })) as { taskId?: string; task_id?: string; code: string; publicKey?: string; public_key?: string };
       const resolvedTaskId = result.taskId ?? result.task_id ?? null;
+      const resolvedPubKey = result.publicKey ?? result.public_key ?? null;
       setTaskId(resolvedTaskId);
       setTaskCode(result.code);
+      setSenderPublicKey(resolvedPubKey);
       appendLog(`取件码 ${result.code} 已生成，启动发送…`);
       const signatureSend = await signPurpose("send", activeDevice.deviceId);
       await invoke("courier_send", {
@@ -1112,17 +1858,50 @@ export default function App(): JSX.Element {
       appendLog("传输已启动，等待事件更新…");
       // 最小提示：避免额外文本
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      appendLog(`传输启动失败：${message}`);
+      const result = handleCommandError(err, "传输启动失败");
+      appendLog(`传输启动失败：${result.message}`);
     } finally {
       setIsSending(false);
     }
-  }, [appendLog, pendingPaths, identity, devices, activeDeviceId, signPurpose]);
+  }, [appendLog, pendingPaths, identity, devices, activeDeviceId, signPurpose, handleCommandError, clearError, checkFileSizeLimit]);
 
   useEffect(() => {
     beginTransferRef.current = beginTransfer;
   }, [beginTransfer]);
+
+  useEffect(() => {
+    trustedPeersRef.current = trustedPeers;
+  }, [trustedPeers]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(TRUSTED_PEERS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, PeerDiscoveredPayload>;
+        setTrustedPeers(parsed);
+      }
+    } catch (err) {
+      console.warn("load trusted peers failed", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      if (Object.keys(trustedPeers).length === 0) {
+        window.localStorage.removeItem(TRUSTED_PEERS_KEY);
+      } else {
+        window.localStorage.setItem(TRUSTED_PEERS_KEY, JSON.stringify(trustedPeers));
+      }
+    } catch (err) {
+      console.warn("persist trusted peers failed", err);
+    }
+  }, [trustedPeers]);
 
   const chooseReceiveDirectory = useCallback(async () => {
     if (!detectTauri()) {
@@ -1142,11 +1921,11 @@ export default function App(): JSX.Element {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
+      showError(message);
     }
-  }, []);
+  }, [showError]);
 
-  const handleManualReceive = useCallback(async () => {
+const handleManualReceive = useCallback(async () => {
     if (!detectTauri()) {
       setInfo("接收功能需在 Tauri 桌面端运行。");
       return;
@@ -1162,6 +1941,7 @@ export default function App(): JSX.Element {
     }
     const code = receiveCode.trim();
     const host = receiveHost.trim();
+    const senderKey = receiveSenderKey.trim();
     const portValue = Number.parseInt(receivePort, 10);
     if (!code) {
       setInfo("请输入 6 位配对码。");
@@ -1175,8 +1955,31 @@ export default function App(): JSX.Element {
       setInfo("请输入合法端口（1-65535）。");
       return;
     }
+    if (!senderKey) {
+      setInfo("请输入发送方公钥。");
+      return;
+    }
+    if (senderKey.length !== 64) {
+      setInfo("公钥长度应为 64 位十六进制。");
+      return;
+    }
+    try {
+      hexToBytes(senderKey);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setInfo(message);
+      return;
+    }
     if (!receiveDir.trim()) {
       setInfo("请选择保存目录。");
+      return;
+    }
+    if (!receiveSenderKey.trim()) {
+      setInfo("请输入发送方公钥。");
+      return;
+    }
+    if (!receiveSenderFingerprint.trim()) {
+      setInfo("请输入发送方证书指纹。");
       return;
     }
     let invoke: TauriInvokeFn;
@@ -1187,8 +1990,10 @@ export default function App(): JSX.Element {
       return;
     }
     setIsReceiving(true);
-    setError(null);
+    clearError();
     setInfo(null);
+    setRouteAttempts(null);
+    setRouteMetrics(null);
     try {
       const signature = await signPurpose("receive", activeDevice.deviceId);
       await invoke("courier_receive", {
@@ -1201,15 +2006,17 @@ export default function App(): JSX.Element {
             saveDir: receiveDir,
             host,
             port: portValue,
+            senderPublicKey: senderKey,
+            senderCertFingerprint: receiveSenderFingerprint.trim(),
           },
         },
       });
       setTaskCode(code);
+      setSenderPublicKey(null);
       appendLog("接收流程已启动，等待发送端开始传输…");
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      appendLog(`接收启动失败：${message}`);
+      const result = handleCommandError(err, "接收启动失败");
+      appendLog(`接收启动失败：${result.message}`);
     } finally {
       setIsReceiving(false);
     }
@@ -1222,8 +2029,11 @@ export default function App(): JSX.Element {
     receiveHost,
     receivePort,
     receiveDir,
+    receiveSenderKey,
     signPurpose,
     appendLog,
+    handleCommandError,
+    clearError,
   ]);
 
   const connectByCode = useCallback(
@@ -1258,8 +2068,10 @@ export default function App(): JSX.Element {
         return;
       }
       setIsReceiving(true);
-      setError(null);
+      clearError();
       setInfo(null);
+      setRouteAttempts(null);
+      setRouteMetrics(null);
       try {
         const signature = await signPurpose("receive", activeDevice.deviceId);
         await invoke("courier_connect_by_code", {
@@ -1274,11 +2086,11 @@ export default function App(): JSX.Element {
           },
         });
         setTaskCode(codeValue);
+        setSenderPublicKey(null);
         appendLog("已通过 mDNS 自动发现发送方，等待连接…");
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setError(message);
-        appendLog(`接收启动失败：${message}`);
+        const result = handleCommandError(err, "接收启动失败");
+        appendLog(`接收启动失败：${result.message}`);
       } finally {
         setIsReceiving(false);
       }
@@ -1292,8 +2104,168 @@ export default function App(): JSX.Element {
       receiveDir,
       signPurpose,
       appendLog,
+      handleCommandError,
+      clearError,
     ]
   );
+
+  const handleWebRtcSenderTest = useCallback(async () => {
+    if (!detectTauri()) {
+      setInfo("WebRTC 测试需在 Tauri 桌面端运行。");
+      return;
+    }
+    if (!identity || !identityPrivateKey) {
+      setInfo("请先完成身份初始化。");
+      return;
+    }
+    const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
+    if (!activeDevice) {
+      setInfo("请至少登记一个终端设备。");
+      return;
+    }
+    if (pendingPaths.length === 0) {
+      setInfo("请选择至少一个文件再尝试 WebRTC 发送。");
+      return;
+    }
+    if (!checkP2pQuota()) {
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch {
+      setInfo("未检测到 Tauri invoke API，无法启动测试。");
+      return;
+    }
+    const codeValue = (taskCode ?? generatePairingCode()).toUpperCase();
+    setTaskCode(codeValue);
+    setIsSending(true);
+    clearError();
+    setInfo(null);
+    try {
+      const signature = await signPurpose("webrtc_send", activeDevice.deviceId);
+      const response = (await invoke("courier_start_webrtc_sender", {
+        auth: {
+          identityId: identity.identityId,
+          deviceId: activeDevice.deviceId,
+          signature,
+          payload: {
+            code: codeValue,
+            filePaths: pendingPaths,
+            devicePublicKey: activeDevice.publicKey,
+            deviceName: activeDevice.name,
+          },
+        },
+      })) as TaskResponseDto;
+      const resolvedTaskId = response.taskId ?? response.task_id ?? null;
+      if (resolvedTaskId) {
+        setTaskId(resolvedTaskId);
+      }
+      setSenderPublicKey(null);
+      appendLog(`WebRTC P2P 发送任务已启动（配对码 ${codeValue}）。`);
+      setInfo("已启动 WebRTC 发送测试，等待接收方加入。");
+      incrementP2pUsage();
+    } catch (err) {
+      const result = handleCommandError(err, "WebRTC 发送失败");
+      appendLog(`WebRTC 发送失败：${result.message}`);
+    } finally {
+      setIsSending(false);
+    }
+  }, [
+    identity,
+    identityPrivateKey,
+    devices,
+    activeDeviceId,
+    pendingPaths,
+    taskCode,
+    signPurpose,
+    appendLog,
+    handleCommandError,
+    clearError,
+    checkP2pQuota,
+    incrementP2pUsage,
+  ]);
+
+  const handleWebRtcReceiverTest = useCallback(async () => {
+    if (!detectTauri()) {
+      setInfo("WebRTC 测试需在 Tauri 桌面端运行。");
+      return;
+    }
+    if (!identity || !identityPrivateKey) {
+      setInfo("请先完成身份初始化。");
+      return;
+    }
+    const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
+    if (!activeDevice) {
+      setInfo("请至少登记一个终端设备。");
+      return;
+    }
+    const codeValue = receiveCode.trim().toUpperCase();
+    if (!codeValue) {
+      setInfo("请输入配对码再启动 WebRTC 接收。");
+      return;
+    }
+    if (!receiveDir.trim()) {
+      setInfo("请选择保存目录。");
+      return;
+    }
+    if (!checkP2pQuota()) {
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch {
+      setInfo("未检测到 Tauri invoke API，无法启动测试。");
+      return;
+    }
+    setIsReceiving(true);
+    clearError();
+    setInfo(null);
+    try {
+      const signature = await signPurpose("webrtc_receive", activeDevice.deviceId);
+      const response = (await invoke("courier_start_webrtc_receiver", {
+        auth: {
+          identityId: identity.identityId,
+          deviceId: activeDevice.deviceId,
+          signature,
+          payload: {
+            code: codeValue,
+            saveDir: receiveDir,
+            devicePublicKey: activeDevice.publicKey,
+            deviceName: activeDevice.name,
+          },
+        },
+      })) as TaskResponseDto;
+      const resolvedTaskId = response.taskId ?? response.task_id ?? null;
+      if (resolvedTaskId) {
+        setTaskId(resolvedTaskId);
+      }
+      setTaskCode(codeValue);
+      setSenderPublicKey(null);
+      appendLog(`WebRTC P2P 接收任务已启动（配对码 ${codeValue}）。`);
+      setInfo("已启动 WebRTC 接收测试，等待发送方。");
+      incrementP2pUsage();
+    } catch (err) {
+      const result = handleCommandError(err, "WebRTC 接收失败");
+      appendLog(`WebRTC 接收失败：${result.message}`);
+    } finally {
+      setIsReceiving(false);
+    }
+  }, [
+    identity,
+    identityPrivateKey,
+    devices,
+    activeDeviceId,
+    receiveCode,
+    receiveDir,
+    signPurpose,
+    appendLog,
+    handleCommandError,
+    clearError,
+    checkP2pQuota,
+    incrementP2pUsage,
+  ]);
 
   const scanSenders = useCallback(async () => {
     if (!detectTauri()) {
@@ -1308,18 +2280,17 @@ export default function App(): JSX.Element {
       return;
     }
     setIsScanning(true);
-    setError(null);
+    clearError();
     try {
       const result = (await invoke("courier_list_senders", {})) as SenderInfo[];
       setAvailableSenders(result);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      appendLog(`扫描失败：${message}`);
+      const result = handleCommandError(err, "发送方扫描失败");
+      appendLog(`扫描失败：${result.message}`);
     } finally {
       setIsScanning(false);
     }
-  }, [appendLog]);
+  }, [appendLog, handleCommandError, clearError]);
 
   const handleCopy = useCallback(
     async (field: string, value: string) => {
@@ -1329,10 +2300,10 @@ export default function App(): JSX.Element {
         appendLog(`📋 ${field} 已复制。`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setError(message);
+        showError(message);
       }
     },
-    [appendLog]
+    [appendLog, showError]
   );
 
   const submitDeviceUpdate = useCallback(
@@ -1350,7 +2321,7 @@ export default function App(): JSX.Element {
         return;
       }
       if (!identityPrivateKey) {
-        setError("当前会话缺少身份私钥，请重新导入或创建身份。");
+        showError("当前会话缺少身份私钥，请重新导入或创建身份。");
         return;
       }
       const targetDeviceId = activeDeviceId ?? devices[0]?.deviceId ?? null;
@@ -1359,7 +2330,7 @@ export default function App(): JSX.Element {
         return;
       }
       setIsUpdatingDevice(true);
-      setError(null);
+      clearError();
       try {
         const rawStatus = (overrideStatus ?? editDeviceStatus)?.trim();
         const statusValue = rawStatus && rawStatus.length > 0 ? rawStatus : "active";
@@ -1385,7 +2356,7 @@ export default function App(): JSX.Element {
         appendLog(`🛠️ 终端 ${targetDeviceId} 已更新为 ${statusValue}。`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setError(message);
+        showError(message);
         appendLog(`⚠️ 终端更新失败：${message}`);
       } finally {
         setIsUpdatingDevice(false);
@@ -1402,6 +2373,8 @@ export default function App(): JSX.Element {
       signPurpose,
       refreshDevices,
       appendLog,
+      showError,
+      clearError,
     ]
   );
 
@@ -1415,7 +2388,7 @@ export default function App(): JSX.Element {
       return;
     }
     setIsForgettingIdentity(true);
-    setError(null);
+    clearError();
     try {
       await forgetIdentity(identity.identityId);
       await clearLastIdentityId();
@@ -1430,18 +2403,20 @@ export default function App(): JSX.Element {
       setImportPrivateKey("");
       setTaskId(null);
       setTaskCode(null);
+      setSenderPublicKey(null);
+      setRouteAttempts(null);
       setProgress(null);
       setLogs([]);
       appendLog(`🧹 已忘记身份 ${identity.identityId}`);
       setInfo("身份已从本机移除，下次启动需重新导入。");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
+      showError(message);
       appendLog(`⚠️ 身份移除失败：${message}`);
     } finally {
       setIsForgettingIdentity(false);
     }
-  }, [identity, appendLog]);
+  }, [identity, appendLog, clearError, showError]);
 
   useEffect(() => {
     if (!isTauri) {
@@ -1453,7 +2428,7 @@ export default function App(): JSX.Element {
       const tauri = getTauri();
       const listen = tauri?.event?.listen;
       if (!listen) {
-        setError((prev) => prev ?? "Tauri 事件模块不可用，无法监听传输进度。");
+        showError("Tauri 事件模块不可用，无法监听传输进度。");
         return;
       }
       const progressListener = await listen<TransferProgressPayload>("transfer_progress", (event) => {
@@ -1461,6 +2436,9 @@ export default function App(): JSX.Element {
           return;
         }
         setProgress(event.payload);
+        if (Array.isArray(event.payload.routeAttempts)) {
+          setRouteAttempts(event.payload.routeAttempts);
+        }
         if (event.payload.message) {
           appendLog(event.payload.message);
         }
@@ -1505,7 +2483,8 @@ export default function App(): JSX.Element {
         if (!active) {
           return;
         }
-        setError(event.payload.message ?? "传输失败。");
+        const message = event.payload.message ?? "传输失败。";
+        showError(message);
         appendLog(`✖ 传输失败：${event.payload.message ?? "未知错误"}`);
       });
       const completedListener = await listen<TransferLifecyclePayload>("transfer_completed", (event) => {
@@ -1515,8 +2494,44 @@ export default function App(): JSX.Element {
         setInfo("传输完成，PoT 证明已生成。");
         appendLog(`✔ 传输完成：${event.payload.message ?? "PoT 已就绪"}`);
       });
+      const peerListener = await listen<PeerDiscoveredPayload>("peer_discovered", (event) => {
+        if (!active) {
+          return;
+        }
+        const existing = trustedPeersRef.current[event.payload.deviceId];
+        const knownFingerprint = existing?.fingerprint
+          ? normalizeFingerprint(existing.fingerprint)
+          : null;
+        const incomingFingerprint = event.payload.fingerprint
+          ? normalizeFingerprint(event.payload.fingerprint)
+          : null;
+        if (
+          existing &&
+          ((knownFingerprint && incomingFingerprint && knownFingerprint === incomingFingerprint) ||
+            !knownFingerprint ||
+            !incomingFingerprint)
+        ) {
+          setTrustedPeers((prev) => ({
+            ...prev,
+            [event.payload.deviceId]: event.payload,
+          }));
+          appendLog(
+            `🤝 自动信任设备 ${event.payload.deviceName ?? event.payload.deviceId}${
+              event.payload.verified ? "（签名通过）" : "（来源于已信任列表）"
+            }`
+          );
+          return;
+        }
+        setPeerPrompt(event.payload);
+        setPeerFingerprintInput("");
+        appendLog(
+          `🔔 发现新设备 ${event.payload.deviceName ?? event.payload.deviceId}${
+            event.payload.verified ? "（已签名验证）" : ""
+          }`
+        );
+      });
       unlistenRefs.push(progressListener, logListener, failedListener, completedListener);
-      unlistenRefs.push(devicesListener);
+      unlistenRefs.push(devicesListener, peerListener);
     };
     setup();
     return () => {
@@ -1529,7 +2544,13 @@ export default function App(): JSX.Element {
         }
       });
     };
-  }, [appendLog, identity, isTauri]);
+  }, [appendLog, identity, isTauri, showError]);
+
+  useEffect(() => {
+    if (progress?.phase === "done") {
+      void refreshRouteMetrics();
+    }
+  }, [progress?.phase, refreshRouteMetrics]);
 
   return (
     <div className="app-surface">
@@ -1704,6 +2725,16 @@ export default function App(): JSX.Element {
                       <span className="addr">
                         {sender.host}:{sender.port}
                       </span>
+                      <span className="pubkey">
+                        {sender.publicKey.length > 16
+                          ? `${sender.publicKey.slice(0, 10)}…${sender.publicKey.slice(-6)}`
+                          : sender.publicKey}
+                      </span>
+                      <span className="fp">
+                        {sender.certFingerprint.length > 16
+                          ? `${sender.certFingerprint.slice(0, 10)}…${sender.certFingerprint.slice(-6)}`
+                          : sender.certFingerprint}
+                      </span>
                     </div>
                     <button
                       type="button"
@@ -1712,6 +2743,13 @@ export default function App(): JSX.Element {
                       disabled={isReceiving}
                     >
                       连接
+                    </button>
+                    <button
+                      type="button"
+                      className="plain"
+                      onClick={() => handleCopy("发送方公钥", sender.publicKey)}
+                    >
+                      复制公钥
                     </button>
                   </li>
                 ))}
@@ -1722,7 +2760,7 @@ export default function App(): JSX.Element {
 
         {receiveMode === "manual" && (
           <div className="receive-grid manual-mode">
-            <p>让发送方告知 IP 与端口，并选择保存目录即可建立 QUIC 连接。</p>
+            <p>请向发送方索取 IP、端口与公钥，再选择保存目录即可建立加密 QUIC 连接。</p>
             <label>
               <span>配对码</span>
               <input
@@ -1752,6 +2790,26 @@ export default function App(): JSX.Element {
                 max={65535}
               />
             </label>
+            <label>
+              <span>发送方公钥</span>
+              <input
+                type="text"
+                value={receiveSenderKey}
+                onChange={(event) => setReceiveSenderKey(event.target.value.trim())}
+                maxLength={64}
+                placeholder="64 位十六进制，例如 E4A1…"
+              />
+            </label>
+            <label>
+              <span>证书指纹</span>
+              <input
+                type="text"
+                value={receiveSenderFingerprint}
+                onChange={(event) => setReceiveSenderFingerprint(event.target.value.trim())}
+                maxLength={64}
+                placeholder="64 位十六进制，例如 9AF2…"
+              />
+            </label>
             <label className="receive-dir">
               <span>保存目录</span>
               <div className="dir-field">
@@ -1778,6 +2836,30 @@ export default function App(): JSX.Element {
             </div>
           </div>
         )}
+      </div>
+      <div className="webrtc-panel" aria-live="polite">
+        <h3>WebRTC 跨网实验（阶段三）</h3>
+        <p className="hint">
+          发送端会在缺少配对码时自动生成 6 位随机码，接收端沿用上方“接收”面板中的配对码与保存目录。该功能目前为实验性质，仅验证 P2P 信令链路。
+        </p>
+        <div className="actions-row">
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void handleWebRtcSenderTest()}
+            disabled={pendingPaths.length === 0 || isSending}
+          >
+            {isSending ? "WebRTC 发送启动中…" : "启动 WebRTC 发送"}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void handleWebRtcReceiverTest()}
+            disabled={isReceiving}
+          >
+            {isReceiving ? "WebRTC 接收等待中…" : "启动 WebRTC 接收"}
+          </button>
+        </div>
       </div>
       <div className="identity-panel" aria-live="polite">
         <h3>身份与设备</h3>
@@ -2018,6 +3100,21 @@ export default function App(): JSX.Element {
                 <span className="status-value">{taskCode}</span>
               </div>
             )}
+            {senderPublicKey && (
+              <div>
+                <span className="status-label">发送方公钥</span>
+                <span className="status-value with-actions">
+                  <code>{senderPublicKey}</code>
+                  <button
+                    type="button"
+                    className="copy-button"
+                    onClick={() => handleCopy("发送方公钥", senderPublicKey)}
+                  >
+                    复制
+                  </button>
+                </span>
+              </div>
+            )}
             {taskId && (
               <div>
                 <span className="status-label">任务 ID</span>
@@ -2036,6 +3133,25 @@ export default function App(): JSX.Element {
                 <span className="status-value">{progress.route}</span>
               </div>
             )}
+            {routeAttempts && routeAttempts.length > 0 && (
+              <div>
+                <span className="status-label">路由策略</span>
+                <span className="status-value route-sequence">
+                  {routeAttempts.map((route, index) => (
+                    <span key={`${route}-${index}`}>
+                      {index > 0 && <span className="route-arrow"> → </span>}
+                      {route.toUpperCase()}
+                    </span>
+                  ))}
+                  {progress?.route && (
+                    <span className="route-current">
+                      {" "}
+                      · 当前 {progress.route.toUpperCase()}
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
             {typeof progress?.progress === "number" && (
               <div>
                 <span className="status-label">进度</span>
@@ -2049,8 +3165,411 @@ export default function App(): JSX.Element {
               </div>
             )}
           </div>
+          <div className="route-metrics-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => void refreshRouteMetrics()}
+              disabled={isRouteMetricsLoading}
+            >
+              {isRouteMetricsLoading ? "正在获取…" : "查看路由统计"}
+            </button>
+          </div>
+          {routeMetrics && routeMetrics.length > 0 && (
+            <div className="route-metrics-panel">
+              <table>
+                <thead>
+                  <tr>
+                    <th>路由</th>
+                    <th>尝试次数</th>
+                    <th>成功次数</th>
+                    <th>失败次数</th>
+                    <th>成功率</th>
+                    <th>平均握手 (ms)</th>
+                    <th>最后错误</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {routeMetrics.map((metric) => (
+                    <tr key={metric.route}>
+                      <td>{metric.route.toUpperCase()}</td>
+                      <td>{metric.attempts}</td>
+                      <td>{metric.successes}</td>
+                      <td>{metric.failures}</td>
+                      <td>
+                        {typeof metric.successRate === "number"
+                          ? `${(metric.successRate * 100).toFixed(1)}%`
+                          : "—"}
+                      </td>
+                      <td>{metric.avgLatencyMs ? metric.avgLatencyMs.toFixed(1) : "—"}</td>
+                      <td>{metric.lastError ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {identity && (
+            <div className="insights-grid">
+              <section className="stats-panel" aria-label="传输统计">
+                <div className="panel-header">
+                  <h4>传输统计</h4>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void refreshTransferStats()}
+                    disabled={isStatsLoading}
+                  >
+                    {isStatsLoading ? "更新中…" : "刷新"}
+                  </button>
+                </div>
+                <div className="license-summary">
+                  <div className="license-header">
+                    <div>
+                      <span className="stat-label">当前权益</span>
+                      <strong className="stat-value">
+                        {licenseStatus ? licenseStatus.tier.toUpperCase() : "—"}
+                      </strong>
+                    </div>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => void refreshLicenseStatus()}
+                      disabled={isLicenseLoading}
+                    >
+                      {isLicenseLoading ? "同步权益…" : "刷新权益"}
+                    </button>
+                  </div>
+                  {licenseStatus ? (
+                    <>
+                      {typeof licenseStatus.p2pQuota === "number" && (
+                        <div className="quota-section">
+                          <span className="stat-label">跨网配额</span>
+                          <div className="quota-bar">
+                            <span
+                              className="quota-progress"
+                              style={{
+                                width: `${Math.min(
+                                  100,
+                                  (licenseStatus.p2pUsed / Math.max(licenseStatus.p2pQuota, 1)) * 100
+                                ).toFixed(0)}%`,
+                              }}
+                            />
+                          </div>
+                          <span className="quota-text">
+                            已用 {licenseStatus.p2pUsed} / {licenseStatus.p2pQuota} 次
+                          </span>
+                        </div>
+                      )}
+                      <ul className="license-meta">
+                        <li>License Key：{maskLicenseKey(licenseStatus.licenseKey)}</li>
+                        <li>签发：{formatAbsoluteTime(licenseStatus.issuedAt)}</li>
+                        <li>
+                          到期：
+                          {licenseStatus.expiresAt ? formatAbsoluteTime(licenseStatus.expiresAt) : "无固定期限"}
+                        </li>
+                      </ul>
+                      <div className="license-limits">
+                        <span>
+                          {licenseStatus.limits.resumeEnabled ? "✅ 支持断点续传" : "⚠️ 无断点续传"}
+                        </span>
+                        <span>
+                          {licenseStatus.limits.maxFileSizeMb
+                            ? `单文件 ≤ ${(licenseStatus.limits.maxFileSizeMb / 1024).toFixed(1)} GB`
+                            : "文件大小无限制"}
+                        </span>
+                        <span>
+                          {licenseStatus.limits.maxDevices
+                            ? `设备上限 ${licenseStatus.limits.maxDevices}`
+                            : "设备数量无限制"}
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="stats-empty">暂无权益信息，请刷新后重试。</p>
+                  )}
+                  <form
+                    className="license-activate"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void activateLicense();
+                    }}
+                  >
+                    <input
+                      type="text"
+                      placeholder="输入 License Key，例如 QD-PRO-XXXX-YYYY"
+                      value={licenseInput}
+                      onChange={(event) => setLicenseInput(event.target.value)}
+                      disabled={isActivatingLicense}
+                    />
+                    <button
+                      type="submit"
+                      className="primary"
+                      disabled={isActivatingLicense || licenseInput.trim().length === 0}
+                    >
+                      {isActivatingLicense ? "激活中…" : "激活 License"}
+                    </button>
+                    <button type="button" className="secondary" onClick={copySampleLicense}>
+                      复制示例
+                    </button>
+                  </form>
+                </div>
+                {transferStats ? (
+                  <>
+                    <div className="stat-cards">
+                      <div className="stat-card">
+                        <span className="stat-label">总传输次数</span>
+                        <strong className="stat-value">{transferStats.totalTransfers}</strong>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">传输总量</span>
+                        <strong className="stat-value">{formatSize(transferStats.totalBytes)}</strong>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">成功率</span>
+                        <strong className="stat-value">
+                          {(transferStats.successRate * 100).toFixed(1)}%
+                        </strong>
+                        <span className="stat-subtext">
+                          成功 {transferStats.successCount} · 失败 {transferStats.failureCount}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="route-distribution">
+                      <div className="route-bar" aria-hidden="true">
+                        <span
+                          className="route-segment route-lan"
+                          style={{ width: `${transferStats.lanPercent}%` }}
+                        />
+                        <span
+                          className="route-segment route-p2p"
+                          style={{ width: `${transferStats.p2pPercent}%` }}
+                        />
+                        <span
+                          className="route-segment route-relay"
+                          style={{ width: `${transferStats.relayPercent}%` }}
+                        />
+                      </div>
+                      <ul className="route-legend">
+                        <li>
+                          <span className="legend-dot route-lan" />
+                          LAN {transferStats.lanPercent.toFixed(0)}%
+                        </li>
+                        <li>
+                          <span className="legend-dot route-p2p" />
+                          P2P {transferStats.p2pPercent.toFixed(0)}%
+                        </li>
+                        <li>
+                          <span className="legend-dot route-relay" />
+                          Relay {transferStats.relayPercent.toFixed(0)}%
+                        </li>
+                      </ul>
+                    </div>
+                  </>
+                ) : (
+                  <p className="stats-empty">暂无传输记录。</p>
+                )}
+              </section>
+              <section className="audit-panel" aria-label="操作审计">
+                <div className="panel-header">
+                  <h4>操作审计</h4>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void refreshAuditLogs()}
+                    disabled={isAuditLoading}
+                  >
+                    {isAuditLoading ? "同步中…" : "刷新"}
+                  </button>
+                </div>
+                {auditLogs.length > 0 ? (
+                  <ul className="audit-list">
+                    {auditLogs.slice(0, 8).map((entry) => {
+                      const detailRaw = summarizeAuditDetails(entry.details ?? {});
+                      const detailText =
+                        detailRaw.length > 160 ? `${detailRaw.slice(0, 157)}…` : detailRaw;
+                      return (
+                        <li key={entry.id}>
+                          <div className="audit-header">
+                            <span className="audit-event">{entry.eventType}</span>
+                            <span className="audit-time">{formatRelativeTime(entry.timestamp)}</span>
+                          </div>
+                          <div className="audit-meta">
+                            <span>{formatAbsoluteTime(entry.timestamp)}</span>
+                            {entry.deviceId && <span>终端 {entry.deviceId}</span>}
+                            {entry.taskId && <span>任务 {entry.taskId}</span>}
+                          </div>
+                          {detailText && <p className="audit-details">{detailText}</p>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="stats-empty">暂无审计记录。</p>
+                )}
+              </section>
+              <section className="security-panel" aria-label="安全策略">
+                <div className="panel-header">
+                  <h4>安全策略</h4>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void refreshSecurityConfig()}
+                    disabled={isSecurityLoading}
+                  >
+                    {isSecurityLoading ? "同步中…" : "刷新"}
+                  </button>
+                </div>
+                {securityConfig ? (
+                  <ul className="security-list">
+                    <li data-enabled={securityConfig.enforceSignatureVerification}>
+                      <strong>签名校验</strong>
+                      <span>{securityConfig.enforceSignatureVerification ? "已启用（推荐）" : "未启用"}</span>
+                    </li>
+                    <li data-enabled={securityConfig.disconnectOnVerificationFail}>
+                      <strong>验签失败断开</strong>
+                      <span>
+                        {securityConfig.disconnectOnVerificationFail
+                          ? "失败即断开"
+                          : "失败仅警告"}
+                      </span>
+                    </li>
+                    <li data-enabled={securityConfig.enableAuditLog}>
+                      <strong>审计日志</strong>
+                      <span>{securityConfig.enableAuditLog ? "记录到本地 SQLite" : "未记录"}</span>
+                    </li>
+                  </ul>
+                ) : (
+                  <p className="stats-empty">无法读取安全策略，请刷新或检查配置。</p>
+                )}
+              </section>
+            </div>
+          )}
+          {Object.keys(trustedPeers).length > 0 && (
+            <div className="trusted-peers-panel">
+              <div className="panel-header">
+                <h4>已信任设备</h4>
+                <button type="button" className="secondary" onClick={clearTrustedPeers}>
+                  清空
+                </button>
+              </div>
+              <ul>
+                {Object.values(trustedPeers).map((peer) => (
+                  <li key={`${peer.sessionId}-${peer.deviceId}`}>
+                    <strong>{peer.deviceName ?? peer.deviceId}</strong>
+                    <span className="peer-fingerprint">{peer.fingerprint ?? "未知指纹"}</span>
+                    <span className="peer-status">{peer.verified ? "签名通过" : "手动信任"}</span>
+                    <button
+                      type="button"
+                      className="plain"
+                      onClick={() => removeTrustedPeer(peer.deviceId)}
+                    >
+                      移除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {info && <div className="toast toast-success">{info}</div>}
-          {error && <div className="toast toast-error">{error}</div>}
+          {error && (
+            <div className="toast toast-error">
+              <div>{error}</div>
+              {errorActionKeys.length > 0 && (
+                <div className="toast-actions">
+                  {errorActionKeys.map((key) => {
+                    const handler = errorActionHandlers[key];
+                    const label = ERROR_ACTION_LABELS[key];
+                    if (!handler || !label) {
+                      return null;
+                    }
+                    return (
+                      <button
+                        key={`${key}-action`}
+                        type="button"
+                        onClick={() => {
+                          void handler();
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {peerPrompt && (
+        <div className="peer-trust-dialog">
+          <h3>发现新设备</h3>
+          <p>
+            设备: <strong>{peerPrompt.deviceName ?? peerPrompt.deviceId}</strong>
+          </p>
+          <p>
+            指纹: <code>{peerPrompt.fingerprint ?? "未知"}</code>
+          </p>
+          {peerPrompt.verified ? (
+            <p className="peer-status verified">已通过签名验证</p>
+          ) : (
+            <p className="peer-status warning">未通过签名验证，请与对方核对指纹</p>
+          )}
+          {!peerPrompt.verified && (
+            <label>
+              <span>输入对方提供的指纹</span>
+              <input
+                value={peerFingerprintInput}
+                onChange={(event) => setPeerFingerprintInput(event.target.value)}
+                placeholder="例如：1A:2B:3C:4D"
+              />
+            </label>
+          )}
+          <div className="actions-row">
+            <button
+              type="button"
+              className="primary"
+              onClick={() => {
+                const reference = peerPrompt.fingerprint
+                  ? normalizeFingerprint(peerPrompt.fingerprint)
+                  : null;
+                const provided = normalizeFingerprint(peerFingerprintInput);
+                if (
+                  peerPrompt.verified ||
+                  (reference && provided.length > 0 && provided === reference)
+                ) {
+                  setTrustedPeers((prev) => ({
+                    ...prev,
+                    [peerPrompt.deviceId]: peerPrompt,
+                  }));
+                  appendLog(
+                    `🤝 已信任设备 ${peerPrompt.deviceName ?? peerPrompt.deviceId}${
+                      peerPrompt.verified ? "（签名通过）" : ""
+                    }`
+                  );
+                  setPeerPrompt(null);
+                  setPeerFingerprintInput("");
+                } else {
+                  showError("指纹不匹配，无法信任该设备。");
+                }
+              }}
+            >
+              信任此设备
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                appendLog(
+                  `⛔ 拒绝设备 ${peerPrompt.deviceName ?? peerPrompt.deviceId} 的连接请求`
+                );
+                setPeerPrompt(null);
+                setPeerFingerprintInput("");
+              }}
+            >
+              拒绝
+            </button>
+          </div>
         </div>
       )}
       {logs.length > 0 && (
@@ -2062,6 +3581,15 @@ export default function App(): JSX.Element {
             ))}
           </ul>
         </div>
+      )}
+      {upgradeReason && (
+        <UpgradePrompt
+          reason={upgradeReason}
+          config={UPGRADE_CONFIG[upgradeReason]}
+          pricingUrl={UPGRADE_URL}
+          onUpgrade={handleUpgradeCTA}
+          onClose={handleUpgradeDismiss}
+        />
       )}
     </div>
   );

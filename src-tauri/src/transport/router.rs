@@ -2,7 +2,6 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::{stream::FuturesUnordered, StreamExt};
 use log::warn;
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,7 +18,7 @@ use super::{MockLocalAdapter, SessionDesc, TransportAdapter, TransportError, Tra
 #[cfg(feature = "transport-relay")]
 use super::{RelayAdapter, RelayHint};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RouteKind {
     Lan,
     P2p,
@@ -55,6 +54,8 @@ struct TransportPreferences {
     timeouts: RouteTimeouts,
     #[cfg(feature = "transport-relay")]
     relay: Option<String>,
+    #[cfg(feature = "transport-webrtc")]
+    app_handle: Option<AppHandle>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -94,8 +95,11 @@ pub struct Router {
 
 impl Router {
     pub fn from_app(app: &AppHandle) -> Self {
-        let prefs = read_transport_preferences(app);
-        Self::build_router(prefs)
+        Self::from_app_with_override(app, None)
+    }
+
+    pub fn from_app_with_routes(app: &AppHandle, routes: Vec<RouteKind>) -> Self {
+        Self::from_app_with_override(app, Some(routes))
     }
 
     #[allow(dead_code)]
@@ -110,9 +114,18 @@ impl Router {
     }
 
     pub fn p2p_only(app: &AppHandle) -> Self {
-        let prefs = read_transport_preferences(app);
-        let mut prefs = prefs;
-        prefs.routes = vec![RouteKind::P2p];
+        Self::from_app_with_routes(app, vec![RouteKind::P2p])
+    }
+
+    fn from_app_with_override(app: &AppHandle, routes: Option<Vec<RouteKind>>) -> Self {
+        let mut prefs = read_transport_preferences(app);
+        #[cfg(feature = "transport-webrtc")]
+        {
+            prefs.app_handle = Some(app.clone());
+        }
+        if let Some(values) = routes {
+            prefs.routes = values;
+        }
         Self::build_router(prefs)
     }
 
@@ -172,16 +185,17 @@ impl Router {
         };
 
         #[cfg(feature = "transport-relay")]
-        let relay_hint = prefs
-            .relay
-            .as_ref()
-            .and_then(|endpoint| match parse_relay_hint(endpoint) {
-                Ok(hint) => Some(hint),
-                Err(err) => {
-                    warn!("invalid relay endpoint '{}': {}", endpoint, err);
-                    None
-                }
-            });
+        let relay_hint =
+            prefs
+                .relay
+                .as_ref()
+                .and_then(|endpoint| match parse_relay_hint(endpoint) {
+                    Ok(hint) => Some(hint),
+                    Err(err) => {
+                        warn!("invalid relay endpoint '{}': {}", endpoint, err);
+                        None
+                    }
+                });
 
         Router {
             preferred,
@@ -197,40 +211,39 @@ impl Router {
 
     pub async fn connect(&self, session: &SessionDesc) -> Result<SelectedRoute, TransportError> {
         let mut notes = Vec::new();
-        let mut tasks = FuturesUnordered::new();
         let mut real_routes = 0usize;
 
         for route in &self.preferred {
             if *route == RouteKind::MockLocal {
                 continue;
             }
-            if let Some(adapter) = self.adapter_for(route) {
-                real_routes += 1;
-                let session_clone = {
-                    #[cfg(feature = "transport-relay")]
-                    {
-                        if *route == RouteKind::Relay {
-                            session_with_relay_hint(session, self.relay_hint.as_ref())
-                        } else {
-                            session.clone()
-                        }
-                    }
-                    #[cfg(not(feature = "transport-relay"))]
-                    {
+            let Some(adapter) = self.adapter_for(route) else {
+                notes.push(format!("{} adapter unavailable", route.label()));
+                continue;
+            };
+            real_routes += 1;
+            let session_clone = {
+                #[cfg(feature = "transport-relay")]
+                {
+                    if *route == RouteKind::Relay {
+                        session_with_relay_hint(session, self.relay_hint.as_ref())
+                    } else {
                         session.clone()
                     }
-                };
-                tasks.push(run_route_attempt(
-                    route.clone(),
-                    adapter.clone(),
-                    session_clone,
-                    self.timeout_for(route),
-                ));
-            }
-        }
-
-        while let Some(result) = tasks.next().await {
-            match result {
+                }
+                #[cfg(not(feature = "transport-relay"))]
+                {
+                    session.clone()
+                }
+            };
+            match run_route_attempt(
+                route.clone(),
+                adapter.clone(),
+                session_clone,
+                self.timeout_for(route),
+            )
+            .await
+            {
                 Ok((route, stream, note)) => {
                     notes.push(note);
                     return Ok(SelectedRoute {
@@ -243,7 +256,11 @@ impl Router {
             }
         }
 
-        if self.preferred.iter().any(|route| route == &RouteKind::MockLocal) {
+        if self
+            .preferred
+            .iter()
+            .any(|route| route == &RouteKind::MockLocal)
+        {
             let started = Instant::now();
             match self.mock.connect(session).await {
                 Ok(stream) => {
@@ -435,7 +452,18 @@ fn build_webrtc_adapter(prefs: &TransportPreferences) -> Option<WebRtcAdapter> {
     if !ice_servers.is_empty() {
         config.ice_servers = ice_servers;
     }
-    Some(WebRtcAdapter::with_signaling(config, signaling))
+    #[cfg(feature = "transport-webrtc")]
+    {
+        return Some(WebRtcAdapter::with_signaling(
+            config,
+            signaling,
+            prefs.app_handle.clone(),
+        ));
+    }
+    #[cfg(not(feature = "transport-webrtc"))]
+    {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -667,16 +695,14 @@ impl From<TransportYaml> for TransportPreferences {
             .map(|entry| entry.trim().to_string())
             .filter(|entry| !entry.is_empty())
             .collect();
-        let signaling = value
-            .signaling_url
-            .and_then(|url| {
-                let trimmed = url.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
+        let signaling = value.signaling_url.and_then(|url| {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
         let mut turn = Vec::new();
         if let Some(section) = value.turn {
             let urls = section
@@ -686,26 +712,22 @@ impl From<TransportYaml> for TransportPreferences {
                 .filter(|entry| !entry.is_empty())
                 .collect::<Vec<_>>();
             if !urls.is_empty() {
-                let username = section
-                    .username
-                    .and_then(|value| {
-                        let trimmed = value.trim();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed.to_string())
-                        }
-                    });
-                let credential = section
-                    .credential
-                    .and_then(|value| {
-                        let trimmed = value.trim();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed.to_string())
-                        }
-                    });
+                let username = section.username.and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                });
+                let credential = section.credential.and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                });
                 turn.push(TurnServerConfig {
                     urls,
                     username,
@@ -742,6 +764,8 @@ impl From<TransportYaml> for TransportPreferences {
             timeouts,
             #[cfg(feature = "transport-relay")]
             relay,
+            #[cfg(feature = "transport-webrtc")]
+            app_handle: None,
         }
     }
 }

@@ -1,23 +1,30 @@
 #![cfg(feature = "transport-webrtc")]
 
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::{
+    fs,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use ed25519_dalek::{Signer, SigningKey};
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
 use log::{info, warn};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::protocol::Message,
-    MaybeTlsStream,
-    WebSocketStream,
+    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
 use url::Url;
 use webrtc::{
@@ -29,39 +36,47 @@ use webrtc::{
     ice_transport::ice_candidate::RTCIceCandidateInit,
     peer_connection::{
         configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
+        sdp::sdp_type::RTCSdpType, sdp::session_description::RTCSessionDescription,
         RTCPeerConnection,
-        sdp::session_description::RTCSessionDescription,
-        sdp::sdp_type::RTCSdpType,
     },
     Error as WebRtcError,
 };
 
+#[cfg(test)]
+use crate::security::SecurityConfig;
 use crate::signaling::{
-    IceCandidate as SignalIceCandidate,
-    SessionDesc as SignalSessionDesc,
+    IceCandidate as SignalIceCandidate, SessionDesc as SignalSessionDesc,
     SessionDescription as SignalSessionDescription,
     SessionDescriptionType as SignalDescriptionType,
 };
 
 use super::{
     adapter::{WebRtcHint, WebRtcRole},
-    Frame,
-    SessionDesc,
-    TransportAdapter,
-    TransportError,
-    TransportStream,
+    Frame, SessionDesc, TransportAdapter, TransportError, TransportStream,
 };
 
 type WsWrite = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 type WsRead = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
 const DATA_CHANNEL_LABEL: &str = "courier";
+const SIGNALING_DOMAIN: &str = "quantumdrop.signaling.v1";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerDiscoveredEvent {
+    session_id: String,
+    device_id: String,
+    device_name: Option<String>,
+    fingerprint: Option<String>,
+    verified: bool,
+}
 
 #[derive(Clone)]
 pub struct WebRtcAdapter {
     config: Arc<RTCConfiguration>,
     #[allow(dead_code)]
     signaling_url: Option<Arc<String>>,
+    app_handle: Option<AppHandle>,
 }
 
 impl Default for WebRtcAdapter {
@@ -69,6 +84,7 @@ impl Default for WebRtcAdapter {
         Self {
             config: Arc::new(RTCConfiguration::default()),
             signaling_url: None,
+            app_handle: None,
         }
     }
 }
@@ -79,13 +95,19 @@ impl WebRtcAdapter {
         Self {
             config: Arc::new(config),
             signaling_url: None,
+            app_handle: None,
         }
     }
 
-    pub fn with_signaling(config: RTCConfiguration, signaling_url: String) -> Self {
+    pub fn with_signaling(
+        config: RTCConfiguration,
+        signaling_url: String,
+        app_handle: Option<AppHandle>,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             signaling_url: Some(Arc::new(signaling_url)),
+            app_handle,
         }
     }
 
@@ -103,10 +125,7 @@ impl TransportAdapter for WebRtcAdapter {
         session: &SessionDesc,
     ) -> Result<Box<dyn TransportStream>, TransportError> {
         if let (Some(hint), Some(url)) = (session.webrtc.as_ref(), self.signaling_url.as_ref()) {
-            match self
-                .connect_signaling(session, hint, url.as_str())
-                .await
-            {
+            match self.connect_signaling(session, hint, url.as_str()).await {
                 Ok(stream) => return Ok(stream),
                 Err(err) => {
                     warn!(
@@ -231,12 +250,17 @@ impl WebRtcAdapter {
         hint: &WebRtcHint,
         signaling_url: &str,
     ) -> Result<Box<dyn TransportStream>, TransportError> {
-        let url = build_signaling_url(signaling_url, &session.session_id)?;
+        let url = build_signaling_url(signaling_url, &session.session_id, hint)?;
         let (ws_stream, _) = connect_async(url)
             .await
             .map_err(|err| TransportError::Setup(format!("signaling connect failed: {err}")))?;
         let (ws_write, ws_read) = ws_stream.split();
-        let client = SignalingClient::new(session.session_id.clone(), ws_write);
+        let signing_key = self.app_handle.as_ref().and_then(|app| {
+            hint.identity_id
+                .as_deref()
+                .and_then(|identity| load_signing_key(app, identity))
+        });
+        let client = SignalingClient::new(session.session_id.clone(), ws_write, hint, signing_key);
 
         let role = hint.role.clone();
         let pc = self
@@ -274,6 +298,7 @@ impl WebRtcAdapter {
             answer_wait.clone(),
             offer_set.clone(),
             answer_set.clone(),
+            self.app_handle.clone(),
         );
 
         match role {
@@ -281,7 +306,9 @@ impl WebRtcAdapter {
                 let channel = pc
                     .create_data_channel(DATA_CHANNEL_LABEL, Some(RTCDataChannelInit::default()))
                     .await
-                    .map_err(|err| TransportError::Setup(format!("data channel create failed: {err}")))?;
+                    .map_err(|err| {
+                        TransportError::Setup(format!("data channel create failed: {err}"))
+                    })?;
                 setup_data_channel(channel.clone(), inbound_tx.clone(), open_notify.clone());
                 {
                     let mut slot = channel_slot.lock().await;
@@ -294,13 +321,17 @@ impl WebRtcAdapter {
                     .map_err(|err| TransportError::Setup(format!("offer create failed: {err}")))?;
                 pc.set_local_description(offer.clone())
                     .await
-                    .map_err(|err| TransportError::Setup(format!("set local offer failed: {err}")))?;
+                    .map_err(|err| {
+                        TransportError::Setup(format!("set local offer failed: {err}"))
+                    })?;
                 client.send_offer(&offer).await?;
 
                 if let Some(waiter) = answer_wait {
                     timeout(Duration::from_secs(20), waiter.notified())
-                    .await
-                    .map_err(|_| TransportError::Timeout("waiting for remote answer timed out".into()))?;
+                        .await
+                        .map_err(|_| {
+                            TransportError::Timeout("waiting for remote answer timed out".into())
+                        })?;
                 }
             }
             WebRtcRole::Answerer => {
@@ -313,7 +344,9 @@ impl WebRtcAdapter {
                 if let Some(waiter) = offer_wait {
                     timeout(Duration::from_secs(20), waiter.notified())
                         .await
-                        .map_err(|_| TransportError::Timeout("waiting for remote offer timed out".into()))?;
+                        .map_err(|_| {
+                            TransportError::Timeout("waiting for remote offer timed out".into())
+                        })?;
                 }
             }
         }
@@ -324,9 +357,9 @@ impl WebRtcAdapter {
 
         let channel = {
             let mut guard = channel_slot.lock().await;
-            guard
-                .take()
-                .ok_or_else(|| TransportError::Setup("data channel unavailable after signaling".into()))?
+            guard.take().ok_or_else(|| {
+                TransportError::Setup("data channel unavailable after signaling".into())
+            })?
         };
 
         Ok(Box::new(SignaledWebRtcStream {
@@ -553,13 +586,26 @@ impl TransportStream for SignaledWebRtcStream {
 struct SignalingClient {
     session_id: Arc<String>,
     writer: Arc<Mutex<WsWrite>>,
+    device_id: Option<String>,
+    device_name: Option<String>,
+    public_key: Option<String>,
+    signing: Option<Arc<SigningKey>>,
 }
 
 impl SignalingClient {
-    fn new(session_id: String, writer: WsWrite) -> Self {
+    fn new(
+        session_id: String,
+        writer: WsWrite,
+        hint: &WebRtcHint,
+        signing_key: Option<SigningKey>,
+    ) -> Self {
         Self {
             session_id: Arc::new(session_id),
             writer: Arc::new(Mutex::new(writer)),
+            device_id: hint.device_id.clone(),
+            device_name: hint.device_name.clone(),
+            public_key: hint.signer_public_key.clone(),
+            signing: signing_key.map(|key| Arc::new(key)),
         }
     }
 
@@ -573,6 +619,10 @@ impl SignalingClient {
             offer: Some(to_signal_description(desc)?),
             answer: None,
             candidates: Vec::new(),
+            signer_device_id: None,
+            signer_device_name: None,
+            signer_public_key: None,
+            signature: None,
         })
         .await
     }
@@ -583,6 +633,10 @@ impl SignalingClient {
             offer: None,
             answer: Some(to_signal_description(desc)?),
             candidates: Vec::new(),
+            signer_device_id: None,
+            signer_device_name: None,
+            signer_public_key: None,
+            signature: None,
         })
         .await
     }
@@ -593,11 +647,25 @@ impl SignalingClient {
             offer: None,
             answer: None,
             candidates: vec![candidate],
+            signer_device_id: None,
+            signer_device_name: None,
+            signer_public_key: None,
+            signature: None,
         })
         .await
     }
 
-    async fn send_update(&self, update: SignalSessionDesc) -> Result<(), TransportError> {
+    async fn send_update(&self, mut update: SignalSessionDesc) -> Result<(), TransportError> {
+        if let Some(device_id) = self.device_id.as_ref() {
+            update.signer_device_id = Some(device_id.clone());
+        }
+        if let Some(device_name) = self.device_name.as_ref() {
+            update.signer_device_name = Some(device_name.clone());
+        }
+        if let Some(public_key) = self.public_key.as_ref() {
+            update.signer_public_key = Some(public_key.clone());
+        }
+        update.signature = self.sign_payload(&update);
         let text = serde_json::to_string(&update)
             .map_err(|err| TransportError::Setup(format!("signaling encode failed: {err}")))?;
         let mut writer = self.writer.lock().await;
@@ -616,13 +684,61 @@ impl SignalingClient {
         let mut writer = self.writer.lock().await;
         let _ = writer.send(Message::Close(None)).await;
     }
+
+    fn sign_payload(&self, desc: &SignalSessionDesc) -> Option<String> {
+        let signing = self.signing.as_deref()?;
+        let device_id = self.device_id.as_ref()?;
+        let payload = build_sign_payload(desc, device_id);
+        let signature = signing.sign(payload.as_bytes());
+        Some(hex::encode(signature.to_bytes()))
+    }
 }
 
-fn build_signaling_url(base: &str, session_id: &str) -> Result<Url, TransportError> {
+fn build_signaling_url(
+    base: &str,
+    session_id: &str,
+    hint: &WebRtcHint,
+) -> Result<Url, TransportError> {
     let mut url = Url::parse(base)
         .map_err(|err| TransportError::Setup(format!("invalid signaling url '{base}': {err}")))?;
-    url.query_pairs_mut().append_pair("sessionId", session_id);
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("sessionId", session_id);
+        if let Some(device_id) = hint.device_id.as_ref() {
+            pairs.append_pair("deviceId", device_id);
+        }
+        if let Some(name) = hint
+            .device_name
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            pairs.append_pair("deviceName", name);
+        }
+        if let Some(public_key) = hint.signer_public_key.as_ref() {
+            pairs.append_pair("publicKey", public_key);
+        }
+    }
     Ok(url)
+}
+
+fn load_signing_key(app: &AppHandle, identity_id: &str) -> Option<SigningKey> {
+    let mut path = app.path().app_data_dir().ok()?;
+    path.push("identity");
+    path.push(format!("{identity_id}.priv"));
+    let contents = fs::read_to_string(&path).ok()?;
+    let trimmed = contents.trim();
+    let decoded = hex::decode(trimmed).ok()?;
+    if decoded.len() != 32 {
+        warn!(
+            "identity private key for '{}' has invalid length ({} bytes)",
+            identity_id,
+            decoded.len()
+        );
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&decoded);
+    Some(SigningKey::from_bytes(&bytes))
 }
 
 fn setup_data_channel(
@@ -706,35 +822,36 @@ fn spawn_signaling_reader(
     answer_ready: Option<Arc<Notify>>,
     offer_set: Arc<AtomicBool>,
     answer_set: Arc<AtomicBool>,
+    app_handle: Option<AppHandle>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(msg) = ws_read.next().await {
             match msg {
-                Ok(Message::Text(text)) => {
-                    match serde_json::from_str::<SignalSessionDesc>(&text) {
-                        Ok(desc) => {
-                            if let Err(err) = handle_signal_update(
-                                &pc,
-                                &client,
-                                &desc,
-                                role,
-                                offer_ready.as_ref(),
-                                answer_ready.as_ref(),
-                                &offer_set,
-                                &answer_set,
-                            )
-                            .await
-                            {
-                                warn!(
-                                    "signaling update failed for session {}: {}",
-                                    client.session_id(),
-                                    err
-                                );
-                            }
+                Ok(Message::Text(text)) => match serde_json::from_str::<SignalSessionDesc>(&text) {
+                    Ok(desc) => {
+                        if let Err(err) = handle_signal_update(
+                            &pc,
+                            &client,
+                            &desc,
+                            role,
+                            offer_ready.as_ref(),
+                            answer_ready.as_ref(),
+                            &offer_set,
+                            &answer_set,
+                        )
+                        .await
+                        {
+                            warn!(
+                                "signaling update failed for session {}: {}",
+                                client.session_id(),
+                                err
+                            );
+                        } else if let Some(app) = app_handle.as_ref() {
+                            emit_peer_event(app, &desc);
                         }
-                        Err(err) => warn!("invalid signaling payload: {err}"),
                     }
-                }
+                    Err(err) => warn!("invalid signaling payload: {err}"),
+                },
                 Ok(Message::Ping(payload)) => {
                     client.send_raw(Message::Pong(payload)).await;
                 }
@@ -851,6 +968,61 @@ fn rtc_candidate_from_signal(candidate: &SignalIceCandidate) -> RTCIceCandidateI
     }
 }
 
+fn build_sign_payload(desc: &SignalSessionDesc, device_id: &str) -> String {
+    let offer = desc
+        .offer
+        .as_ref()
+        .map(|value| value.sdp.as_str())
+        .unwrap_or("");
+    let answer = desc
+        .answer
+        .as_ref()
+        .map(|value| value.sdp.as_str())
+        .unwrap_or("");
+    let ice = serde_json::to_string(&desc.candidates).unwrap_or_default();
+    format!(
+        "{domain}\nsession:{session}\ndevice:{device}\noffer:{offer}\nanswer:{answer}\nice:{ice}",
+        domain = SIGNALING_DOMAIN,
+        session = desc.session_id,
+        device = device_id,
+        offer = offer,
+        answer = answer,
+        ice = ice
+    )
+}
+
+fn emit_peer_event(app: &AppHandle, desc: &SignalSessionDesc) {
+    if let Some(device_id) = desc.signer_device_id.as_ref() {
+        let fingerprint = desc
+            .signer_public_key
+            .as_ref()
+            .and_then(|hex| fingerprint_from_public_key_hex(hex));
+        let payload = PeerDiscoveredEvent {
+            session_id: desc.session_id.clone(),
+            device_id: device_id.clone(),
+            device_name: desc.signer_device_name.clone(),
+            fingerprint,
+            verified: desc.signature.is_some(),
+        };
+        if let Err(err) = app.emit("peer_discovered", payload) {
+            warn!("failed to emit peer_discovered: {err}");
+        }
+    }
+}
+
+fn fingerprint_from_public_key_hex(hex_str: &str) -> Option<String> {
+    let bytes = hex::decode(hex_str).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(bytes);
+    let formatted: Vec<String> = digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{:02X}", byte))
+        .collect();
+    Some(formatted.join(":"))
+}
 
 #[cfg(test)]
 mod tests {
@@ -862,7 +1034,7 @@ mod tests {
         use axum::Router;
         use tokio::net::TcpListener;
 
-        let router: Router = crate::signaling::signaling_router();
+        let router: Router = crate::signaling::signaling_router(SecurityConfig::default());
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind signaling listener");
