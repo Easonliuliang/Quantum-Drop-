@@ -1118,6 +1118,13 @@ export default function App(): JSX.Element {
     [updateChunkPolicyDraft],
   );
 
+  const refreshSettingsRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    refreshSettingsRef.current = () => {
+      void refreshSettings();
+    };
+  }, [refreshSettings]);
+
   const errorActionHandlers = useMemo<Record<ErrorActionKey, () => void>>(
     () => ({
       copyLogs: copyRecentLogs,
@@ -2695,8 +2702,11 @@ const handleManualReceive = useCallback(async () => {
   }, [progress?.phase, refreshRouteMetrics]);
 
   useEffect(() => {
-    void refreshSettings();
-  }, [refreshSettings]);
+    if (!isTauri) {
+      return;
+    }
+    refreshSettingsRef.current();
+  }, [isTauri]);
 
   useEffect(() => {
     if (settings) {
