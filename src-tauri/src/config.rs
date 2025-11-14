@@ -13,6 +13,9 @@ const MIN_CODE_TTL: i64 = 60;
 const DEFAULT_CODE_TTL: i64 = 900;
 const MIN_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CHUNK_BYTES: u64 = 16 * 1024 * 1024;
+const MIN_LAN_STREAMS: usize = 1;
+const MAX_LAN_STREAMS: usize = 4;
+const DEFAULT_LAN_STREAMS: usize = 3;
 
 fn default_true() -> bool {
     true
@@ -34,12 +37,18 @@ fn default_fps() -> u16 {
     60
 }
 
+pub fn default_lan_streams() -> usize {
+    DEFAULT_LAN_STREAMS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdaptiveChunkPolicy {
     pub enabled: bool,
     pub min_bytes: u64,
     pub max_bytes: u64,
+    #[serde(default = "default_lan_streams")]
+    pub lan_streams: usize,
 }
 
 impl Default for AdaptiveChunkPolicy {
@@ -48,6 +57,7 @@ impl Default for AdaptiveChunkPolicy {
             enabled: true,
             min_bytes: MIN_CHUNK_BYTES,
             max_bytes: MAX_CHUNK_BYTES,
+            lan_streams: DEFAULT_LAN_STREAMS,
         }
     }
 }
@@ -163,6 +173,10 @@ impl RuntimeSettings {
         }
         self.chunk_policy.min_bytes = min_bytes;
         self.chunk_policy.max_bytes = max_bytes;
+        self.chunk_policy.lan_streams = self
+            .chunk_policy
+            .lan_streams
+            .clamp(MIN_LAN_STREAMS, MAX_LAN_STREAMS);
         self
     }
 

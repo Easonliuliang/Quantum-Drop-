@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::{
     audit::AuditEntry,
+    config::default_lan_streams,
     license::{LicenseError, LicenseLimits, LicenseStatus},
     metrics::RouteMetricsSnapshot,
     store::TransferStatsRecord,
@@ -375,6 +376,8 @@ pub struct ChunkPolicyPayload {
     pub adaptive: bool,
     pub min_bytes: u64,
     pub max_bytes: u64,
+    #[serde(default = "default_lan_streams")]
+    pub lan_streams: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

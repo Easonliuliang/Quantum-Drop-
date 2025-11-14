@@ -1,7 +1,4 @@
-use std::path::PathBuf;
-
-#[cfg(test)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -70,7 +67,7 @@ impl IdentityStore {
         Ok(store)
     }
 
-    #[cfg(test)]
+    #[cfg_attr(not(any(test, doctest)), allow(dead_code))]
     pub fn with_path(path: impl AsRef<Path>) -> Result<Self> {
         let store = Self {
             db_path: path.as_ref().to_path_buf(),

@@ -158,11 +158,18 @@ pub fn derive_chunk_size(
     route: &RouteKind,
     observed_rtt: Duration,
     weak_network: bool,
+    historical_success: Option<f32>,
 ) -> u64 {
     if !policy.enabled {
         return DEFAULT_CHUNK_BYTES;
     }
-    if weak_network || matches!(route, RouteKind::Relay) {
+    let mut require_conservative = weak_network || matches!(route, RouteKind::Relay);
+    if let Some(rate) = historical_success {
+        if rate < 0.5 {
+            require_conservative = true;
+        }
+    }
+    if require_conservative {
         return align(policy.min_bytes.max(MIN_CHUNK_BYTES));
     }
 
@@ -174,6 +181,11 @@ pub fn derive_chunk_size(
     } else {
         DEFAULT_CHUNK_BYTES
     };
+    if let Some(rate) = historical_success {
+        if rate < 0.8 {
+            suggestion = suggestion.min(8 * 1024 * 1024);
+        }
+    }
     suggestion = suggestion.clamp(policy.min_bytes, policy.max_bytes);
     align(suggestion)
 }
@@ -187,6 +199,7 @@ fn align(value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::default_lan_streams;
     use crate::transport::{
         adapter::{MockLocalAdapter, TransportAdapter},
         Frame, SessionDesc,
@@ -209,17 +222,39 @@ mod tests {
             enabled: true,
             min_bytes: 2 * 1024 * 1024,
             max_bytes: 16 * 1024 * 1024,
+            lan_streams: default_lan_streams(),
         };
-        let size_fast =
-            derive_chunk_size(&policy, &RouteKind::Lan, Duration::from_millis(20), false);
+        let size_fast = derive_chunk_size(
+            &policy,
+            &RouteKind::Lan,
+            Duration::from_millis(20),
+            false,
+            Some(0.95),
+        );
         assert_eq!(size_fast, 4 * 1024 * 1024);
-        let size_medium =
-            derive_chunk_size(&policy, &RouteKind::Lan, Duration::from_millis(120), false);
+        let size_medium = derive_chunk_size(
+            &policy,
+            &RouteKind::Lan,
+            Duration::from_millis(120),
+            false,
+            Some(0.7),
+        );
         assert_eq!(size_medium, 8 * 1024 * 1024);
-        let size_slow =
-            derive_chunk_size(&policy, &RouteKind::Lan, Duration::from_millis(220), false);
+        let size_slow = derive_chunk_size(
+            &policy,
+            &RouteKind::Lan,
+            Duration::from_millis(220),
+            false,
+            Some(0.9),
+        );
         assert_eq!(size_slow, 16 * 1024 * 1024);
-        let weak = derive_chunk_size(&policy, &RouteKind::Relay, Duration::from_millis(90), true);
+        let weak = derive_chunk_size(
+            &policy,
+            &RouteKind::Relay,
+            Duration::from_millis(90),
+            true,
+            None,
+        );
         assert_eq!(weak, 2 * 1024 * 1024);
     }
 
@@ -236,6 +271,24 @@ mod tests {
         assert_eq!(loaded.received_chunks, catalog.received_chunks);
         store.remove("task").expect("remove");
         assert!(store.load("task").expect("load after remove").is_none());
+    }
+
+    #[test]
+    fn chunk_size_reduces_when_success_rate_low() {
+        let policy = AdaptiveChunkPolicy {
+            enabled: true,
+            min_bytes: 2 * 1024 * 1024,
+            max_bytes: 16 * 1024 * 1024,
+            lan_streams: default_lan_streams(),
+        };
+        let value = derive_chunk_size(
+            &policy,
+            &RouteKind::Lan,
+            Duration::from_millis(40),
+            false,
+            Some(0.4),
+        );
+        assert_eq!(value, 2 * 1024 * 1024);
     }
 
     #[tokio::test]

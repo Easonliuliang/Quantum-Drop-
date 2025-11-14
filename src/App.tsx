@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { getPublicKey, sign as signEd25519, utils as ed25519Utils, etc as ed25519Etc } from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha2.js";
 import { listen as listenTauri } from "@tauri-apps/api/event";
@@ -12,6 +12,8 @@ import {
   clearLastIdentityId,
 } from "./lib/identityVault";
 import { UpgradePrompt } from "./components/UpgradePrompt";
+import { LocaleSwitch } from "./components/LocaleSwitch";
+import { PanelBoundary } from "./components/ErrorBoundary/PanelBoundary";
 import {
   FRIENDLY_ERROR_MESSAGES,
   LICENSE_REASON_MAP,
@@ -20,6 +22,7 @@ import {
   UPGRADE_URL,
   type UpgradeReason,
 } from "./lib/upgrade";
+import { useI18n } from "./lib/i18n";
 
 type SelectedFile = {
   name: string;
@@ -154,6 +157,7 @@ const extractReasonToken = (message?: string) => {
 };
 
 const DOCS_URL = "https://quantumdrop.com/docs/troubleshooting";
+const ONE_MB = 1024 * 1024;
 
 type ErrorActionKey =
   | "copyLogs"
@@ -162,6 +166,7 @@ type ErrorActionKey =
   | "refreshAudit"
   | "refreshRoutes"
   | "refreshSecurity"
+  | "refreshSettings"
   | "refreshLicense"
   | "openPricing";
 
@@ -172,6 +177,7 @@ const ERROR_ACTION_LABELS: Record<ErrorActionKey, string> = {
   refreshAudit: "刷新审计日志",
   refreshRoutes: "刷新路由统计",
   refreshSecurity: "刷新安全策略",
+  refreshSettings: "刷新传输设置",
   refreshLicense: "刷新权益信息",
   openPricing: "升级到 Pro",
 };
@@ -262,6 +268,30 @@ type SecurityConfigDto = {
   enforceSignatureVerification: boolean;
   disconnectOnVerificationFail: boolean;
   enableAuditLog: boolean;
+};
+
+type ChunkPolicySettings = {
+  adaptive: boolean;
+  minBytes: number;
+  maxBytes: number;
+  lanStreams: number;
+};
+
+type SettingsPayload = {
+  preferredRoutes: string[];
+  codeExpireSec: number;
+  relayEnabled: boolean;
+  chunkPolicy: ChunkPolicySettings;
+  quantumMode: boolean;
+  minimalQuantumUi: boolean;
+  quantumIntensity: number;
+  quantumSpeed: number;
+  animationsEnabled: boolean;
+  audioEnabled: boolean;
+  enable3dQuantum: boolean;
+  quantum3dQuality: string;
+  quantum3dFps: number;
+  wormholeMode: boolean;
 };
 
 type IdentityDevicesEventPayload = {
@@ -558,6 +588,7 @@ const formatSize = (bytes: number) => {
 };
 
 export default function App(): JSX.Element {
+  const { t } = useI18n();
   const [isTauri, setIsTauri] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [files, setFiles] = useState<SelectedFile[]>([]);
@@ -578,6 +609,10 @@ export default function App(): JSX.Element {
   const [isActivatingLicense, setIsActivatingLicense] = useState(false);
   const [securityConfig, setSecurityConfig] = useState<SecurityConfigDto | null>(null);
   const [isSecurityLoading, setIsSecurityLoading] = useState(false);
+  const [settings, setSettings] = useState<SettingsPayload | null>(null);
+  const [isSettingsLoading, setIsSettingsLoading] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [chunkPolicyDraft, setChunkPolicyDraft] = useState<ChunkPolicySettings | null>(null);
   const [peerPrompt, setPeerPrompt] = useState<PeerDiscoveredPayload | null>(null);
   const [peerFingerprintInput, setPeerFingerprintInput] = useState("");
   const [trustedPeers, setTrustedPeers] = useState<Record<string, PeerDiscoveredPayload>>({});
@@ -617,6 +652,10 @@ export default function App(): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [absorbing, setAbsorbing] = useState(false);
   const beginTransferRef = useRef<(pathsOverride?: string[]) => void>();
+  const chunkMinMb = chunkPolicyDraft ? Math.round(chunkPolicyDraft.minBytes / ONE_MB) : 2;
+  const chunkMaxMb = chunkPolicyDraft ? Math.round(chunkPolicyDraft.maxBytes / ONE_MB) : 2;
+  const lanStreamsDraft = chunkPolicyDraft?.lanStreams ?? 1;
+  const chunkSettingsDisabled = !chunkPolicyDraft || isSettingsLoading || isSavingSettings;
   const heartbeatTimerRef = useRef<number | null>(null);
   const heartbeatCapabilities = useMemo(() => ["ui:minimal-panel"], []);
   const deviceStatusOptions = useMemo(() => ["active", "standby", "inactive"], []);
@@ -980,6 +1019,105 @@ export default function App(): JSX.Element {
     }
   }, [isTauri, appendLog, showError, setInfo]);
 
+  const refreshSettings = useCallback(async () => {
+    if (!isTauri) {
+      setInfo("传输设置仅在 Tauri 桌面端可调整。");
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      console.warn("refreshSettings: invoke unavailable", err);
+      setInfo("Tauri invoke API 不可用，无法获取传输设置。");
+      return;
+    }
+    setIsSettingsLoading(true);
+    try {
+      const payload = (await invoke("load_settings", {})) as SettingsPayload;
+      setSettings(payload);
+      setChunkPolicyDraft(payload.chunkPolicy);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      showError(message, ["refreshStats", "copyLogs"]);
+      appendLog(`⚠️ 读取传输设置失败：${message}`);
+    } finally {
+      setIsSettingsLoading(false);
+    }
+  }, [appendLog, isTauri, setInfo, showError]);
+
+  const saveChunkPolicy = useCallback(async () => {
+    if (!settings || !chunkPolicyDraft) {
+      return;
+    }
+    let invoke: TauriInvokeFn;
+    try {
+      invoke = resolveTauriInvoke();
+    } catch (err) {
+      showError("Tauri invoke API 不可用，无法保存设置。", ["refreshStats", "copyLogs"]);
+      return;
+    }
+    const minMb = Math.max(2, Math.min(16, Math.round(chunkPolicyDraft.minBytes / ONE_MB)));
+    const maxMb = Math.max(minMb, Math.min(16, Math.round(chunkPolicyDraft.maxBytes / ONE_MB)));
+    const payload: SettingsPayload = {
+      ...settings,
+      chunkPolicy: {
+        adaptive: chunkPolicyDraft.adaptive,
+        minBytes: minMb * ONE_MB,
+        maxBytes: maxMb * ONE_MB,
+        lanStreams: Math.min(4, Math.max(1, chunkPolicyDraft.lanStreams)),
+      },
+    };
+    setIsSavingSettings(true);
+    try {
+      const response = (await invoke("update_settings", { payload })) as SettingsPayload;
+      setSettings(response);
+      setChunkPolicyDraft(response.chunkPolicy);
+      setInfo("传输设置已保存。");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      showError(message, ["refreshStats", "copyLogs"]);
+      appendLog(`⚠️ 保存传输设置失败：${message}`);
+    } finally {
+      setIsSavingSettings(false);
+    }
+  }, [chunkPolicyDraft, settings, showError, appendLog, setInfo]);
+
+  const updateChunkPolicyDraft = useCallback((patch: Partial<ChunkPolicySettings>) => {
+    setChunkPolicyDraft((prev) => (prev ? { ...prev, ...patch } : prev));
+  }, []);
+
+  const handleChunkAdaptiveChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      updateChunkPolicyDraft({ adaptive: event.target.checked });
+    },
+    [updateChunkPolicyDraft],
+  );
+
+  const handleChunkMinChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const value = Number(event.target.value) || 0;
+      updateChunkPolicyDraft({ minBytes: Math.max(2, value) * ONE_MB });
+    },
+    [updateChunkPolicyDraft],
+  );
+
+  const handleChunkMaxChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const value = Number(event.target.value) || 0;
+      updateChunkPolicyDraft({ maxBytes: Math.max(2, value) * ONE_MB });
+    },
+    [updateChunkPolicyDraft],
+  );
+
+  const handleLanStreamsChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      const value = Number(event.target.value) || 1;
+      updateChunkPolicyDraft({ lanStreams: value });
+    },
+    [updateChunkPolicyDraft],
+  );
+
   const errorActionHandlers = useMemo<Record<ErrorActionKey, () => void>>(
     () => ({
       copyLogs: copyRecentLogs,
@@ -996,6 +1134,9 @@ export default function App(): JSX.Element {
       refreshSecurity: () => {
         void refreshSecurityConfig();
       },
+      refreshSettings: () => {
+        void refreshSettings();
+      },
       refreshLicense: () => {
         void refreshLicenseStatus();
       },
@@ -1010,6 +1151,7 @@ export default function App(): JSX.Element {
       refreshAuditLogs,
       refreshRouteMetrics,
       refreshSecurityConfig,
+      refreshSettings,
       refreshLicenseStatus,
       handleUpgradeCTA,
     ]
@@ -1231,7 +1373,7 @@ export default function App(): JSX.Element {
         payload: {
           identityId,
           publicKey: publicKeyHex,
-          label: "Quantum Drop · 量子快传",
+          label: t("app.title", "Quantum Drop · 量子快传"),
         },
       })) as IdentityResponseDto;
       const resolvedId = response.identityId ?? response.identity_id ?? identityId;
@@ -1256,7 +1398,7 @@ export default function App(): JSX.Element {
     } finally {
       setIsRegisteringIdentity(false);
     }
-  }, [appendLog, refreshEntitlement, rememberIdentity, rememberLastIdentityId, clearError, showError]);
+  }, [appendLog, refreshEntitlement, rememberIdentity, rememberLastIdentityId, clearError, showError, t]);
 
   const registerDevice = useCallback(async () => {
     let invoke: TauriInvokeFn;
@@ -2552,6 +2694,16 @@ const handleManualReceive = useCallback(async () => {
     }
   }, [progress?.phase, refreshRouteMetrics]);
 
+  useEffect(() => {
+    void refreshSettings();
+  }, [refreshSettings]);
+
+  useEffect(() => {
+    if (settings) {
+      setChunkPolicyDraft(settings.chunkPolicy);
+    }
+  }, [settings]);
+
   return (
     <div className="app-surface">
       <div
@@ -2567,7 +2719,7 @@ const handleManualReceive = useCallback(async () => {
             handleBrowse();
           }
         }}
-        aria-label="拖拽或选择文件上传"
+        aria-label={t("dropzone.label", "拖拽或选择文件上传")}
       >
         <div className="rings">
           <span className="ring ring-outer" />
@@ -2589,10 +2741,13 @@ const handleManualReceive = useCallback(async () => {
           </div>
         </div>
         <div className="cta">
-          <h1>Quantum Drop · 量子快传</h1>
-          <p>轻松拖拽，极速直达。</p>
+          <div className="cta-header">
+            <h1>{t("app.title", "Quantum Drop · 量子快传")}</h1>
+            <LocaleSwitch />
+          </div>
+          <p>{t("hero.tagline", "轻松拖拽，极速直达。")}</p>
           <button className="browse" onClick={handleBrowse} type="button">
-            选择文件
+            {t("hero.selectFiles", "选择文件")}
           </button>
         </div>
         <input
@@ -2605,7 +2760,7 @@ const handleManualReceive = useCallback(async () => {
       </div>
       {files.length > 0 && (
         <div className="file-panel" aria-live="polite">
-          <h2>已准备传输的文件</h2>
+          <h2>{t("filePanel.title", "已准备传输的文件")}</h2>
           <ul>
             {files.map((file) => (
               <li key={`${file.name}-${file.path ?? file.size ?? 0}`}>
@@ -2624,21 +2779,23 @@ const handleManualReceive = useCallback(async () => {
                 onClick={() => beginTransferRef.current?.()}
                 disabled={pendingPaths.length === 0 || isSending}
               >
-                {isSending ? "启动中…" : "启动传输"}
+                {isSending
+                  ? t("filePanel.starting", "启动中…")
+                  : t("filePanel.start", "启动传输")}
               </button>
             </div>
           )}
         </div>
       )}
       <div className="receive-panel" aria-live="polite">
-        <h3>接收（同网模式）</h3>
+        <h3>{t("receive.heading", "接收（同网模式）")}</h3>
         <div className="mode-tabs">
           <button
             type="button"
             className={receiveMode === "code" ? "active" : ""}
             onClick={() => setReceiveMode("code")}
           >
-            配对码
+            {t("receive.tab.code", "配对码")}
           </button>
           <button
             type="button"
@@ -2648,23 +2805,23 @@ const handleManualReceive = useCallback(async () => {
               void scanSenders();
             }}
           >
-            扫描
+            {t("receive.tab.scan", "扫描")}
           </button>
           <button
             type="button"
             className={receiveMode === "manual" ? "active" : ""}
             onClick={() => setReceiveMode("manual")}
           >
-            手动
+            {t("receive.tab.manual", "手动")}
           </button>
         </div>
 
         {receiveMode === "code" && (
           <div className="code-input-mode">
-            <p>输入 6 位配对码，应用会通过 mDNS 自动发现发送方，无需手动填写 IP。</p>
+            <p>{t("receive.instructions", "输入 6 位配对码，应用会自动发现发送方。")}</p>
             <div className="receive-grid">
               <label>
-                <span>配对码</span>
+                <span>{t("receive.tab.code", "配对码")}</span>
                 <input
                   type="text"
                   value={receiveCode}
@@ -3211,22 +3368,30 @@ const handleManualReceive = useCallback(async () => {
           )}
           {identity && (
             <div className="insights-grid">
-              <section className="stats-panel" aria-label="传输统计">
+              <PanelBoundary
+                fallbackKey="panel.statsError"
+                fallbackDefault="无法加载传输统计，请刷新重试。"
+                onRetry={() => {
+                  void refreshTransferStats();
+                  void refreshLicenseStatus();
+                }}
+              >
+                <section className="stats-panel" aria-label={t("panel.stats", "传输统计")}>
                 <div className="panel-header">
-                  <h4>传输统计</h4>
+                  <h4>{t("panel.stats", "传输统计")}</h4>
                   <button
                     type="button"
                     className="secondary"
                     onClick={() => void refreshTransferStats()}
                     disabled={isStatsLoading}
                   >
-                    {isStatsLoading ? "更新中…" : "刷新"}
+                    {isStatsLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
                   </button>
                 </div>
                 <div className="license-summary">
                   <div className="license-header">
                     <div>
-                      <span className="stat-label">当前权益</span>
+                      <span className="stat-label">{t("license.current", "当前权益")}</span>
                       <strong className="stat-value">
                         {licenseStatus ? licenseStatus.tier.toUpperCase() : "—"}
                       </strong>
@@ -3237,14 +3402,16 @@ const handleManualReceive = useCallback(async () => {
                       onClick={() => void refreshLicenseStatus()}
                       disabled={isLicenseLoading}
                     >
-                      {isLicenseLoading ? "同步权益…" : "刷新权益"}
+                      {isLicenseLoading
+                        ? t("actions.syncingLicense", "同步权益…")
+                        : t("actions.syncLicense", "刷新权益")}
                     </button>
                   </div>
                   {licenseStatus ? (
                     <>
                       {typeof licenseStatus.p2pQuota === "number" && (
                         <div className="quota-section">
-                          <span className="stat-label">跨网配额</span>
+                          <span className="stat-label">{t("license.quota", "跨网配额")}</span>
                           <div className="quota-bar">
                             <span
                               className="quota-progress"
@@ -3257,7 +3424,10 @@ const handleManualReceive = useCallback(async () => {
                             />
                           </div>
                           <span className="quota-text">
-                            已用 {licenseStatus.p2pUsed} / {licenseStatus.p2pQuota} 次
+                            {t("license.quotaUsage", "已用 {used} / {quota} 次", {
+                              used: licenseStatus.p2pUsed,
+                              quota: licenseStatus.p2pQuota ?? 0,
+                            })}
                           </span>
                         </div>
                       )}
@@ -3286,7 +3456,7 @@ const handleManualReceive = useCallback(async () => {
                       </div>
                     </>
                   ) : (
-                    <p className="stats-empty">暂无权益信息，请刷新后重试。</p>
+                    <p className="stats-empty">{t("license.empty", "暂无权益信息，请刷新后重试。")}</p>
                   )}
                   <form
                     className="license-activate"
@@ -3297,7 +3467,7 @@ const handleManualReceive = useCallback(async () => {
                   >
                     <input
                       type="text"
-                      placeholder="输入 License Key，例如 QD-PRO-XXXX-YYYY"
+                      placeholder={t("license.placeholder", "输入 License Key，例如 QD-PRO-XXXX-YYYY")}
                       value={licenseInput}
                       onChange={(event) => setLicenseInput(event.target.value)}
                       disabled={isActivatingLicense}
@@ -3367,19 +3537,27 @@ const handleManualReceive = useCallback(async () => {
                     </div>
                   </>
                 ) : (
-                  <p className="stats-empty">暂无传输记录。</p>
+                  <p className="stats-empty">{t("stats.emptyTransfers", "暂无传输记录。")}</p>
                 )}
-              </section>
-              <section className="audit-panel" aria-label="操作审计">
+                </section>
+              </PanelBoundary>
+              <PanelBoundary
+                fallbackKey="panel.auditError"
+                fallbackDefault="无法加载审计日志，请刷新重试。"
+                onRetry={() => void refreshAuditLogs()}
+              >
+                <section className="audit-panel" aria-label={t("panel.audit", "操作审计")}>
                 <div className="panel-header">
-                  <h4>操作审计</h4>
+                  <h4>{t("panel.audit", "操作审计")}</h4>
                   <button
                     type="button"
                     className="secondary"
                     onClick={() => void refreshAuditLogs()}
                     disabled={isAuditLoading}
                   >
-                    {isAuditLoading ? "同步中…" : "刷新"}
+                    {isAuditLoading
+                      ? t("actions.syncingAudit", "同步中…")
+                      : t("actions.syncAudit", "刷新")}
                   </button>
                 </div>
                 {auditLogs.length > 0 ? (
@@ -3405,72 +3583,186 @@ const handleManualReceive = useCallback(async () => {
                     })}
                   </ul>
                 ) : (
-                  <p className="stats-empty">暂无审计记录。</p>
+                  <p className="stats-empty">{t("audit.empty", "暂无审计记录。")}</p>
                 )}
-              </section>
-              <section className="security-panel" aria-label="安全策略">
-                <div className="panel-header">
-                  <h4>安全策略</h4>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => void refreshSecurityConfig()}
-                    disabled={isSecurityLoading}
-                  >
-                    {isSecurityLoading ? "同步中…" : "刷新"}
-                  </button>
-                </div>
-                {securityConfig ? (
-                  <ul className="security-list">
-                    <li data-enabled={securityConfig.enforceSignatureVerification}>
-                      <strong>签名校验</strong>
-                      <span>{securityConfig.enforceSignatureVerification ? "已启用（推荐）" : "未启用"}</span>
-                    </li>
-                    <li data-enabled={securityConfig.disconnectOnVerificationFail}>
-                      <strong>验签失败断开</strong>
-                      <span>
-                        {securityConfig.disconnectOnVerificationFail
-                          ? "失败即断开"
-                          : "失败仅警告"}
-                      </span>
-                    </li>
-                    <li data-enabled={securityConfig.enableAuditLog}>
-                      <strong>审计日志</strong>
-                      <span>{securityConfig.enableAuditLog ? "记录到本地 SQLite" : "未记录"}</span>
-                    </li>
-                  </ul>
-                ) : (
-                  <p className="stats-empty">无法读取安全策略，请刷新或检查配置。</p>
-                )}
-              </section>
-            </div>
-          )}
-          {Object.keys(trustedPeers).length > 0 && (
-            <div className="trusted-peers-panel">
-              <div className="panel-header">
-                <h4>已信任设备</h4>
-                <button type="button" className="secondary" onClick={clearTrustedPeers}>
-                  清空
-                </button>
-              </div>
-              <ul>
-                {Object.values(trustedPeers).map((peer) => (
-                  <li key={`${peer.sessionId}-${peer.deviceId}`}>
-                    <strong>{peer.deviceName ?? peer.deviceId}</strong>
-                    <span className="peer-fingerprint">{peer.fingerprint ?? "未知指纹"}</span>
-                    <span className="peer-status">{peer.verified ? "签名通过" : "手动信任"}</span>
+                </section>
+              </PanelBoundary>
+              <PanelBoundary
+                fallbackKey="panel.securityError"
+                fallbackDefault="无法加载安全策略，请刷新重试。"
+                onRetry={() => void refreshSecurityConfig()}
+              >
+                <section className="security-panel" aria-label={t("panel.security", "安全策略")}>
+                  <div className="panel-header">
+                    <h4>{t("panel.security", "安全策略")}</h4>
                     <button
                       type="button"
-                      className="plain"
-                      onClick={() => removeTrustedPeer(peer.deviceId)}
+                      className="secondary"
+                      onClick={() => void refreshSecurityConfig()}
+                      disabled={isSecurityLoading}
                     >
-                      移除
+                      {isSecurityLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
                     </button>
-                  </li>
-                ))}
-              </ul>
+                  </div>
+                  {securityConfig ? (
+                    <ul className="security-list">
+                      <li data-enabled={securityConfig.enforceSignatureVerification}>
+                        <strong>{t("settings.security.signature", "签名校验")}</strong>
+                        <span>
+                          {securityConfig.enforceSignatureVerification
+                            ? t("settings.security.enabledRecommended", "已启用（推荐）")
+                            : t("settings.security.disabled", "未启用")}
+                        </span>
+                      </li>
+                      <li data-enabled={securityConfig.disconnectOnVerificationFail}>
+                        <strong>{t("settings.security.disconnect", "验签失败断开")}</strong>
+                        <span>
+                          {securityConfig.disconnectOnVerificationFail
+                            ? t("settings.security.disconnect.strict", "失败即断开")
+                            : t("settings.security.disconnect.warn", "失败仅警告")}
+                        </span>
+                      </li>
+                      <li data-enabled={securityConfig.enableAuditLog}>
+                        <strong>{t("settings.security.audit", "审计日志")}</strong>
+                        <span>
+                          {securityConfig.enableAuditLog
+                            ? t("settings.security.audit.enabled", "记录到本地 SQLite")
+                            : t("settings.security.audit.disabled", "未记录")}
+                        </span>
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="stats-empty">{t("settings.security.empty", "无法读取安全策略，请刷新或检查配置。")}</p>
+                  )}
+                </section>
+              </PanelBoundary>
+              <PanelBoundary
+                fallbackKey="panel.settingsError"
+                fallbackDefault="无法加载传输设置，请刷新重试。"
+                onRetry={() => void refreshSettings()}
+              >
+                <section className="settings-panel" aria-label={t("panel.settings", "传输设置")}>
+                  <div className="panel-header">
+                    <h4>{t("panel.settings", "传输设置")}</h4>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => void refreshSettings()}
+                      disabled={isSettingsLoading}
+                    >
+                      {isSettingsLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
+                    </button>
+                  </div>
+                  {chunkPolicyDraft ? (
+                    <form
+                      className="settings-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void saveChunkPolicy();
+                      }}
+                    >
+                      <div className="form-grid">
+                        <label className="field-group">
+                          <span className="field-label">{t("settings.chunk.adaptive", "自适应 Chunk")}</span>
+                          <span className="field-hint">{t("settings.chunk.help", "根据网络情况自动调整 Chunk")}</span>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={chunkPolicyDraft.adaptive}
+                              onChange={handleChunkAdaptiveChange}
+                              disabled={chunkSettingsDisabled}
+                            />
+                            <span>{chunkPolicyDraft.adaptive ? "已开启" : "已关闭"}</span>
+                          </label>
+                        </label>
+                        <label className="field-group">
+                          <span className="field-label">{t("settings.chunk.min", "最小 Chunk (MiB)")}</span>
+                          <input
+                            type="number"
+                            min={2}
+                            max={16}
+                            value={chunkMinMb}
+                            onChange={handleChunkMinChange}
+                            disabled={chunkSettingsDisabled}
+                          />
+                        </label>
+                        <label className="field-group">
+                          <span className="field-label">{t("settings.chunk.max", "最大 Chunk (MiB)")}</span>
+                          <input
+                            type="number"
+                            min={chunkMinMb}
+                            max={16}
+                            value={chunkMaxMb}
+                            onChange={handleChunkMaxChange}
+                            disabled={chunkSettingsDisabled}
+                          />
+                        </label>
+                        <label className="field-group">
+                          <span className="field-label">{t("settings.chunk.streams", "LAN 并发流数")}</span>
+                          <select
+                            value={lanStreamsDraft}
+                            onChange={handleLanStreamsChange}
+                            disabled={chunkSettingsDisabled}
+                          >
+                            {[1, 2, 3, 4].map((count) => (
+                              <option key={count} value={count}>
+                                {count}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="actions-row">
+                        <button type="submit" className="primary" disabled={chunkSettingsDisabled || isSavingSettings}>
+                          {isSavingSettings ? t("settings.chunk.saving", "保存中…") : t("settings.chunk.save", "保存设置")}
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <p className="stats-empty">{t("settings.chunk.empty", "暂无设置，请刷新或稍后重试。")}</p>
+                  )}
+                </section>
+              </PanelBoundary>
             </div>
           )}
+          <PanelBoundary
+            fallbackKey="panel.trustedError"
+            fallbackDefault="无法读取信任列表，请刷新。"
+            onRetry={() => void refreshDevices()}
+          >
+            {Object.keys(trustedPeers).length > 0 && (
+              <div className="trusted-peers-panel">
+                <div className="panel-header">
+                  <h4>{t("panel.trusted", "已信任设备")}</h4>
+                  <button type="button" className="secondary" onClick={clearTrustedPeers}>
+                    {t("trusted.clear", "清空")}
+                  </button>
+                </div>
+                <ul>
+                  {Object.values(trustedPeers).map((peer) => (
+                    <li key={`${peer.sessionId}-${peer.deviceId}`}>
+                      <strong>{peer.deviceName ?? peer.deviceId}</strong>
+                      <span className="peer-fingerprint">
+                        {peer.fingerprint ?? t("trusted.unknownFingerprint", "未知指纹")}
+                      </span>
+                      <span className="peer-status">
+                        {peer.verified
+                          ? t("trusted.status.verified", "签名通过")
+                          : t("trusted.status.manual", "手动信任")}
+                      </span>
+                      <button
+                        type="button"
+                        className="plain"
+                        onClick={() => removeTrustedPeer(peer.deviceId)}
+                      >
+                        {t("trusted.remove", "移除")}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </PanelBoundary>
           {info && <div className="toast toast-success">{info}</div>}
           {error && (
             <div className="toast toast-error">

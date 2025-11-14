@@ -40,17 +40,8 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      - name: Lint (ESLint)
-        run: npm run lint
-
-      - name: Test (Vitest)
-        run: npm run test
-
-      - name: Check formatting (Rust)
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-
-      - name: Lint (Clippy)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - name: Check (Lint + Tests)
+        run: npm run check
 
       - name: Test (Rust)
         run: cargo test --manifest-path src-tauri/Cargo.toml

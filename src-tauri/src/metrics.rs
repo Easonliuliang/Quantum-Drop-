@@ -92,4 +92,18 @@ impl RouteMetricsRegistry {
         items.sort_by(|a, b| a.route.cmp(&b.route));
         items
     }
+
+    pub fn success_rate(&self, route: &RouteKind) -> Option<f32> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|map| map.get(route).cloned())
+            .and_then(|stats| {
+                if stats.attempts > 0 {
+                    Some(stats.successes as f32 / stats.attempts as f32)
+                } else {
+                    None
+                }
+            })
+    }
 }

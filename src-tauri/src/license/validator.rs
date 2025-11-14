@@ -277,3 +277,226 @@ impl From<LicenseError> for anyhow::Error {
         anyhow::anyhow!("{}: {}", value.code, value.message)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::IdentityStore;
+    use rand::{rngs::OsRng, RngCore};
+    use serde_json::json;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock")
+    }
+
+    #[test]
+    fn activate_license_rejects_identity_mismatch() {
+        let _env = env_guard();
+        let temp = tempdir().expect("temp dir");
+        let store = IdentityStore::with_path(temp.path().join("identities.sqlite")).expect("store");
+        store
+            .register_identity("id-valid", &random_hex(32), Some("Valid"))
+            .expect("register identity");
+        let _allow_guard = EnvOverride::set("QD_LICENSE_ALLOW_UNSIGNED", "1".into());
+        let _key_guard = EnvOverride::set("QD_LICENSE_PUBKEY", "".into());
+        let manager = LicenseManager::new(&store).expect("manager");
+        let payload = json!({
+            "key": "QD-PRO-TEST-0001",
+            "tier": LicenseTier::Pro,
+            "identityId": "other-id",
+            "issuedAt": 1_700_000_000_000i64,
+            "expiresAt": 1_800_000_000_000i64,
+            "limits": LicenseLimits::pro_defaults(),
+        });
+        let blob = serde_json::to_string(&payload).expect("blob");
+        let err = manager
+            .activate_license("id-valid", &blob)
+            .expect_err("should reject mismatched identity");
+        assert_eq!(err.code, "LICENSE_ID_MISMATCH");
+    }
+
+    #[test]
+    fn activate_license_requires_signature_when_verification_enabled() {
+        let _env = env_guard();
+        let temp = tempdir().expect("temp dir");
+        let store = IdentityStore::with_path(temp.path().join("identities.sqlite")).expect("store");
+        store
+            .register_identity("id-verify", &random_hex(32), Some("Verify"))
+            .expect("register identity");
+        let mut rng = OsRng;
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rng);
+        let _pubkey_guard = EnvOverride::set(
+            "QD_LICENSE_PUBKEY",
+            hex::encode(signing_key.verifying_key().to_bytes()),
+        );
+        let _allow_guard = EnvOverride::set("QD_LICENSE_ALLOW_UNSIGNED", "0".into());
+        let manager = LicenseManager::new(&store).expect("manager");
+        let payload = json!({
+            "key": "QD-PRO-TEST-0002",
+            "tier": LicenseTier::Pro,
+            "identityId": "id-verify",
+            "issuedAt": 1_700_000_000_000i64,
+            "expiresAt": 1_800_000_000_000i64,
+            "limits": LicenseLimits::pro_defaults(),
+        });
+        let blob = serde_json::to_string(&payload).expect("blob");
+        let err = manager
+            .activate_license("id-verify", &blob)
+            .expect_err("missing signature should be rejected");
+        assert_eq!(err.code, "LICENSE_SIGNATURE_MISSING");
+    }
+
+    fn random_hex(bytes: usize) -> String {
+        let mut rng = rand::thread_rng();
+        let mut buf = vec![0u8; bytes];
+        rng.fill_bytes(&mut buf);
+        hex::encode(buf)
+    }
+
+    struct EnvOverride {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvOverride {
+        fn set(key: &'static str, value: String) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvOverride {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.previous {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn activate_license_allows_unsigned_when_enabled() {
+        let _env = env_guard();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = IdentityStore::with_path(temp.path().join("identities.sqlite")).expect("store");
+        store
+            .register_identity("id-unsigned", &random_hex(32), Some("Unsigned"))
+            .expect("identity");
+        let _allow_guard = EnvOverride::set("QD_LICENSE_ALLOW_UNSIGNED", "1".into());
+        std::env::remove_var("QD_LICENSE_PUBKEY");
+        let manager = LicenseManager::new(&store).expect("manager");
+        let payload = json!({
+            "key": "QD-PRO-UNSIGNED",
+            "tier": LicenseTier::Pro,
+            "identityId": "id-unsigned",
+            "issuedAt": 1_700_000_000_000i64,
+            "expiresAt": 1_800_000_000_000i64,
+            "limits": LicenseLimits::pro_defaults()
+        });
+        let blob = serde_json::to_string(&payload).expect("blob");
+        let license = manager
+            .activate_license("id-unsigned", &blob)
+            .expect("activation");
+        assert_eq!(license.identity_id, "id-unsigned");
+    }
+
+    #[test]
+    fn enforce_device_limit_blocks_when_count_reached() {
+        let _env = env_guard();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = IdentityStore::with_path(temp.path().join("identities.sqlite")).expect("store");
+        store
+            .register_identity("id-devices", &random_hex(32), Some("Devices"))
+            .expect("identity");
+        store
+            .register_device(
+                "id-devices",
+                "device-a",
+                &random_hex(32),
+                Some("primary"),
+                "active",
+            )
+            .expect("device");
+        let manager = LicenseManager::new(&store).expect("manager");
+        let mut limits = LicenseLimits::pro_defaults();
+        limits.max_devices = Some(1);
+        let license = License {
+            key: Some("QD-PRO-DEV".into()),
+            tier: LicenseTier::Pro,
+            identity_id: "id-devices".into(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            limits,
+            signature: None,
+        };
+        let err = manager
+            .enforce_device_limit(&license)
+            .expect_err("limit exceeded");
+        assert_eq!(err.code, "DEVICE_LIMIT_EXCEEDED");
+    }
+
+    #[test]
+    fn enforce_file_size_rejects_large_payload() {
+        let _env = env_guard();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = IdentityStore::with_path(temp.path().join("identities.sqlite")).expect("store");
+        store
+            .register_identity("id-files", &random_hex(32), Some("Files"))
+            .expect("identity");
+        let manager = LicenseManager::new(&store).expect("manager");
+        let mut limits = LicenseLimits::pro_defaults();
+        limits.max_file_size_mb = Some(512);
+        let license = License {
+            key: Some("QD-PRO-FILES".into()),
+            tier: LicenseTier::Pro,
+            identity_id: "id-files".into(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            limits,
+            signature: None,
+        };
+        let err = manager
+            .enforce_file_size(&license, 600 * 1024 * 1024)
+            .expect_err("file too large");
+        assert_eq!(err.code, "FILE_SIZE_EXCEEDED");
+    }
+
+    #[test]
+    fn ensure_p2p_quota_errors_after_usage() {
+        let _env = env_guard();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = IdentityStore::with_path(temp.path().join("identities.sqlite")).expect("store");
+        store
+            .register_identity("id-quota", &random_hex(32), Some("Quota"))
+            .expect("identity");
+        let manager = LicenseManager::new(&store).expect("manager");
+        let mut limits = LicenseLimits::pro_defaults();
+        limits.p2p_monthly_quota = Some(2);
+        let license = License {
+            key: Some("QD-PRO-P2P".into()),
+            tier: LicenseTier::Pro,
+            identity_id: "id-quota".into(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            limits,
+            signature: None,
+        };
+        let usage = manager.ensure_p2p_quota(&license).expect("initial quota");
+        manager.record_p2p_usage(&usage).expect("record first");
+        let usage = manager.ensure_p2p_quota(&license).expect("second quota");
+        manager.record_p2p_usage(&usage).expect("record second");
+        let err = manager
+            .ensure_p2p_quota(&license)
+            .expect_err("quota exceeded");
+        assert_eq!(err.code, "P2P_QUOTA_EXCEEDED");
+    }
+}

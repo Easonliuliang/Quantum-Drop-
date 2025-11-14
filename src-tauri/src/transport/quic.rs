@@ -14,12 +14,69 @@ use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::RootCertStore;
 use sha2::{Digest, Sha256};
-use tokio::{task::JoinHandle, try_join};
+use tokio::{sync::mpsc, task::JoinHandle, try_join};
 
 use super::adapter::TransportError;
 use super::{Frame, SessionDesc, TransportAdapter, TransportStream};
 
 const FRAME_HEADER_LEN: usize = 5;
+const DEFAULT_LAN_STREAMS: usize = 3;
+const MAX_LAN_STREAMS: usize = 4;
+const INBOUND_CHANNEL_SIZE: usize = 64;
+
+fn encode_frame(frame: &Frame) -> Vec<u8> {
+    match frame {
+        Frame::Control(text) => {
+            let bytes = text.as_bytes();
+            let mut payload = Vec::with_capacity(FRAME_HEADER_LEN + bytes.len());
+            payload.push(0u8);
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+            payload
+        }
+        Frame::Data(bytes) => {
+            let mut payload = Vec::with_capacity(FRAME_HEADER_LEN + bytes.len());
+            payload.push(1u8);
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+            payload
+        }
+    }
+}
+
+async fn write_frame(stream: &mut SendStream, frame: &Frame) -> Result<(), TransportError> {
+    let payload = encode_frame(frame);
+    stream
+        .write_all(&payload)
+        .await
+        .map_err(|err| TransportError::Io(format!("quic write failed: {err}")))
+}
+
+async fn read_frame(stream: &mut RecvStream) -> Result<Frame, TransportError> {
+    let mut header = [0u8; FRAME_HEADER_LEN];
+    stream
+        .read_exact(&mut header)
+        .await
+        .map_err(|err| TransportError::Io(format!("quic read header failed: {err}")))?;
+    let len_bytes: [u8; 4] = header[1..5]
+        .try_into()
+        .map_err(|_| TransportError::Io("invalid frame length header".into()))?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    let mut buf = vec![0u8; len];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .map_err(|err| TransportError::Io(format!("quic read body failed: {err}")))?;
+    match header[0] {
+        0 => {
+            let text = String::from_utf8(buf)
+                .map_err(|err| TransportError::Io(format!("frame utf8 decode failed: {err}")))?;
+            Ok(Frame::Control(text))
+        }
+        1 => Ok(Frame::Data(buf)),
+        other => Err(TransportError::Io(format!("unknown frame type: {other}"))),
+    }
+}
 
 #[derive(Clone)]
 struct QuicCredentials {
@@ -201,58 +258,11 @@ impl QuicLoopbackStream {
 #[async_trait]
 impl TransportStream for QuicLoopbackStream {
     async fn send(&mut self, frame: Frame) -> Result<(), TransportError> {
-        let mut payload = Vec::with_capacity(FRAME_HEADER_LEN);
-        match frame {
-            Frame::Control(text) => {
-                payload.push(0u8);
-                let bytes = text.into_bytes();
-                payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-                payload.extend_from_slice(&bytes);
-            }
-            Frame::Data(bytes) => {
-                payload.push(1u8);
-                payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-                payload.extend_from_slice(&bytes);
-            }
-        }
-
-        self.send
-            .write_all(&payload)
-            .await
-            .map_err(|err| TransportError::Io(format!("quic write failed: {err}")))?;
-        Ok(())
+        write_frame(&mut self.send, &frame).await
     }
 
     async fn recv(&mut self) -> Result<Frame, TransportError> {
-        let mut header = [0u8; FRAME_HEADER_LEN];
-        self.recv
-            .read_exact(&mut header)
-            .await
-            .map_err(|err| TransportError::Io(format!("quic read header failed: {err}")))?;
-        let frame_type = header[0];
-        let len_bytes: [u8; 4] = header[1..5]
-            .try_into()
-            .map_err(|_| TransportError::Io("invalid frame length header".into()))?;
-        let len = u32::from_be_bytes(len_bytes) as usize;
-
-        let mut buf = vec![0u8; len];
-        self.recv
-            .read_exact(&mut buf)
-            .await
-            .map_err(|err| TransportError::Io(format!("quic read body failed: {err}")))?;
-
-        match frame_type {
-            0 => {
-                let text = String::from_utf8(buf).map_err(|err| {
-                    TransportError::Io(format!("frame utf8 decode failed: {err}"))
-                })?;
-                Ok(Frame::Control(text))
-            }
-            1 => Ok(Frame::Data(buf)),
-            _ => Err(TransportError::Io(format!(
-                "unknown frame type: {frame_type}"
-            ))),
-        }
+        read_frame(&mut self.recv).await
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
@@ -285,12 +295,19 @@ async fn echo_loop(mut recv: RecvStream, mut send: SendStream) -> Result<(), Tra
 #[derive(Clone)]
 pub struct LanQuic {
     creds: Arc<QuicCredentials>,
+    stream_count: usize,
 }
 
 impl LanQuic {
     pub fn new() -> Result<Self, TransportError> {
+        Self::with_streams(DEFAULT_LAN_STREAMS)
+    }
+
+    pub fn with_streams(stream_count: usize) -> Result<Self, TransportError> {
+        let count = stream_count.clamp(1, MAX_LAN_STREAMS);
         Ok(Self {
             creds: Arc::new(QuicCredentials::new("quantumdrop.local")?),
+            stream_count: count,
         })
     }
 
@@ -301,7 +318,10 @@ impl LanQuic {
     pub async fn bind(&self, addr: SocketAddr) -> Result<LanQuicListener, TransportError> {
         let endpoint = Endpoint::server(self.creds.build_server_config()?, addr)
             .map_err(|err| TransportError::Setup(format!("failed to bind lan listener: {err}")))?;
-        Ok(LanQuicListener { endpoint })
+        Ok(LanQuicListener {
+            endpoint,
+            stream_count: self.stream_count,
+        })
     }
 
     pub async fn connect(&self, remote: SocketAddr) -> Result<LanQuicStream, TransportError> {
@@ -316,16 +336,22 @@ impl LanQuic {
         let connection = connecting
             .await
             .map_err(|err| TransportError::Setup(format!("client connect failed: {err}")))?;
-        let (send, recv) = connection
-            .open_bi()
-            .await
-            .map_err(|err| TransportError::Setup(format!("open bidi stream failed: {err}")))?;
-        Ok(LanQuicStream::new(send, recv, endpoint, connection))
+        let stream_count = self.stream_count.max(1);
+        let mut streams = Vec::with_capacity(stream_count);
+        for _ in 0..stream_count {
+            let (send, recv) = connection
+                .open_bi()
+                .await
+                .map_err(|err| TransportError::Setup(format!("open bidi stream failed: {err}")))?;
+            streams.push((send, recv));
+        }
+        Ok(LanQuicStream::new(streams, endpoint, connection))
     }
 }
 
 pub struct LanQuicListener {
     endpoint: Endpoint,
+    stream_count: usize,
 }
 
 impl LanQuicListener {
@@ -343,13 +369,17 @@ impl LanQuicListener {
             .ok_or(TransportError::Closed)?
             .await
             .map_err(|err| TransportError::Setup(format!("server accept failed: {err}")))?;
-        let (send, recv) = connection
-            .accept_bi()
-            .await
-            .map_err(|err| TransportError::Setup(format!("server stream failed: {err}")))?;
+        let stream_count = self.stream_count.max(1);
+        let mut streams = Vec::with_capacity(stream_count);
+        for _ in 0..stream_count {
+            let (send, recv) = connection
+                .accept_bi()
+                .await
+                .map_err(|err| TransportError::Setup(format!("server stream failed: {err}")))?;
+            streams.push((send, recv));
+        }
         Ok(LanQuicStream::new(
-            send,
-            recv,
+            streams,
             self.endpoint.clone(),
             connection,
         ))
@@ -357,17 +387,49 @@ impl LanQuicListener {
 }
 
 pub struct LanQuicStream {
-    send: SendStream,
-    recv: RecvStream,
+    senders: Vec<SendStream>,
+    next_sender: usize,
+    inbound_rx: mpsc::Receiver<Result<Frame, TransportError>>,
+    inbound_tasks: Vec<JoinHandle<()>>,
     _endpoint: Endpoint,
     connection: Connection,
 }
 
 impl LanQuicStream {
-    fn new(send: SendStream, recv: RecvStream, endpoint: Endpoint, connection: Connection) -> Self {
+    fn new(
+        streams: Vec<(SendStream, RecvStream)>,
+        endpoint: Endpoint,
+        connection: Connection,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(INBOUND_CHANNEL_SIZE);
+        let mut senders = Vec::with_capacity(streams.len());
+        let mut tasks = Vec::with_capacity(streams.len());
+        for (send, mut recv) in streams {
+            senders.push(send);
+            let tx_clone = tx.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    match read_frame(&mut recv).await {
+                        Ok(frame) => {
+                            if tx_clone.send(Ok(frame)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx_clone.send(Err(err)).await;
+                            break;
+                        }
+                    }
+                }
+            });
+            tasks.push(handle);
+        }
+        drop(tx);
         Self {
-            send,
-            recv,
+            senders,
+            next_sender: 0,
+            inbound_rx: rx,
+            inbound_tasks: tasks,
             _endpoint: endpoint,
             connection,
         }
@@ -377,52 +439,30 @@ impl LanQuicStream {
 #[async_trait]
 impl TransportStream for LanQuicStream {
     async fn send(&mut self, frame: Frame) -> Result<(), TransportError> {
-        let mut payload = Vec::with_capacity(FRAME_HEADER_LEN);
-        match frame {
-            Frame::Control(text) => {
-                payload.push(0u8);
-                let bytes = text.into_bytes();
-                payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-                payload.extend_from_slice(&bytes);
-            }
-            Frame::Data(bytes) => {
-                payload.push(1u8);
-                payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-                payload.extend_from_slice(&bytes);
-            }
+        if self.senders.is_empty() {
+            return Err(TransportError::Closed);
         }
-
-        self.send
-            .write_all(&payload)
-            .await
-            .map_err(|err| TransportError::Io(format!("quic write failed: {err}")))?;
-        Ok(())
+        let idx = self.next_sender;
+        self.next_sender = (self.next_sender + 1) % self.senders.len();
+        write_frame(&mut self.senders[idx], &frame).await
     }
 
     async fn recv(&mut self) -> Result<Frame, TransportError> {
-        let mut header = [0u8; FRAME_HEADER_LEN];
-        self.recv
-            .read_exact(&mut header)
-            .await
-            .map_err(|err| TransportError::Io(format!("quic read header failed: {err}")))?;
-        let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
-        let mut payload = vec![0u8; len];
-        self.recv
-            .read_exact(&mut payload)
-            .await
-            .map_err(|err| TransportError::Io(format!("quic read payload failed: {err}")))?;
-        match header[0] {
-            0 => {
-                let text = String::from_utf8(payload.clone())
-                    .unwrap_or_else(|_| String::from_utf8_lossy(&payload).into_owned());
-                Ok(Frame::Control(text))
-            }
-            1 => Ok(Frame::Data(payload)),
-            _ => Err(TransportError::Io("unknown frame tag".into())),
+        match self.inbound_rx.recv().await {
+            Some(Ok(frame)) => Ok(frame),
+            Some(Err(err)) => Err(err),
+            None => Err(TransportError::Closed),
         }
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
+        self.inbound_rx.close();
+        for sender in &mut self.senders {
+            let _ = sender.finish();
+        }
+        for handle in self.inbound_tasks.drain(..) {
+            handle.abort();
+        }
         self.connection.close(0u32.into(), b"lan closed");
         Ok(())
     }
@@ -447,5 +487,40 @@ mod tests {
             assert_eq!(received, payload);
             stream.close().await.expect("close");
         });
+    }
+
+    #[tokio::test]
+    async fn lan_quic_multistream_roundtrip() {
+        let quic = LanQuic::new().expect("lan quic");
+        let listener = quic
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .expect("bind lan listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let frames: Vec<Frame> = (0..12).map(|i| Frame::Data(vec![i as u8; 512])).collect();
+        let server_frames = frames.clone();
+
+        let server_task = async move {
+            let mut server = listener.accept().await.expect("accept stream");
+            for expected in &server_frames {
+                let received = tokio::time::timeout(Duration::from_secs(5), server.recv())
+                    .await
+                    .expect("server recv timeout")
+                    .expect("server recv");
+                assert_eq!(received, *expected);
+            }
+            Ok::<(), TransportError>(())
+        };
+
+        let client_task = async {
+            let mut client = quic.connect(addr).await.expect("lan connect");
+            for frame in &frames {
+                client.send(frame.clone()).await.expect("client send");
+            }
+            Ok::<(), TransportError>(())
+        };
+
+        try_join!(server_task, client_task).expect("lan quic roundtrip");
     }
 }

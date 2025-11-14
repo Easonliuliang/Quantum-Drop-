@@ -1,9 +1,9 @@
 pub mod identity;
 
-use std::{fs, path::PathBuf};
-
-#[cfg(test)]
-use std::path::Path;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -62,7 +62,7 @@ impl TransferStore {
         Ok(store)
     }
 
-    #[cfg(test)]
+    #[cfg_attr(not(any(test, doctest)), allow(dead_code))]
     pub fn with_path(path: impl AsRef<Path>) -> Result<Self> {
         let db_path = path.as_ref().to_path_buf();
         let store = Self { db_path };
@@ -364,6 +364,7 @@ mod tests {
 
         let record = TransferRecord {
             id: "task_123".into(),
+            identity_id: Some("id_alpha".into()),
             code: Some("CODE123".into()),
             direction: TransferDirection::Send,
             status: TransferStatus::Completed,

@@ -64,10 +64,36 @@ use types::{
 
 const MOCK_RECEIVE_FILE_SIZE: u64 = 2 * 1024 * 1024;
 const MULTI_STREAM_THRESHOLD: u64 = 64 * 1024 * 1024;
+const MID_STREAM_THRESHOLD: u64 = 8 * 1024 * 1024;
 const DEFAULT_PARALLEL_CHUNKS: usize = 2;
 const MAX_PARALLEL_CHUNKS: usize = 4;
 
 pub use state::AppState as SharedState;
+
+fn recommended_lan_streams(
+    total_bytes: u64,
+    policy: &AdaptiveChunkPolicy,
+    success_rate: Option<f32>,
+) -> usize {
+    let mut configured = policy.lan_streams.clamp(1, MAX_PARALLEL_CHUNKS);
+    if let Some(rate) = success_rate {
+        if rate < 0.5 {
+            configured = 1;
+        } else if rate < 0.8 {
+            configured = configured.min(2);
+        }
+    }
+    if total_bytes == 0 {
+        return configured;
+    }
+    if total_bytes >= MULTI_STREAM_THRESHOLD {
+        configured
+    } else if total_bytes >= MID_STREAM_THRESHOLD {
+        configured.min(DEFAULT_PARALLEL_CHUNKS.max(1))
+    } else {
+        1
+    }
+}
 
 #[tauri::command]
 pub async fn auth_register_identity(
@@ -300,6 +326,7 @@ pub async fn courier_generate_code(
     state: State<'_, SharedState>,
     config: State<'_, ConfigStore>,
     identity_store: State<'_, IdentityStore>,
+    license: State<'_, LicenseManager>,
     auth: AuthenticatedPayload<GeneratePayload>,
 ) -> Result<GenerateCodeResponse, CommandError> {
     verify_request(
@@ -1173,6 +1200,7 @@ pub fn update_settings(
             enabled: payload.chunk_policy.adaptive,
             min_bytes: payload.chunk_policy.min_bytes,
             max_bytes: payload.chunk_policy.max_bytes,
+            lan_streams: payload.chunk_policy.lan_streams,
         },
         quantum_mode: payload.quantum_mode,
         minimal_quantum_ui: payload.minimal_quantum_ui,
@@ -1225,6 +1253,7 @@ fn to_settings_payload(settings: RuntimeSettings) -> SettingsPayload {
             adaptive: settings.chunk_policy.enabled,
             min_bytes: settings.chunk_policy.min_bytes,
             max_bytes: settings.chunk_policy.max_bytes,
+            lan_streams: settings.chunk_policy.lan_streams,
         },
         quantum_mode: settings.quantum_mode,
         minimal_quantum_ui: settings.minimal_quantum_ui,
@@ -1424,6 +1453,7 @@ mod tests {
                 enabled: payload.chunk_policy.adaptive,
                 min_bytes: payload.chunk_policy.min_bytes,
                 max_bytes: payload.chunk_policy.max_bytes,
+                lan_streams: payload.chunk_policy.lan_streams,
             },
             quantum_mode: payload.quantum_mode,
             minimal_quantum_ui: payload.minimal_quantum_ui,
@@ -1869,7 +1899,8 @@ async fn simulate_transfer(
         total_bytes = MOCK_RECEIVE_FILE_SIZE;
     }
     let settings = app.state::<ConfigStore>().get();
-    let observed_latency = if let Some(registry) = app.try_state::<RouteMetricsRegistry>() {
+    let route_metrics = app.try_state::<RouteMetricsRegistry>();
+    let observed_latency = if let Some(registry) = route_metrics.as_ref() {
         if let Some(avg) = registry.avg_latency(&selected_route) {
             (avg + handshake_elapsed) / 2
         } else {
@@ -1878,13 +1909,18 @@ async fn simulate_transfer(
     } else {
         handshake_elapsed
     };
-    let weak_network =
-        matches!(selected_route, RouteKind::Relay) || observed_latency > Duration::from_millis(250);
+    let historical_success = route_metrics
+        .as_ref()
+        .and_then(|registry| registry.success_rate(&selected_route));
+    let weak_network = matches!(selected_route, RouteKind::Relay)
+        || observed_latency > Duration::from_millis(250)
+        || historical_success.map(|rate| rate < 0.45).unwrap_or(false);
     let suggested_chunk = derive_chunk_size(
         &settings.chunk_policy,
         &selected_route,
         observed_latency,
         weak_network,
+        historical_success,
     );
     let resume_store = ResumeStore::from_app(&app).map_err(CommandError::from)?;
     let mut catalog = match resume_store.load(&task_id).map_err(CommandError::from)? {
@@ -2216,6 +2252,11 @@ async fn run_lan_sender_impl(
         .ok_or_else(|| CommandError::invalid("sender public key missing"))?;
     let files = task.files.clone();
     let bytes_total: u64 = files.iter().map(|f| f.size).sum();
+    let settings = app.state::<ConfigStore>().get();
+    let initial_success = app
+        .try_state::<RouteMetricsRegistry>()
+        .and_then(|registry| registry.success_rate(&RouteKind::Lan));
+    let lan_streams = recommended_lan_streams(bytes_total, &settings.chunk_policy, initial_success);
 
     emit_progress(
         &app,
@@ -2249,7 +2290,8 @@ async fn run_lan_sender_impl(
         },
     );
 
-    let quic = LanQuic::new().map_err(|err| CommandError::route_unreachable(err.to_string()))?;
+    let quic = LanQuic::with_streams(lan_streams)
+        .map_err(|err| CommandError::route_unreachable(err.to_string()))?;
     let listener = quic
         .bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
         .await
@@ -2529,7 +2571,15 @@ async fn run_lan_receiver(
         },
     );
 
-    let quic = LanQuic::new().map_err(|err| CommandError::route_unreachable(err.to_string()))?;
+    let settings = app.state::<ConfigStore>().get();
+    let bytes_hint: u64 = task.files.iter().map(|f| f.size).sum();
+    let historical_success = app
+        .try_state::<RouteMetricsRegistry>()
+        .and_then(|registry| registry.success_rate(&RouteKind::Lan));
+    let lan_streams =
+        recommended_lan_streams(bytes_hint, &settings.chunk_policy, historical_success);
+    let quic = LanQuic::with_streams(lan_streams)
+        .map_err(|err| CommandError::route_unreachable(err.to_string()))?;
     let mut raw_stream = quic
         .connect(remote_addr)
         .await
