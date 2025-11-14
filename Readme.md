@@ -120,6 +120,10 @@ npm run check
 - `cargo test --manifest-path src-tauri/Cargo.toml`：执行原生单元/集成测试。
 - `npm run preview`：在无 Tauri Shell 的情况下预览编译后的前端。
 
+### 多语言（i18n）
+
+桌面端顶部的语言切换器（`LocaleSwitch`）支持在中文与 English 之间即时切换，选择会持久化到本地存储。默认消息定义在 `src/lib/i18n.tsx`，新增语言或文案时只需扩展对应的键值。详见 [docs/i18n.md](docs/i18n.md)。
+
 ### 局域网直连（阶段一）操作指引
 
 1. **发送方**
