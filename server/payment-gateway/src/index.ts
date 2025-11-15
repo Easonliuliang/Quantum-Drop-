@@ -1,5 +1,5 @@
 import "dotenv/config";
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import crypto from "crypto";
 
 import { issueLicense, LicenseTier } from "./license";
@@ -15,7 +15,20 @@ if (LICENSE_PRIVKEY.length !== 64) {
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-const verifyWebhook = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+type WebhookPayload = {
+  identityId?: string;
+  tier?: LicenseTier;
+  validDays?: number;
+};
+
+const getWebhookPayload = (req: Request): WebhookPayload => {
+  if (req.body && typeof req.body === "object") {
+    return req.body as WebhookPayload;
+  }
+  return {};
+};
+
+const verifyWebhook = (req: Request, res: Response, next: NextFunction) => {
   if (!WEBHOOK_SECRET) {
     return next();
   }
@@ -31,12 +44,7 @@ const verifyWebhook = (req: express.Request, res: express.Response, next: expres
   next();
 };
 
-const issueAndRespond = (
-  res: express.Response,
-  identityId: string,
-  tier: LicenseTier = "PRO",
-  validDays = 365,
-) => {
+const issueAndRespond = (res: Response, identityId: string, tier: LicenseTier = "PRO", validDays = 365) => {
   if (!LICENSE_PRIVKEY) {
     return res.status(500).json({ error: "server missing LICENSE_PRIVKEY" });
   }
@@ -50,7 +58,7 @@ const issueAndRespond = (
 };
 
 app.post("/webhook/wechat", verifyWebhook, (req, res) => {
-  const { identityId, tier } = req.body ?? {};
+  const { identityId, tier } = getWebhookPayload(req);
   if (!identityId) {
     return res.status(400).json({ error: "identityId required" });
   }
@@ -58,7 +66,7 @@ app.post("/webhook/wechat", verifyWebhook, (req, res) => {
 });
 
 app.post("/webhook/alipay", verifyWebhook, (req, res) => {
-  const { identityId, tier } = req.body ?? {};
+  const { identityId, tier } = getWebhookPayload(req);
   if (!identityId) {
     return res.status(400).json({ error: "identityId required" });
   }
@@ -66,7 +74,7 @@ app.post("/webhook/alipay", verifyWebhook, (req, res) => {
 });
 
 app.post("/admin/issue", (req, res) => {
-  const { identityId, tier, validDays } = req.body ?? {};
+  const { identityId, tier, validDays } = getWebhookPayload(req);
   if (!identityId) {
     return res.status(400).json({ error: "identityId required" });
   }

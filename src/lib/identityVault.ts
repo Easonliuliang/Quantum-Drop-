@@ -153,11 +153,15 @@ export const forgetIdentity = async (identityId: string) => {
     try {
       const priv = await pathFor(`${identityId}.priv`);
       await tauri.fs.removeFile(priv);
-    } catch {}
+    } catch (error) {
+      console.warn("forgetIdentity: remove private file failed", error);
+    }
     try {
       const pub = await pathFor(`${identityId}.pub`);
       await tauri.fs.removeFile(pub);
-    } catch {}
+    } catch (error) {
+      console.warn("forgetIdentity: remove public file failed", error);
+    }
   } else if (typeof window !== "undefined") {
     writeLocal(KEY_PRIVATE(identityId), null);
     writeLocal(KEY_PUBLIC(identityId), null);

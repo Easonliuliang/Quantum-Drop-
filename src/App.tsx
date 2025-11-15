@@ -12,8 +12,14 @@ import {
   clearLastIdentityId,
 } from "./lib/identityVault";
 import { UpgradePrompt } from "./components/UpgradePrompt";
-import { LocaleSwitch } from "./components/LocaleSwitch";
 import { PanelBoundary } from "./components/ErrorBoundary/PanelBoundary";
+import { MainLayout } from "./components/Layout/MainLayout";
+import type { Page } from "./components/Layout/types";
+import { SendPage } from "./components/Pages/SendPage";
+import { IdentityPage } from "./components/Pages/IdentityPage";
+import { TransferStatusPage } from "./components/Pages/TransferStatusPage";
+import { WebRTCPage } from "./components/Pages/WebRTCPage";
+import { LogsPage } from "./components/Pages/LogsPage";
 import {
   FRIENDLY_ERROR_MESSAGES,
   LICENSE_REASON_MAP,
@@ -23,20 +29,19 @@ import {
   type UpgradeReason,
 } from "./lib/upgrade";
 import { useI18n } from "./lib/i18n";
+import {
+  formatAbsoluteTime,
+  formatBytes,
+  formatRelativeTime,
+  formatSize,
+  maskLicenseKey,
+  summarizeAuditDetails,
+} from "./lib/format";
 
 type SelectedFile = {
   name: string;
   size?: number;
   path?: string;
-};
-
-type SenderInfo = {
-  code: string;
-  deviceName: string;
-  host: string;
-  port: number;
-  publicKey: string;
-  certFingerprint: string;
 };
 
 type TransferProgressPayload = {
@@ -49,11 +54,6 @@ type TransferProgressPayload = {
   route?: "lan" | "p2p" | "relay" | "cache";
   routeAttempts?: string[];
   message?: string;
-};
-
-type TransferLogPayload = {
-  task_id: string;
-  message: string;
 };
 
 type TransferLifecyclePayload = {
@@ -233,6 +233,10 @@ type TransferStatsDto = {
   lanPercent: number;
   p2pPercent: number;
   relayPercent: number;
+  routeDistribution?: Array<{
+    route: string;
+    ratio: number;
+  }>;
 };
 
 type AuditLogEntryDto = {
@@ -263,6 +267,36 @@ type LicenseStatusDto = {
   p2pUsed: number;
   p2pQuota?: number | null;
 };
+
+type LicenseLimitsRaw = Partial<{
+  p2pMonthlyQuota: unknown;
+  p2p_monthly_quota: unknown;
+  maxFileSizeMb: unknown;
+  max_file_size_mb: unknown;
+  maxDevices: unknown;
+  max_devices: unknown;
+  resumeEnabled: unknown;
+  resume_enabled: unknown;
+  historyDays: unknown;
+  history_days: unknown;
+}>;
+
+type LicenseStatusRaw = Partial<{
+  identityId: unknown;
+  identity_id: unknown;
+  tier: unknown;
+  licenseKey: unknown;
+  license_key: unknown;
+  issuedAt: unknown;
+  issued_at: unknown;
+  expiresAt: unknown;
+  expires_at: unknown;
+  limits: unknown;
+  p2pUsed: unknown;
+  p2p_used: unknown;
+  p2pQuota: unknown;
+  p2p_quota: unknown;
+}>;
 
 type SecurityConfigDto = {
   enforceSignatureVerification: boolean;
@@ -357,129 +391,41 @@ const normalizeFingerprint = (value: string) =>
     .replace(/[^a-f0-9]/gi, "")
     .toUpperCase();
 
-const formatBytes = (bytes: number) => {
-  if (bytes <= 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** exponent;
-  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
-};
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 
-const maskLicenseKey = (value?: string | null) => {
-  if (!value) {
-    return "—";
-  }
-  if (value.length <= 8) {
+const readString = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
+
+const readNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
     return value;
   }
-  return `${value.slice(0, 4)}****${value.slice(-4)}`;
-};
-
-const formatAbsoluteTime = (timestamp: number) => {
-  if (!Number.isFinite(timestamp)) {
-    return "-";
-  }
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) {
-    return "-";
-  }
-  return date.toLocaleString();
-};
-
-const summarizeAuditDetails = (details: unknown) => {
-  if (!details) {
-    return "";
-  }
-  if (typeof details === "string") {
-    return details;
-  }
-  if (Array.isArray(details)) {
-    return details
-      .slice(0, 3)
-      .map((item) => {
-        if (item === null) {
-          return "null";
-        }
-        if (typeof item === "object") {
-          try {
-            return JSON.stringify(item);
-          } catch {
-            return "[object]";
-          }
-        }
-        return String(item);
-      })
-      .join(" · ");
-  }
-  if (typeof details === "object") {
-    const entries = Object.entries(details as Record<string, unknown>)
-      .filter(([, value]) => value !== null && typeof value !== "object")
-      .map(([key, value]) => `${key}: ${String(value)}`)
-      .slice(0, 3);
-    if (entries.length > 0) {
-      return entries.join(" · ");
-    }
-    try {
-      return JSON.stringify(details);
-    } catch {
-      return "";
-    }
-  }
-  return "";
+  return null;
 };
 
 const normalizeLicenseStatus = (raw: unknown, fallbackId: string): LicenseStatusDto => {
-  const source = (raw as Record<string, any>) || {};
-  const limitsSource = (source.limits as Record<string, any>) || {};
+  const source: LicenseStatusRaw = isRecord(raw) ? (raw as LicenseStatusRaw) : {};
+  const limitsSource: LicenseLimitsRaw = isRecord(source.limits) ? (source.limits as LicenseLimitsRaw) : {};
   const limits: LicenseLimitsDto = {
-    p2pMonthlyQuota: limitsSource.p2pMonthlyQuota ?? limitsSource.p2p_monthly_quota ?? null,
-    maxFileSizeMb: limitsSource.maxFileSizeMb ?? limitsSource.max_file_size_mb ?? null,
-    maxDevices: limitsSource.maxDevices ?? limitsSource.max_devices ?? null,
-    resumeEnabled: Boolean(limitsSource.resumeEnabled ?? limitsSource.resume_enabled ?? false),
-    historyDays: limitsSource.historyDays ?? limitsSource.history_days ?? null,
+    p2pMonthlyQuota:
+      readNumber(limitsSource.p2pMonthlyQuota) ?? readNumber(limitsSource.p2p_monthly_quota) ?? null,
+    maxFileSizeMb: readNumber(limitsSource.maxFileSizeMb) ?? readNumber(limitsSource.max_file_size_mb) ?? null,
+    maxDevices: readNumber(limitsSource.maxDevices) ?? readNumber(limitsSource.max_devices) ?? null,
+    resumeEnabled: (() => {
+      const rawValue = limitsSource.resumeEnabled ?? limitsSource.resume_enabled ?? false;
+      return typeof rawValue === "boolean" ? rawValue : Boolean(rawValue);
+    })(),
+    historyDays: readNumber(limitsSource.historyDays) ?? readNumber(limitsSource.history_days) ?? null,
   };
   return {
-    identityId: source.identityId ?? source.identity_id ?? fallbackId,
-    tier: source.tier ?? "free",
-    licenseKey: source.licenseKey ?? source.license_key ?? null,
-    issuedAt: source.issuedAt ?? source.issued_at ?? Date.now(),
-    expiresAt: source.expiresAt ?? source.expires_at ?? null,
+    identityId: readString(source.identityId) ?? readString(source.identity_id) ?? fallbackId,
+    tier: readString(source.tier) ?? "free",
+    licenseKey: readString(source.licenseKey) ?? readString(source.license_key) ?? null,
+    issuedAt: readNumber(source.issuedAt) ?? readNumber(source.issued_at) ?? Date.now(),
+    expiresAt: readNumber(source.expiresAt) ?? readNumber(source.expires_at) ?? null,
     limits,
-    p2pUsed: source.p2pUsed ?? source.p2p_used ?? 0,
-    p2pQuota: source.p2pQuota ?? source.p2p_quota ?? limits.p2pMonthlyQuota ?? null,
+    p2pUsed: readNumber(source.p2pUsed) ?? readNumber(source.p2p_used) ?? 0,
+    p2pQuota: readNumber(source.p2pQuota) ?? readNumber(source.p2p_quota) ?? limits.p2pMonthlyQuota ?? null,
   };
-};
-
-const formatRelativeTime = (timestamp: number) => {
-  const now = Date.now();
-  const delta = now - timestamp;
-  if (delta < 10_000) {
-    return "刚刚";
-  }
-  const seconds = Math.floor(delta / 1000);
-  if (seconds < 60) {
-    return `${seconds} 秒前`;
-  }
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) {
-    return `${minutes} 分钟前`;
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    return `${hours} 小时前`;
-  }
-  const days = Math.floor(hours / 24);
-  if (days < 30) {
-    return `${days} 天前`;
-  }
-  const months = Math.floor(days / 30);
-  if (months < 12) {
-    return `${months} 个月前`;
-  }
-  const years = Math.floor(months / 12);
-  return `${years} 年前`;
 };
 
 const copyPlainText = async (value: string) => {
@@ -577,18 +523,8 @@ const resolveTauriInvoke = (): TauriInvokeFn => {
   return invoke;
 };
 
-const formatSize = (bytes: number) => {
-  if (bytes === 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB"];
-  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** exponent;
-  return `${value.toFixed(value > 9 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
-};
-
 export default function App(): JSX.Element {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [isTauri, setIsTauri] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [files, setFiles] = useState<SelectedFile[]>([]);
@@ -619,7 +555,13 @@ export default function App(): JSX.Element {
   const [upgradeReason, setUpgradeReason] = useState<UpgradeReason | null>(null);
   const trustedPeersRef = useRef<Record<string, PeerDiscoveredPayload>>({});
   const [progress, setProgress] = useState<TransferProgressPayload | null>(null);
-  const [logs, setLogs] = useState<string[]>([]);
+  type LogEntry = { id: string; message: string; count: number; timestamp: number };
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+
+  const resetLogs = useCallback(() => {
+    setLogs([]);
+  }, []);
+  const [currentPage, setCurrentPage] = useState<Page>("send");
   const [identity, setIdentity] = useState<IdentityState | null>(null);
   const [identityPrivateKey, setIdentityPrivateKey] = useState<Uint8Array | null>(null);
   const [devices, setDevices] = useState<DeviceState[]>([]);
@@ -630,16 +572,6 @@ export default function App(): JSX.Element {
   const [isUpdatingDevice, setIsUpdatingDevice] = useState(false);
   const [isForgettingIdentity, setIsForgettingIdentity] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  const [receiveCode, setReceiveCode] = useState("");
-  const [receiveHost, setReceiveHost] = useState("");
-  const [receivePort, setReceivePort] = useState("0");
-  const [receiveDir, setReceiveDir] = useState("");
-  const [isReceiving, setIsReceiving] = useState(false);
-  const [receiveMode, setReceiveMode] = useState<"code" | "scan" | "manual">("code");
-  const [availableSenders, setAvailableSenders] = useState<SenderInfo[]>([]);
-  const [isScanning, setIsScanning] = useState(false);
-  const [receiveSenderKey, setReceiveSenderKey] = useState("");
-  const [receiveSenderFingerprint, setReceiveSenderFingerprint] = useState("");
   const [isRegisteringIdentity, setIsRegisteringIdentity] = useState(false);
   const [isRegisteringDevice, setIsRegisteringDevice] = useState(false);
   const [isUpdatingEntitlement, setIsUpdatingEntitlement] = useState(false);
@@ -649,9 +581,10 @@ export default function App(): JSX.Element {
   const [error, setErrorState] = useState<string | null>(null);
   const [errorActionKeys, setErrorActionKeys] = useState<ErrorActionKey[]>([]);
   const [info, setInfo] = useState<string | null>(null);
+  const lastErrorRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [absorbing, setAbsorbing] = useState(false);
-  const beginTransferRef = useRef<(pathsOverride?: string[]) => void>();
+  const beginTransferRef = useRef<(pathsOverride?: string[]) => Promise<void> | void>();
   const chunkMinMb = chunkPolicyDraft ? Math.round(chunkPolicyDraft.minBytes / ONE_MB) : 2;
   const chunkMaxMb = chunkPolicyDraft ? Math.round(chunkPolicyDraft.maxBytes / ONE_MB) : 2;
   const lanStreamsDraft = chunkPolicyDraft?.lanStreams ?? 1;
@@ -666,12 +599,20 @@ export default function App(): JSX.Element {
     return devices.find((device) => device.deviceId === activeDeviceId) ?? null;
   }, [activeDeviceId, devices]);
 
-  const showError = useCallback((message: string, actions: ErrorActionKey[] = DEFAULT_ERROR_ACTIONS) => {
-    setErrorState(message);
-    setErrorActionKeys(actions);
-  }, []);
+  const showError = useCallback(
+    (message: string, actions: ErrorActionKey[] = DEFAULT_ERROR_ACTIONS) => {
+      if (lastErrorRef.current === message) {
+        return;
+      }
+      lastErrorRef.current = message;
+      setErrorState(message);
+      setErrorActionKeys(actions);
+    },
+    []
+  );
 
   const clearError = useCallback(() => {
+    lastErrorRef.current = null;
     setErrorState(null);
     setErrorActionKeys([]);
   }, []);
@@ -727,21 +668,37 @@ export default function App(): JSX.Element {
 
   const appendLog = useCallback((entry: string) => {
     setLogs((prev) => {
-      const next = [...prev, entry];
-      if (next.length > 50) {
-        next.shift();
+      const normalized = entry.trim().length > 0 ? entry.trim() : entry;
+      const last = prev[prev.length - 1];
+      if (last && last.message === normalized) {
+        const next = [...prev];
+        next[next.length - 1] = {
+          ...last,
+          count: last.count + 1,
+          timestamp: Date.now(),
+        };
+        return next;
       }
-      return next;
+      const nextEntry: LogEntry = {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        message: normalized,
+        count: 1,
+        timestamp: Date.now(),
+      };
+      return [...prev.slice(-49), nextEntry];
     });
   }, []);
 
   const copyRecentLogs = useCallback(async () => {
-    const snapshot = logs.slice(-20).join("\n");
+    const snapshot = logs
+      .slice(-20)
+      .map((entry) => (entry.count > 1 ? `${entry.message} (x${entry.count})` : entry.message))
+      .join("\n");
     const text = snapshot.length > 0 ? snapshot : "暂无日志";
     await copyPlainText(text);
-    setInfo("最近日志已复制。");
+    setInfo(t("info.logsCopied", "Recent logs copied."));
     appendLog("📋 已复制最近日志。");
-  }, [logs, appendLog]);
+  }, [logs, appendLog, t]);
 
   const openDocs = useCallback(() => {
     if (typeof window !== "undefined") {
@@ -777,18 +734,18 @@ export default function App(): JSX.Element {
 
   const clearTrustedPeers = useCallback(() => {
     if (Object.keys(trustedPeersRef.current).length === 0) {
-      setInfo("当前没有已信任的设备。");
+      setInfo(t("info.noTrustedDevices", "No trusted devices yet."));
       return;
     }
     setTrustedPeers({});
     appendLog("🧼 已清空所有信任设备。");
-  }, [setInfo, appendLog]);
+  }, [setInfo, appendLog, t]);
 
   const copySampleLicense = useCallback(() => {
     void copyPlainText("QD-PRO-XXXX-YYYY-ZZZZ");
-    setInfo("示例 License Key 已复制。");
+    setInfo(t("info.sampleLicenseCopied", "Sample License Key copied."));
     appendLog("📋 已复制示例 License Key。");
-  }, [appendLog]);
+  }, [appendLog, t]);
 
   const promptUpgrade = useCallback(
     (reason: UpgradeReason, fallback?: string) => {
@@ -871,16 +828,16 @@ export default function App(): JSX.Element {
     setUpgradeReason(null);
   }, [appendLog]);
 
-  const refreshRouteMetrics = useCallback(async () => {
+  const refreshRouteMetrics = useCallback(async (notify = false) => {
     if (!detectTauri()) {
-      setInfo("路由统计仅在 Tauri 桌面端可用。");
+      setInfo(t("info.routeTauriOnly", "Route metrics are only available in the desktop app."));
       return;
     }
     let invoke: TauriInvokeFn;
     try {
       invoke = resolveTauriInvoke();
-    } catch (err) {
-      setInfo("Tauri invoke API 不可用，无法获取路由统计。");
+    } catch {
+      setInfo(t("info.routeInvokeMissing", "Tauri invoke API unavailable, cannot load route metrics."));
       return;
     }
     setIsRouteMetricsLoading(true);
@@ -888,23 +845,26 @@ export default function App(): JSX.Element {
       const metrics = (await invoke("courier_route_metrics", {})) as RouteMetricsDto[];
       setRouteMetrics(metrics);
       if (!metrics || metrics.length === 0) {
-        setInfo("暂无路由统计数据。");
+        setInfo(t("info.routeEmpty", "No route metrics yet."));
       }
     } catch (err) {
-      const result = handleCommandError(err, "路由统计加载失败");
-      appendLog(`路由统计加载失败：${result.message}`);
+      if (notify) {
+        handleCommandError(err, "路由统计加载失败");
+      } else {
+        console.warn("refreshRouteMetrics failed", err);
+      }
     } finally {
       setIsRouteMetricsLoading(false);
     }
-  }, [appendLog, handleCommandError, setInfo]);
+  }, [handleCommandError, setInfo, t]);
 
-  const refreshTransferStats = useCallback(async () => {
+  const refreshTransferStats = useCallback(async (notify = false) => {
     if (!identity) {
       setTransferStats(null);
       return;
     }
     if (!isTauri) {
-      setInfo("传输统计仅在 Tauri 桌面端可用。");
+      setInfo(t("info.statsTauriOnly", "Transfer statistics are only available in the desktop app."));
       return;
     }
     let invoke: TauriInvokeFn;
@@ -912,7 +872,7 @@ export default function App(): JSX.Element {
       invoke = resolveTauriInvoke();
     } catch (err) {
       console.warn("refreshTransferStats: invoke unavailable", err);
-      setInfo("Tauri invoke API 不可用，无法获取传输统计。");
+      setInfo(t("info.statsInvokeMissing", "Tauri invoke API unavailable, cannot load transfer statistics."));
       return;
     }
     setIsStatsLoading(true);
@@ -922,20 +882,23 @@ export default function App(): JSX.Element {
       })) as TransferStatsDto;
       setTransferStats(stats);
     } catch (err) {
-      const result = handleCommandError(err, "传输统计加载失败");
-      appendLog(`传输统计加载失败：${result.message}`);
+      if (notify) {
+        handleCommandError(err, "传输统计加载失败");
+      } else {
+        console.warn("refreshTransferStats failed", err);
+      }
     } finally {
       setIsStatsLoading(false);
     }
-  }, [identity, isTauri, appendLog, handleCommandError, setInfo]);
+  }, [identity, isTauri, handleCommandError, setInfo, t]);
 
-  const refreshAuditLogs = useCallback(async () => {
+  const refreshAuditLogs = useCallback(async (notify = false) => {
     if (!identity) {
       setAuditLogs([]);
       return;
     }
     if (!isTauri) {
-      setInfo("审计日志仅在 Tauri 桌面端可用。");
+      setInfo(t("info.auditTauriOnly", "Audit logs are only available in the desktop app."));
       return;
     }
     let invoke: TauriInvokeFn;
@@ -943,7 +906,7 @@ export default function App(): JSX.Element {
       invoke = resolveTauriInvoke();
     } catch (err) {
       console.warn("refreshAuditLogs: invoke unavailable", err);
-      setInfo("Tauri invoke API 不可用，无法获取审计日志。");
+      setInfo(t("info.auditInvokeMissing", "Tauri invoke API unavailable, cannot load audit logs."));
       return;
     }
     setIsAuditLoading(true);
@@ -954,20 +917,23 @@ export default function App(): JSX.Element {
       })) as AuditLogEntryDto[];
       setAuditLogs(logs);
     } catch (err) {
-      const result = handleCommandError(err, "审计日志加载失败");
-      appendLog(`审计日志加载失败：${result.message}`);
+      if (notify) {
+        handleCommandError(err, "审计日志加载失败");
+      } else {
+        console.warn("refreshAuditLogs failed", err);
+      }
     } finally {
       setIsAuditLoading(false);
     }
-  }, [identity, isTauri, appendLog, handleCommandError, setInfo]);
+  }, [identity, isTauri, handleCommandError, setInfo, t]);
 
-  const refreshLicenseStatus = useCallback(async () => {
+  const refreshLicenseStatus = useCallback(async (notify = false) => {
     if (!identity) {
       setLicenseStatus(null);
       return;
     }
     if (!isTauri) {
-      setInfo("权益信息仅在 Tauri 桌面端可用。");
+      setInfo(t("info.licenseTauriOnly", "License info is only available in the desktop app."));
       return;
     }
     let invoke: TauriInvokeFn;
@@ -975,7 +941,7 @@ export default function App(): JSX.Element {
       invoke = resolveTauriInvoke();
     } catch (err) {
       console.warn("refreshLicenseStatus: invoke unavailable", err);
-      setInfo("Tauri invoke API 不可用，无法获取权益信息。");
+      setInfo(t("info.licenseInvokeMissing", "Tauri invoke API unavailable, cannot load license info."));
       return;
     }
     setIsLicenseLoading(true);
@@ -987,23 +953,29 @@ export default function App(): JSX.Element {
       setLicenseStatus(status);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      showError(message, ["refreshLicense", "copyLogs"]);
-      appendLog(`⚠️ 获取权益信息失败：${message}`);
+      if (notify) {
+        showError(message, ["refreshLicense", "copyLogs"]);
+      } else {
+        console.warn("refreshLicenseStatus failed", err);
+      }
     } finally {
       setIsLicenseLoading(false);
     }
-  }, [identity, isTauri, appendLog, setInfo, showError]);
+  }, [identity, isTauri, setInfo, showError, t]);
 
-  const refreshSecurityConfig = useCallback(async () => {
+  const refreshSecurityConfig = useCallback(async (notify = false) => {
     if (!isTauri) {
-      setInfo("安全策略仅在 Tauri 桌面端可查询。");
+      setInfo(t("info.securityTauriOnly", "Security policies are only available in the desktop app."));
       return;
     }
     let invoke: TauriInvokeFn;
     try {
       invoke = resolveTauriInvoke();
-    } catch (err) {
-      showError("Tauri invoke API 不可用，无法读取安全策略。", ["refreshSecurity", "copyLogs"]);
+    } catch (error) {
+      console.warn("refreshSecurityConfig: invoke unavailable", error);
+      if (notify) {
+        showError(t("info.securityInvokeMissing", "Tauri invoke API unavailable, cannot load security policies."), ["refreshSecurity", "copyLogs"]);
+      }
       return;
     }
     setIsSecurityLoading(true);
@@ -1012,16 +984,19 @@ export default function App(): JSX.Element {
       setSecurityConfig(config);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      showError(message, ["refreshSecurity", "copyLogs"]);
-      appendLog(`⚠️ 读取安全策略失败：${message}`);
+      if (notify) {
+        showError(message, ["refreshSecurity", "copyLogs"]);
+      } else {
+        console.warn("refreshSecurityConfig failed", err);
+      }
     } finally {
       setIsSecurityLoading(false);
     }
-  }, [isTauri, appendLog, showError, setInfo]);
+  }, [isTauri, showError, setInfo, t]);
 
-  const refreshSettings = useCallback(async () => {
+  const refreshSettings = useCallback(async (notify = false) => {
     if (!isTauri) {
-      setInfo("传输设置仅在 Tauri 桌面端可调整。");
+      setInfo(t("info.settingsTauriOnly", "Transfer settings are only available in the desktop app."));
       return;
     }
     let invoke: TauriInvokeFn;
@@ -1029,7 +1004,7 @@ export default function App(): JSX.Element {
       invoke = resolveTauriInvoke();
     } catch (err) {
       console.warn("refreshSettings: invoke unavailable", err);
-      setInfo("Tauri invoke API 不可用，无法获取传输设置。");
+      setInfo(t("info.settingsInvokeMissing", "Tauri invoke API unavailable, cannot load transfer settings."));
       return;
     }
     setIsSettingsLoading(true);
@@ -1039,12 +1014,15 @@ export default function App(): JSX.Element {
       setChunkPolicyDraft(payload.chunkPolicy);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      showError(message, ["refreshStats", "copyLogs"]);
-      appendLog(`⚠️ 读取传输设置失败：${message}`);
+      if (notify) {
+        showError(message, ["refreshStats", "copyLogs"]);
+      } else {
+        console.warn("refreshSettings failed", err);
+      }
     } finally {
       setIsSettingsLoading(false);
     }
-  }, [appendLog, isTauri, setInfo, showError]);
+  }, [isTauri, setInfo, showError, t]);
 
   const saveChunkPolicy = useCallback(async () => {
     if (!settings || !chunkPolicyDraft) {
@@ -1053,7 +1031,8 @@ export default function App(): JSX.Element {
     let invoke: TauriInvokeFn;
     try {
       invoke = resolveTauriInvoke();
-    } catch (err) {
+    } catch (error) {
+      console.warn("saveChunkPolicy: invoke unavailable", error);
       showError("Tauri invoke API 不可用，无法保存设置。", ["refreshStats", "copyLogs"]);
       return;
     }
@@ -1073,7 +1052,7 @@ export default function App(): JSX.Element {
       const response = (await invoke("update_settings", { payload })) as SettingsPayload;
       setSettings(response);
       setChunkPolicyDraft(response.chunkPolicy);
-      setInfo("传输设置已保存。");
+      setInfo(t("info.settingsSaved", "Transfer settings saved."));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       showError(message, ["refreshStats", "copyLogs"]);
@@ -1081,7 +1060,7 @@ export default function App(): JSX.Element {
     } finally {
       setIsSavingSettings(false);
     }
-  }, [chunkPolicyDraft, settings, showError, appendLog, setInfo]);
+  }, [chunkPolicyDraft, settings, showError, appendLog, setInfo, t]);
 
   const updateChunkPolicyDraft = useCallback((patch: Partial<ChunkPolicySettings>) => {
     setChunkPolicyDraft((prev) => (prev ? { ...prev, ...patch } : prev));
@@ -1127,19 +1106,21 @@ export default function App(): JSX.Element {
 
   const errorActionHandlers = useMemo<Record<ErrorActionKey, () => void>>(
     () => ({
-      copyLogs: copyRecentLogs,
+      copyLogs: () => {
+        void copyRecentLogs();
+      },
       openDocs,
       refreshStats: () => {
-        void refreshTransferStats();
+        void refreshTransferStats(true);
       },
       refreshAudit: () => {
-        void refreshAuditLogs();
+        void refreshAuditLogs(true);
       },
       refreshRoutes: () => {
-        void refreshRouteMetrics();
+        void refreshRouteMetrics(true);
       },
       refreshSecurity: () => {
-        void refreshSecurityConfig();
+        void refreshSecurityConfig(true);
       },
       refreshSettings: () => {
         void refreshSettings();
@@ -1166,11 +1147,11 @@ export default function App(): JSX.Element {
 
   const activateLicense = useCallback(async () => {
     if (!isTauri) {
-      setInfo("License 激活需在 Tauri 桌面端运行。");
+      setInfo(t("info.activateTauriOnly", "License activation is only available in the desktop app."));
       return;
     }
     if (!identity) {
-      setInfo("请先注册或导入身份，再激活 License。");
+      setInfo(t("info.activateNeedIdentity", "Register or import an identity before activating a license."));
       return;
     }
     const trimmed = licenseInput.trim();
@@ -1181,7 +1162,8 @@ export default function App(): JSX.Element {
     let invoke: TauriInvokeFn;
     try {
       invoke = resolveTauriInvoke();
-    } catch (err) {
+    } catch (error) {
+      console.warn("activateLicense: invoke unavailable", error);
       showError("Tauri invoke API 不可用，无法激活 License。");
       return;
     }
@@ -1196,7 +1178,7 @@ export default function App(): JSX.Element {
       });
       setLicenseInput("");
       appendLog("🔏 License 激活成功");
-      setInfo("License 激活成功。");
+      setInfo(t("info.licenseActivated", "License activated."));
       await refreshLicenseStatus();
     } catch (err) {
       const result = handleCommandError(err, "License 激活失败");
@@ -1214,6 +1196,7 @@ export default function App(): JSX.Element {
     showError,
     clearError,
     setInfo,
+    t,
   ]);
 
   useEffect(() => {
@@ -1251,7 +1234,7 @@ export default function App(): JSX.Element {
       const message = new TextEncoder().encode(
         `${purpose}:${identity.identityId}:${deviceId}`
       );
-      const signatureBytes = await signEd25519(message, identityPrivateKey);
+      const signatureBytes = await Promise.resolve(signEd25519(message, identityPrivateKey));
       return bytesToHex(signatureBytes);
     },
     [identity, identityPrivateKey, activeDeviceId]
@@ -1298,33 +1281,32 @@ export default function App(): JSX.Element {
       }
       try {
         const invoke = resolveTauriInvoke();
-    const response = (await invoke("auth_list_devices", {
-      payload: { identityId },
-    })) as DevicesResponseDto;
-    const items = (response.items ?? []).map<DeviceState>((device) => ({
-      deviceId: device.deviceId ?? device.device_id ?? `dev_${generateRandomHex(6)}`,
-      identityId: device.identityId ?? device.identity_id ?? identityId,
-      publicKey: device.publicKey ?? device.public_key ?? "",
-      name: device.name ?? null,
-      status: device.status ?? "active",
-      lastSeenAt: device.lastSeenAt ?? device.last_seen_at ?? Date.now(),
-      capabilities: device.capabilities ?? [],
-    }));
-    setDevices(items);
-    setActiveDeviceId((prev) => {
-      if (prev && items.some((item) => item.deviceId === prev)) {
-        return prev;
-      }
-      return items[0]?.deviceId ?? prev;
-    });
-  } catch (err) {
+        const response = (await invoke("auth_list_devices", {
+          payload: { identityId },
+        })) as DevicesResponseDto;
+        const items = (response.items ?? []).map<DeviceState>((device) => ({
+          deviceId: device.deviceId ?? device.device_id ?? `dev_${generateRandomHex(6)}`,
+          identityId: device.identityId ?? device.identity_id ?? identityId,
+          publicKey: device.publicKey ?? device.public_key ?? "",
+          name: device.name ?? null,
+          status: device.status ?? "active",
+          lastSeenAt: device.lastSeenAt ?? device.last_seen_at ?? Date.now(),
+          capabilities: device.capabilities ?? [],
+        }));
+        setDevices(items);
+        setActiveDeviceId((prev) => {
+          if (prev && items.some((item) => item.deviceId === prev)) {
+            return prev;
+          }
+          return items[0]?.deviceId ?? prev;
+        });
+      } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-    showError(message);
-    appendLog(`⚠️ 拉取设备失败：${message}`);
-  }
-},
-[appendLog, identity, showError]
-);
+        showError(message);
+      }
+    },
+    [identity, showError]
+  );
 
   const refreshEntitlement = useCallback(
     async (targetIdentityId?: string) => {
@@ -1351,10 +1333,9 @@ export default function App(): JSX.Element {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         showError(message);
-        appendLog(`⚠️ 拉取权益失败：${message}`);
       }
     },
-    [appendLog, identity, showError]
+    [identity, showError]
   );
 
   const registerIdentity = useCallback(async () => {
@@ -1363,7 +1344,7 @@ export default function App(): JSX.Element {
       invoke = resolveTauriInvoke();
     } catch (err) {
       console.warn("registerIdentity: invoke unavailable", err);
-      setInfo("身份注册需在 Tauri 桌面环境完成。");
+      setInfo(t("info.identityTauriOnly", "Identity registration is only available in the desktop app."));
       return;
     }
     setIsRegisteringIdentity(true);
@@ -1371,7 +1352,7 @@ export default function App(): JSX.Element {
     try {
       ensureEd25519Hash();
       const privateKeyBytes = ed25519Utils.randomPrivateKey();
-      const publicKeyBytes = await getPublicKey(privateKeyBytes);
+      const publicKeyBytes = getPublicKey(privateKeyBytes);
       const publicKeyHex = bytesToHex(publicKeyBytes);
       const privateKeyHex = bytesToHex(privateKeyBytes);
 
@@ -1389,7 +1370,11 @@ export default function App(): JSX.Element {
       setIdentityPrivateKey(privateKeyBytes);
       setDevices([]);
       setEntitlement(null);
-      setInfo(`身份 ${resolvedId} 已注册。`);
+      setInfo(
+        t("info.identityRegistered", "Identity {id} registered.", {
+          id: resolvedId,
+        }),
+      );
       appendLog(`🪐 身份 ${resolvedId} 已注册。`);
       await rememberIdentity({
         identityId: resolvedId,
@@ -1405,7 +1390,7 @@ export default function App(): JSX.Element {
     } finally {
       setIsRegisteringIdentity(false);
     }
-  }, [appendLog, refreshEntitlement, rememberIdentity, rememberLastIdentityId, clearError, showError, t]);
+  }, [appendLog, refreshEntitlement, clearError, showError, t]);
 
   const registerDevice = useCallback(async () => {
     let invoke: TauriInvokeFn;
@@ -1413,11 +1398,11 @@ export default function App(): JSX.Element {
       invoke = resolveTauriInvoke();
     } catch (err) {
       console.warn("registerDevice: invoke unavailable", err);
-      setInfo("设备登记需在 Tauri 桌面环境完成。");
+      setInfo(t("info.deviceRegisterTauriOnly", "Device registration is only available in the desktop app."));
       return;
     }
     if (!identity) {
-      setInfo("请先注册身份。");
+      setInfo(t("info.needIdentity", "Please register an identity first."));
       return;
     }
     if (!identityPrivateKey) {
@@ -1433,10 +1418,10 @@ export default function App(): JSX.Element {
       ensureEd25519Hash();
       const deviceId = `dev_${generateRandomHex(10)}`;
       const devicePrivateBytes = ed25519Utils.randomPrivateKey();
-      const devicePublicBytes = await getPublicKey(devicePrivateBytes);
+      const devicePublicBytes = getPublicKey(devicePrivateBytes);
       const devicePublicKeyHex = bytesToHex(devicePublicBytes);
       const messageBytes = new TextEncoder().encode(`register:${deviceId}:${devicePublicKeyHex}`);
-      const signatureBytes = await signEd25519(messageBytes, identityPrivateKey);
+      const signatureBytes = signEd25519(messageBytes, identityPrivateKey);
       const signatureHex = bytesToHex(signatureBytes);
       const response = (await invoke("auth_register_device", {
         payload: {
@@ -1458,7 +1443,19 @@ export default function App(): JSX.Element {
     } finally {
       setIsRegisteringDevice(false);
     }
-  }, [appendLog, devices.length, identity, identityPrivateKey, refreshDevices, sendHeartbeat, checkDeviceLimit]);
+  }, [
+    appendLog,
+    devices.length,
+    identity,
+    identityPrivateKey,
+    refreshDevices,
+    sendHeartbeat,
+    checkDeviceLimit,
+    clearError,
+    handleCommandError,
+    showError,
+    t,
+  ]);
 
   const upgradeEntitlement = useCallback(
     async (plan: string) => {
@@ -1467,11 +1464,11 @@ export default function App(): JSX.Element {
         invoke = resolveTauriInvoke();
       } catch (err) {
         console.warn("upgradeEntitlement: invoke unavailable", err);
-        setInfo("权益升级需在 Tauri 桌面环境完成。");
+        setInfo(t("info.entitlementTauriOnly", "Plan upgrades are only available in the desktop app."));
         return;
       }
       if (!identity) {
-        setInfo("请先注册身份。");
+        setInfo(t("info.needIdentity", "Please register an identity first."));
         return;
       }
       setIsUpdatingEntitlement(true);
@@ -1501,32 +1498,32 @@ export default function App(): JSX.Element {
         setIsUpdatingEntitlement(false);
       }
     },
-    [appendLog, identity, clearError, showError]
+    [appendLog, identity, clearError, showError, t]
   );
 
   const exportPrivateKey = useCallback(async () => {
     if (!(identity && identityPrivateKey)) {
-      setInfo("当前无可导出的身份私钥。");
+      setInfo(t("info.noPrivateKey", "No private key available to export."));
       return;
     }
     try {
       const hex = bytesToHex(identityPrivateKey);
-      await rememberIdentity({
-        identityId: identity.identityId,
-        publicKeyHex: identity.publicKey,
-        privateKeyHex: hex,
-      });
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(hex);
-        setInfo("已复制私钥到剪贴板，请妥善保管。");
-      } else {
-        setInfo(hex);
-      }
+        await rememberIdentity({
+          identityId: identity.identityId,
+          publicKeyHex: identity.publicKey,
+          privateKeyHex: hex,
+        });
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(hex);
+          setInfo(t("info.privateKeyCopied", "Private key copied to clipboard. Keep it safe."));
+        } else {
+          setInfo(hex);
+        }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       showError(message);
     }
-  }, [identity, identityPrivateKey, rememberIdentity, showError]);
+  }, [identity, identityPrivateKey, showError, t]);
 
   const importIdentity = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -1549,7 +1546,7 @@ export default function App(): JSX.Element {
         if (privateBytes.length !== 32) {
           throw new Error("私钥长度必须为 32 字节");
         }
-        const publicKeyBytes = await getPublicKey(privateBytes);
+        const publicKeyBytes = getPublicKey(privateBytes);
         const publicKeyHex = bytesToHex(publicKeyBytes);
         const invoke = resolveTauriInvoke();
         const response = (await invoke("auth_register_identity", {
@@ -1571,7 +1568,11 @@ export default function App(): JSX.Element {
           privateKeyHex: privateHex,
         });
         await rememberLastIdentityId(resolvedId);
-        setInfo(`身份 ${resolvedId} 导入成功。`);
+        setInfo(
+          t("info.identityImported", "Identity {id} imported successfully.", {
+            id: resolvedId,
+          }),
+        );
         appendLog(`🧬 身份 ${resolvedId} 已导入。`);
         setImportIdentityId("");
         setImportPrivateKey("");
@@ -1585,7 +1586,7 @@ export default function App(): JSX.Element {
         setIsImportingIdentity(false);
       }
     },
-    [appendLog, importIdentityId, importPrivateKey, refreshDevices, refreshEntitlement, rememberIdentity, rememberLastIdentityId, clearError, showError]
+    [appendLog, importIdentityId, importPrivateKey, refreshDevices, refreshEntitlement, clearError, showError, t]
   );
 
   useEffect(() => {
@@ -1622,17 +1623,16 @@ export default function App(): JSX.Element {
         }
         setIdentity({ identityId: stored.identityId, publicKey: stored.publicKeyHex, label: null });
         setIdentityPrivateKey(privateBytes);
-        appendLog(`🔑 已加载身份 ${stored.identityId}`);
         await refreshEntitlement(stored.identityId);
       } catch (err) {
         console.warn("unable to initialise identity", err);
       }
     };
-    initialise();
+    void initialise();
     return () => {
       cancelled = true;
     };
-  }, [appendLog, refreshEntitlement]);
+  }, [refreshEntitlement]);
 
   useEffect(() => {
     if (!identity) {
@@ -1647,8 +1647,8 @@ export default function App(): JSX.Element {
     if (!isTauri) {
       return;
     }
-    refreshDevices(identity.identityId);
-    refreshEntitlement(identity.identityId);
+    void refreshDevices(identity.identityId);
+    void refreshEntitlement(identity.identityId);
   }, [identity, refreshDevices, refreshEntitlement, isTauri]);
 
   useEffect(() => {
@@ -1657,10 +1657,10 @@ export default function App(): JSX.Element {
       setAuditLogs([]);
       return;
     }
-    refreshTransferStats();
-    refreshAuditLogs();
-    refreshLicenseStatus();
-    refreshSecurityConfig();
+    void refreshTransferStats();
+    void refreshAuditLogs();
+    void refreshLicenseStatus();
+    void refreshSecurityConfig();
   }, [identity, isTauri, refreshTransferStats, refreshAuditLogs, refreshLicenseStatus, refreshSecurityConfig]);
 
   useEffect(() => {
@@ -1691,9 +1691,9 @@ export default function App(): JSX.Element {
     if (!deviceId) {
       return;
     }
-    sendHeartbeat("active");
+    void sendHeartbeat("active");
     const timer = window.setInterval(() => {
-      sendHeartbeat();
+      void sendHeartbeat();
     }, 15000);
     heartbeatTimerRef.current = timer as unknown as number;
     return () => {
@@ -1722,8 +1722,8 @@ export default function App(): JSX.Element {
       setSenderPublicKey(null);
       setRouteAttempts(null);
       setRouteMetrics(null);
-      setProgress(null);
-      setLogs([]);
+          setProgress(null);
+          resetLogs();
       setPeerPrompt(null);
       setTrustedPeers({});
       setPeerFingerprintInput("");
@@ -1732,12 +1732,12 @@ export default function App(): JSX.Element {
       const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
       if (canAuto && !isSending) {
         window.setTimeout(() => {
-          beginTransferRef.current?.(paths);
+            void beginTransferRef.current?.(paths);
         }, 220);
       }
     };
 
-    (async () => {
+    void (async () => {
       // 1. webview.onDragDropEvent（提供 drop 类型与绝对路径）
       try {
         const off = await getCurrentWebview().onDragDropEvent((event) => {
@@ -1791,7 +1791,7 @@ export default function App(): JSX.Element {
         }
       });
     };
-  }, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, isSending]);
+}, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, isSending, resetLogs]);
 
   // 保险：在 Tauri 环境里，系统级拖拽可能不触发 DOM onDrop。
   // 用全局 dragenter/dragleave 保证至少出现一次吸入动效，提升反馈感知。
@@ -1831,12 +1831,12 @@ export default function App(): JSX.Element {
       setRouteAttempts(null);
       setRouteMetrics(null);
       setProgress(null);
-      setLogs([]);
+      resetLogs();
       // 吸入动效（拖拽场景不自动发送）
       setAbsorbing(true);
       window.setTimeout(() => setAbsorbing(false), 900);
     },
-    [captureFiles]
+    [captureFiles, resetLogs]
   );
 
   const handleDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
@@ -1886,30 +1886,30 @@ export default function App(): JSX.Element {
         setRouteAttempts(null);
         setRouteMetrics(null);
         setProgress(null);
-        setLogs([]);
+        resetLogs();
         // 动效与自动传输
         setAbsorbing(true);
         window.setTimeout(() => setAbsorbing(false), 900);
         const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
         if (canAuto && !isSending) {
           window.setTimeout(() => {
-            beginTransferRef.current?.(normalized as unknown as string[]);
+            void beginTransferRef.current?.(normalized as unknown as string[]);
           }, 220);
         }
       } else {
         // Tauri dialog 插件不可用时，回退到浏览器文件选择器
         fileInputRef.current?.click();
-        setInfo("未检测到 Tauri 对话框插件，已使用系统文件选择器。");
+        setInfo(t("info.dialogMissing", "Tauri dialog plugin missing. Used system file selector."));
       }
-      } catch (err) {
+      } catch {
         fileInputRef.current?.click();
-        setInfo("文件选择器已回退为浏览器模式。");
+        setInfo(t("info.dialogFallback", "File picker fell back to browser mode."));
       }
     } else {
       fileInputRef.current?.click();
-      setInfo("浏览器模式仅展示 UI，传输需在 Tauri 桌面环境运行。");
+      setInfo(t("info.browserPreview", "Browser preview only shows the UI. Please use the desktop app for transfers."));
     }
-  }, []);
+  }, [activeDeviceId, clearError, devices, identity, identityPrivateKey, isSending, resetLogs, t]);
 
   const handleFileInput = (event: React.ChangeEvent<HTMLInputElement>) => {
     captureFiles(event.target.files);
@@ -1921,25 +1921,392 @@ export default function App(): JSX.Element {
     setRouteAttempts(null);
     setRouteMetrics(null);
     setProgress(null);
-    setLogs([]);
+    resetLogs();
     // 仅播放吸入动效（input 回退场景无法拿到绝对路径，不自动发送）
     setAbsorbing(true);
     window.setTimeout(() => setAbsorbing(false), 900);
   };
 
-  const humanSpeed = useMemo(() => {
-    if (!progress || !progress.speedBps) {
-      return null;
-    }
-    const value = progress.speedBps;
-    if (value >= 1024 ** 2) {
-      return `${(value / 1024 ** 2).toFixed(1)} MB/s`;
-    }
-    if (value >= 1024) {
-      return `${(value / 1024).toFixed(1)} KB/s`;
-    }
-    return `${value} B/s`;
-  }, [progress]);
+  const showInlineStartButton = isTauri && !(identity && identityPrivateKey && (activeDeviceId || devices[0]));
+  const canStartTransfer = pendingPaths.length > 0;
+  const hasActiveTransfer = Boolean(taskId || taskCode || progress);
+
+  const monitorExtra = (
+    <>
+      <div className="route-metrics-actions">
+        <button type="button" className="secondary" onClick={() => void refreshRouteMetrics(true)} disabled={isRouteMetricsLoading}>
+          {isRouteMetricsLoading ? "正在获取…" : "查看路由统计"}
+        </button>
+      </div>
+      {routeMetrics && routeMetrics.length > 0 && (
+        <div className="route-metrics-panel">
+          <table>
+            <thead>
+              <tr>
+                <th>路由</th>
+                <th>尝试次数</th>
+                <th>成功次数</th>
+                <th>失败次数</th>
+                <th>成功率</th>
+                <th>平均握手 (ms)</th>
+                <th>最后错误</th>
+              </tr>
+            </thead>
+            <tbody>
+              {routeMetrics.map((metric) => (
+                <tr key={metric.route}>
+                  <td>{metric.route.toUpperCase()}</td>
+                  <td>{metric.attempts}</td>
+                  <td>{metric.successes}</td>
+                  <td>{metric.failures}</td>
+                  <td>{typeof metric.successRate === "number" ? `${(metric.successRate * 100).toFixed(1)}%` : "—"}</td>
+                  <td>{metric.avgLatencyMs ? metric.avgLatencyMs.toFixed(1) : "—"}</td>
+                  <td>{metric.lastError ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+
+  const statsContent = identity ? (
+    <PanelBoundary
+      fallbackKey="panel.statsError"
+      fallbackDefault="无法加载传输统计，请刷新重试。"
+      onRetry={() => {
+        void refreshTransferStats(true);
+        void refreshLicenseStatus(true);
+      }}
+    >
+      <section className="stats-panel" aria-label={t("panel.stats", "传输统计")}>
+        <div className="panel-header">
+          <h4>{t("panel.stats", "传输统计")}</h4>
+          <button type="button" className="secondary" onClick={() => void refreshTransferStats(true)} disabled={isStatsLoading}>
+            {isStatsLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
+          </button>
+        </div>
+        <div className="license-summary">
+          <div className="license-header">
+            <div>
+              <span className="stat-label">{t("license.current", "当前权益")}</span>
+              <strong className="stat-value">{licenseStatus ? licenseStatus.tier.toUpperCase() : "—"}</strong>
+            </div>
+            <button type="button" className="secondary" onClick={() => void refreshLicenseStatus(true)} disabled={isLicenseLoading}>
+              {isLicenseLoading ? t("actions.syncingLicense", "同步权益…") : t("actions.syncLicense", "刷新权益")}
+            </button>
+          </div>
+          {licenseStatus ? (
+            <>
+              {typeof licenseStatus.p2pQuota === "number" && (
+                <div className="quota-section">
+                  <span className="stat-label">{t("license.quota", "跨网配额")}</span>
+                  <div className="quota-bar">
+                    <span
+                      className="quota-progress"
+                      style={{
+                        width: `${Math.min(100, (licenseStatus.p2pUsed / Math.max(licenseStatus.p2pQuota, 1)) * 100).toFixed(0)}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="quota-text">
+                    {t("license.quotaUsage", "已用 {used} / {quota} 次", {
+                      used: licenseStatus.p2pUsed,
+                      quota: licenseStatus.p2pQuota ?? 0,
+                    })}
+                  </span>
+                </div>
+              )}
+              <ul className="license.meta">
+                <li>License Key：{maskLicenseKey(licenseStatus.licenseKey)}</li>
+                <li>签发：{formatAbsoluteTime(licenseStatus.issuedAt)}</li>
+                <li>到期：{licenseStatus.expiresAt ? formatAbsoluteTime(licenseStatus.expiresAt) : "无固定期限"}</li>
+              </ul>
+              <div className="license-limits">
+                <span>{licenseStatus.limits.resumeEnabled ? "✅ 支持断点续传" : "⚠️ 无断点续传"}</span>
+                <span>
+                  {licenseStatus.limits.maxFileSizeMb ? `单文件 ≤ ${(licenseStatus.limits.maxFileSizeMb / 1024).toFixed(1)} GB` : "文件大小无限制"}
+                </span>
+                <span>{licenseStatus.limits.maxDevices ? `设备上限 ${licenseStatus.limits.maxDevices}` : "设备数量无限制"}</span>
+              </div>
+            </>
+          ) : (
+            <p className="stats-empty">{t("license.empty", "暂无权益信息，请刷新后重试。")}</p>
+          )}
+          <form
+            className="license-activate"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void activateLicense();
+            }}
+          >
+            <input
+              type="text"
+              placeholder={t("license.placeholder", "输入 License Key，例如 QD-PRO-XXXX-YYYY")}
+              value={licenseInput}
+              onChange={(event) => setLicenseInput(event.target.value)}
+              disabled={isActivatingLicense}
+            />
+            <button type="submit" className="primary" disabled={isActivatingLicense || licenseInput.trim().length === 0}>
+              {isActivatingLicense ? t("actions.activating", "激活中…") : t("actions.activate", "激活 License")}
+            </button>
+            <button type="button" className="secondary" onClick={copySampleLicense}>
+              {t("actions.copySample", "复制示例")}
+            </button>
+          </form>
+        </div>
+        {transferStats ? (
+          <>
+            <div className="stat-cards">
+              <div className="stat-card">
+                <span className="stat-label">{t("stats.totalTransfers", "总传输次数")}</span>
+                <strong className="stat-value">{transferStats.totalTransfers}</strong>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">{t("stats.totalBytes", "传输总量")}</span>
+                <strong className="stat-value">{formatSize(transferStats.totalBytes)}</strong>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">{t("stats.successRate", "成功率")}</span>
+                <strong className="stat-value">{(transferStats.successRate * 100).toFixed(1)}%</strong>
+                <span className="stat-subtext">
+                  {t("stats.successFailure", "成功 {succ} · 失败 {fail}", {
+                    succ: transferStats.successCount,
+                    fail: transferStats.failureCount,
+                  })}
+                </span>
+              </div>
+            </div>
+            <div className="route-distribution">
+              <div className="route-bar" aria-hidden="true">
+                {(transferStats.routeDistribution ?? []).map((route) => (
+                  <span key={route.route} style={{ width: `${route.ratio * 100}%` }} />
+                ))}
+              </div>
+              <ul>
+                {(transferStats.routeDistribution ?? []).map((route) => (
+                  <li key={`${route.route}-stat`}>
+                    <strong>{route.route.toUpperCase()}</strong>
+                    <span>{(route.ratio * 100).toFixed(1)}%</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </>
+        ) : (
+          <p className="stats-empty">{t("stats.emptyTransfers", "暂无传输记录。")}</p>
+        )}
+      </section>
+    </PanelBoundary>
+  ) : (
+    <p className="stats-empty">注册身份后可查看传输统计。</p>
+  );
+
+  const auditContent = identity ? (
+    <PanelBoundary
+      fallbackKey="panel.auditError"
+      fallbackDefault="无法加载审计日志，请刷新重试。"
+      onRetry={() => void refreshAuditLogs(true)}
+    >
+      <section className="audit-panel" aria-label={t("panel.audit", "操作审计")}>
+        <div className="panel-header">
+          <h4>{t("panel.audit", "操作审计")}</h4>
+          <button type="button" className="secondary" onClick={() => void refreshAuditLogs(true)} disabled={isAuditLoading}>
+            {isAuditLoading ? t("actions.syncingAudit", "同步中…") : t("actions.syncAudit", "刷新")}
+          </button>
+        </div>
+        {auditLogs.length > 0 ? (
+          <ul className="audit-list">
+            {auditLogs.slice(0, 8).map((entry) => {
+              const detailRaw = summarizeAuditDetails(entry.details ?? {});
+              const detailText = detailRaw.length > 160 ? `${detailRaw.slice(0, 157)}…` : detailRaw;
+              return (
+                <li key={entry.id}>
+                  <div className="audit-header">
+                    <span className="audit-event">{entry.eventType}</span>
+                    <span className="audit-time">{formatRelativeTime(entry.timestamp, locale)}</span>
+                  </div>
+                  <div className="audit-meta">
+                    <span>{formatAbsoluteTime(entry.timestamp)}</span>
+                    {entry.deviceId && <span>终端 {entry.deviceId}</span>}
+                    {entry.taskId && <span>任务 {entry.taskId}</span>}
+                  </div>
+                  {detailText && <p className="audit-details">{detailText}</p>}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="stats-empty">{t("audit.empty", "暂无审计记录。")}</p>
+        )}
+      </section>
+    </PanelBoundary>
+  ) : (
+    <p className="stats-empty">{t("audit.empty", "暂无审计记录。")}</p>
+  );
+
+  const securityContent = identity ? (
+    <>
+      <PanelBoundary
+        fallbackKey="panel.securityError"
+        fallbackDefault="无法加载安全策略，请刷新重试。"
+        onRetry={() => void refreshSecurityConfig(true)}
+      >
+        <section className="security-panel" aria-label={t("panel.security", "安全策略")}>
+          <div className="panel-header">
+            <h4>{t("panel.security", "安全策略")}</h4>
+            <button type="button" className="secondary" onClick={() => void refreshSecurityConfig(true)} disabled={isSecurityLoading}>
+              {isSecurityLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
+            </button>
+          </div>
+          {securityConfig ? (
+            <ul className="security-list">
+              <li data-enabled={securityConfig.enforceSignatureVerification}>
+                <strong>{t("settings.security.signature", "签名校验")}</strong>
+                <span>
+                  {securityConfig.enforceSignatureVerification
+                    ? t("settings.security.enabledRecommended", "已启用（推荐）")
+                    : t("settings.security.disabled", "未启用")}
+                </span>
+              </li>
+              <li data-enabled={securityConfig.disconnectOnVerificationFail}>
+                <strong>{t("settings.security.disconnect", "验签失败断开")}</strong>
+                <span>
+                  {securityConfig.disconnectOnVerificationFail
+                    ? t("settings.security.disconnect.strict", "失败即断开")
+                    : t("settings.security.disconnect.warn", "失败仅警告")}
+                </span>
+              </li>
+              <li data-enabled={securityConfig.enableAuditLog}>
+                <strong>{t("settings.security.audit", "审计日志")}</strong>
+                <span>
+                  {securityConfig.enableAuditLog
+                    ? t("settings.security.audit.enabled", "记录到本地 SQLite")
+                    : t("settings.security.audit.disabled", "未记录")}
+                </span>
+              </li>
+            </ul>
+          ) : (
+            <p className="stats-empty">{t("settings.security.empty", "无法读取安全策略，请刷新或检查配置。")}</p>
+          )}
+        </section>
+      </PanelBoundary>
+      <PanelBoundary fallbackKey="panel.trustedError" fallbackDefault="无法读取信任列表，请刷新。" onRetry={() => void refreshDevices()}>
+        {Object.keys(trustedPeers).length > 0 ? (
+          <div className="trusted-peers-panel">
+            <div className="panel-header">
+              <h4>{t("panel.trusted", "已信任设备")}</h4>
+              <button type="button" className="secondary" onClick={clearTrustedPeers}>
+                {t("trusted.clear", "清空")}
+              </button>
+            </div>
+            <ul>
+              {Object.values(trustedPeers).map((peer) => (
+                <li key={`${peer.sessionId}-${peer.deviceId}`}>
+                  <strong>{peer.deviceName ?? peer.deviceId}</strong>
+                  <span className="peer-fingerprint">{peer.fingerprint ?? t("trusted.unknownFingerprint", "未知指纹")}</span>
+                  <span className="peer-status">
+                    {peer.verified ? t("trusted.status.verified", "签名通过") : t("trusted.status.manual", "手动信任")}
+                  </span>
+                  <button type="button" className="plain" onClick={() => removeTrustedPeer(peer.deviceId)}>
+                    {t("trusted.remove", "移除")}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <p className="stats-empty">尚未信任任何设备。</p>
+        )}
+      </PanelBoundary>
+    </>
+  ) : (
+    <p className="stats-empty">{t("panel.security", "安全策略")}将在注册身份后显示。</p>
+  );
+
+  const settingsContent = identity ? (
+    <PanelBoundary
+      fallbackKey="panel.settingsError"
+      fallbackDefault="无法加载传输设置，请刷新重试。"
+      onRetry={() => void refreshSettings(true)}
+    >
+      <section className="settings-panel" aria-label={t("panel.settings", "传输设置")}>
+        <div className="panel-header">
+          <h4>{t("panel.settings", "传输设置")}</h4>
+          <button type="button" className="secondary" onClick={() => void refreshSettings(true)} disabled={isSettingsLoading}>
+            {isSettingsLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
+          </button>
+        </div>
+        {chunkPolicyDraft ? (
+          <form
+            className="settings-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveChunkPolicy();
+            }}
+          >
+            <div className="form-grid">
+              <label className="field-group">
+                <span className="field-label">{t("settings.chunk.adaptive", "自适应 Chunk")}</span>
+                <span className="field-hint">{t("settings.chunk.help", "根据网络情况自动调整 Chunk")}</span>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={chunkPolicyDraft.adaptive}
+                    onChange={handleChunkAdaptiveChange}
+                    disabled={chunkSettingsDisabled}
+                  />
+                  <span>{chunkPolicyDraft.adaptive ? "已开启" : "已关闭"}</span>
+                </label>
+              </label>
+              <label className="field-group">
+                <span className="field-label">{t("settings.chunk.min", "最小 Chunk (MiB)")}</span>
+                <input
+                  type="number"
+                  min={2}
+                  max={16}
+                  value={chunkMinMb}
+                  onChange={handleChunkMinChange}
+                  disabled={chunkSettingsDisabled}
+                />
+              </label>
+              <label className="field-group">
+                <span className="field-label">{t("settings.chunk.max", "最大 Chunk (MiB)")}</span>
+                <input
+                  type="number"
+                  min={chunkMinMb}
+                  max={16}
+                  value={chunkMaxMb}
+                  onChange={handleChunkMaxChange}
+                  disabled={chunkSettingsDisabled}
+                />
+              </label>
+              <label className="field-group">
+                <span className="field-label">{t("settings.chunk.streams", "LAN 并发流数")}</span>
+                <select value={lanStreamsDraft} onChange={handleLanStreamsChange} disabled={chunkSettingsDisabled}>
+                  {[1, 2, 3, 4].map((count) => (
+                    <option key={count} value={count}>
+                      {count}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="actions-row">
+              <button type="submit" className="primary" disabled={chunkSettingsDisabled || isSavingSettings}>
+                {isSavingSettings ? t("settings.chunk.saving", "保存中…") : t("settings.chunk.save", "保存设置")}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <p className="stats-empty">{t("settings.chunk.empty", "暂无设置，请刷新或稍后重试。")}</p>
+        )}
+      </section>
+    </PanelBoundary>
+  ) : (
+    <p className="stats-empty">{t("panel.settings", "传输设置")}仅对已登录身份开放。</p>
+  );
 
   const beginTransfer = useCallback(async (pathsOverride?: string[]) => {
     let invoke: TauriInvokeFn;
@@ -1947,21 +2314,21 @@ export default function App(): JSX.Element {
       invoke = resolveTauriInvoke();
     } catch (err) {
       console.warn("beginTransfer: invoke unavailable", err);
-      setInfo("需要在 Tauri 桌面环境下运行才能触发模拟传输。");
+      setInfo(t("info.transferDesktopOnly", "Simulated transfer requires the desktop app."));
       return;
     }
     if (!identity || !identityPrivateKey) {
-      setInfo("请先创建或导入量子身份。");
+      setInfo(t("info.needIdentityDetailed", "Create or import an identity first."));
       return;
     }
     const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
     if (!activeDevice) {
-      setInfo("请至少登记一个终端设备。");
+      setInfo(t("info.needDevice", "Please register at least one device."));
       return;
     }
     const pathsToUse = Array.isArray(pathsOverride) && pathsOverride.length > 0 ? pathsOverride : pendingPaths;
     if (pathsToUse.length === 0) {
-      setInfo("请选择至少一个文件。");
+      setInfo(t("info.needFile", "Please select at least one file."));
       return;
     }
     if (!checkFileSizeLimit()) {
@@ -2012,7 +2379,19 @@ export default function App(): JSX.Element {
     } finally {
       setIsSending(false);
     }
-  }, [appendLog, pendingPaths, identity, devices, activeDeviceId, signPurpose, handleCommandError, clearError, checkFileSizeLimit]);
+  }, [
+    appendLog,
+    pendingPaths,
+    identity,
+    identityPrivateKey,
+    devices,
+    activeDeviceId,
+    signPurpose,
+    handleCommandError,
+    clearError,
+    checkFileSizeLimit,
+    t,
+  ]);
 
   useEffect(() => {
     beginTransferRef.current = beginTransfer;
@@ -2052,228 +2431,24 @@ export default function App(): JSX.Element {
     }
   }, [trustedPeers]);
 
-  const chooseReceiveDirectory = useCallback(async () => {
-    if (!detectTauri()) {
-      setInfo("请选择保存目录（仅支持桌面端）");
-      return;
-    }
-    try {
-      const tauri = getTauri();
-      const dialogAny = tauri as { dialog?: TauriDialogApi };
-      if (!dialogAny.dialog?.open) {
-        setInfo("未检测到目录选择插件， 请手动输入路径。");
-        return;
-      }
-      const selected = await dialogAny.dialog.open({ directory: true, multiple: false });
-      if (typeof selected === "string") {
-        setReceiveDir(selected);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      showError(message);
-    }
-  }, [showError]);
 
-const handleManualReceive = useCallback(async () => {
-    if (!detectTauri()) {
-      setInfo("接收功能需在 Tauri 桌面端运行。");
-      return;
-    }
-    if (!identity || !identityPrivateKey) {
-      setInfo("请先创建或导入量子身份。");
-      return;
-    }
-    const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
-    if (!activeDevice) {
-      setInfo("请至少登记一个终端设备。");
-      return;
-    }
-    const code = receiveCode.trim();
-    const host = receiveHost.trim();
-    const senderKey = receiveSenderKey.trim();
-    const portValue = Number.parseInt(receivePort, 10);
-    if (!code) {
-      setInfo("请输入 6 位配对码。");
-      return;
-    }
-    if (!host) {
-      setInfo("请输入发送方 IP 地址。");
-      return;
-    }
-    if (!Number.isFinite(portValue) || portValue <= 0 || portValue > 65535) {
-      setInfo("请输入合法端口（1-65535）。");
-      return;
-    }
-    if (!senderKey) {
-      setInfo("请输入发送方公钥。");
-      return;
-    }
-    if (senderKey.length !== 64) {
-      setInfo("公钥长度应为 64 位十六进制。");
-      return;
-    }
-    try {
-      hexToBytes(senderKey);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setInfo(message);
-      return;
-    }
-    if (!receiveDir.trim()) {
-      setInfo("请选择保存目录。");
-      return;
-    }
-    if (!receiveSenderKey.trim()) {
-      setInfo("请输入发送方公钥。");
-      return;
-    }
-    if (!receiveSenderFingerprint.trim()) {
-      setInfo("请输入发送方证书指纹。");
-      return;
-    }
-    let invoke: TauriInvokeFn;
-    try {
-      invoke = resolveTauriInvoke();
-    } catch (err) {
-      setInfo("Tauri invoke API 不可用，无法启动接收。");
-      return;
-    }
-    setIsReceiving(true);
-    clearError();
-    setInfo(null);
-    setRouteAttempts(null);
-    setRouteMetrics(null);
-    try {
-      const signature = await signPurpose("receive", activeDevice.deviceId);
-      await invoke("courier_receive", {
-        auth: {
-          identityId: identity.identityId,
-          deviceId: activeDevice.deviceId,
-          signature,
-          payload: {
-            code,
-            saveDir: receiveDir,
-            host,
-            port: portValue,
-            senderPublicKey: senderKey,
-            senderCertFingerprint: receiveSenderFingerprint.trim(),
-          },
-        },
-      });
-      setTaskCode(code);
-      setSenderPublicKey(null);
-      appendLog("接收流程已启动，等待发送端开始传输…");
-    } catch (err) {
-      const result = handleCommandError(err, "接收启动失败");
-      appendLog(`接收启动失败：${result.message}`);
-    } finally {
-      setIsReceiving(false);
-    }
-  }, [
-    identity,
-    identityPrivateKey,
-    devices,
-    activeDeviceId,
-    receiveCode,
-    receiveHost,
-    receivePort,
-    receiveDir,
-    receiveSenderKey,
-    signPurpose,
-    appendLog,
-    handleCommandError,
-    clearError,
-  ]);
-
-  const connectByCode = useCallback(
-    async (overrideCode?: string) => {
-      if (!detectTauri()) {
-        setInfo("自动发现仅在 Tauri 桌面端可用。");
-        return;
-      }
-      if (!identity || !identityPrivateKey) {
-        setInfo("请先创建或导入量子身份。");
-        return;
-      }
-      const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
-      if (!activeDevice) {
-        setInfo("请至少登记一个终端设备。");
-        return;
-      }
-      const codeValue = (overrideCode ?? receiveCode).trim();
-      if (!codeValue) {
-        setInfo("请输入 6 位配对码。");
-        return;
-      }
-      if (!receiveDir.trim()) {
-        setInfo("请选择保存目录。");
-        return;
-      }
-      let invoke: TauriInvokeFn;
-      try {
-        invoke = resolveTauriInvoke();
-      } catch (err) {
-        setInfo("Tauri invoke API 不可用，无法启动接收。");
-        return;
-      }
-      setIsReceiving(true);
-      clearError();
-      setInfo(null);
-      setRouteAttempts(null);
-      setRouteMetrics(null);
-      try {
-        const signature = await signPurpose("receive", activeDevice.deviceId);
-        await invoke("courier_connect_by_code", {
-          auth: {
-            identityId: identity.identityId,
-            deviceId: activeDevice.deviceId,
-            signature,
-            payload: {
-              code: codeValue,
-              saveDir: receiveDir,
-            },
-          },
-        });
-        setTaskCode(codeValue);
-        setSenderPublicKey(null);
-        appendLog("已通过 mDNS 自动发现发送方，等待连接…");
-      } catch (err) {
-        const result = handleCommandError(err, "接收启动失败");
-        appendLog(`接收启动失败：${result.message}`);
-      } finally {
-        setIsReceiving(false);
-      }
-    },
-    [
-      identity,
-      identityPrivateKey,
-      devices,
-      activeDeviceId,
-      receiveCode,
-      receiveDir,
-      signPurpose,
-      appendLog,
-      handleCommandError,
-      clearError,
-    ]
-  );
 
   const handleWebRtcSenderTest = useCallback(async () => {
     if (!detectTauri()) {
-      setInfo("WebRTC 测试需在 Tauri 桌面端运行。");
+      setInfo(t("info.webrtcTauriOnly", "WebRTC tests require the desktop app."));
       return;
     }
     if (!identity || !identityPrivateKey) {
-      setInfo("请先完成身份初始化。");
+      setInfo(t("info.needIdentityInitialized", "Complete identity setup first."));
       return;
     }
     const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
     if (!activeDevice) {
-      setInfo("请至少登记一个终端设备。");
+      setInfo(t("info.needDevice", "Please register at least one device."));
       return;
     }
     if (pendingPaths.length === 0) {
-      setInfo("请选择至少一个文件再尝试 WebRTC 发送。");
+      setInfo(t("info.needFileForWebrtc", "Select at least one file before starting WebRTC send."));
       return;
     }
     if (!checkP2pQuota()) {
@@ -2283,7 +2458,7 @@ const handleManualReceive = useCallback(async () => {
     try {
       invoke = resolveTauriInvoke();
     } catch {
-      setInfo("未检测到 Tauri invoke API，无法启动测试。");
+      setInfo(t("info.webrtcInvokeMissing", "Tauri invoke API unavailable, cannot start WebRTC test."));
       return;
     }
     const codeValue = (taskCode ?? generatePairingCode()).toUpperCase();
@@ -2312,7 +2487,7 @@ const handleManualReceive = useCallback(async () => {
       }
       setSenderPublicKey(null);
       appendLog(`WebRTC P2P 发送任务已启动（配对码 ${codeValue}）。`);
-      setInfo("已启动 WebRTC 发送测试，等待接收方加入。");
+      setInfo(t("info.webrtcSenderStarted", "WebRTC sender started, waiting for receiver."));
       incrementP2pUsage();
     } catch (err) {
       const result = handleCommandError(err, "WebRTC 发送失败");
@@ -2333,126 +2508,26 @@ const handleManualReceive = useCallback(async () => {
     clearError,
     checkP2pQuota,
     incrementP2pUsage,
+    t,
   ]);
 
-  const handleWebRtcReceiverTest = useCallback(async () => {
-    if (!detectTauri()) {
-      setInfo("WebRTC 测试需在 Tauri 桌面端运行。");
-      return;
-    }
-    if (!identity || !identityPrivateKey) {
-      setInfo("请先完成身份初始化。");
-      return;
-    }
-    const activeDevice = devices.find((device) => device.deviceId === activeDeviceId) ?? devices[0];
-    if (!activeDevice) {
-      setInfo("请至少登记一个终端设备。");
-      return;
-    }
-    const codeValue = receiveCode.trim().toUpperCase();
-    if (!codeValue) {
-      setInfo("请输入配对码再启动 WebRTC 接收。");
-      return;
-    }
-    if (!receiveDir.trim()) {
-      setInfo("请选择保存目录。");
-      return;
-    }
-    if (!checkP2pQuota()) {
-      return;
-    }
-    let invoke: TauriInvokeFn;
-    try {
-      invoke = resolveTauriInvoke();
-    } catch {
-      setInfo("未检测到 Tauri invoke API，无法启动测试。");
-      return;
-    }
-    setIsReceiving(true);
-    clearError();
-    setInfo(null);
-    try {
-      const signature = await signPurpose("webrtc_receive", activeDevice.deviceId);
-      const response = (await invoke("courier_start_webrtc_receiver", {
-        auth: {
-          identityId: identity.identityId,
-          deviceId: activeDevice.deviceId,
-          signature,
-          payload: {
-            code: codeValue,
-            saveDir: receiveDir,
-            devicePublicKey: activeDevice.publicKey,
-            deviceName: activeDevice.name,
-          },
-        },
-      })) as TaskResponseDto;
-      const resolvedTaskId = response.taskId ?? response.task_id ?? null;
-      if (resolvedTaskId) {
-        setTaskId(resolvedTaskId);
-      }
-      setTaskCode(codeValue);
-      setSenderPublicKey(null);
-      appendLog(`WebRTC P2P 接收任务已启动（配对码 ${codeValue}）。`);
-      setInfo("已启动 WebRTC 接收测试，等待发送方。");
-      incrementP2pUsage();
-    } catch (err) {
-      const result = handleCommandError(err, "WebRTC 接收失败");
-      appendLog(`WebRTC 接收失败：${result.message}`);
-    } finally {
-      setIsReceiving(false);
-    }
-  }, [
-    identity,
-    identityPrivateKey,
-    devices,
-    activeDeviceId,
-    receiveCode,
-    receiveDir,
-    signPurpose,
-    appendLog,
-    handleCommandError,
-    clearError,
-    checkP2pQuota,
-    incrementP2pUsage,
-  ]);
-
-  const scanSenders = useCallback(async () => {
-    if (!detectTauri()) {
-      setInfo("扫描需在 Tauri 桌面端运行。");
-      return;
-    }
-    let invoke: TauriInvokeFn;
-    try {
-      invoke = resolveTauriInvoke();
-    } catch (err) {
-      setInfo("Tauri invoke API 不可用，无法扫描发送方。");
-      return;
-    }
-    setIsScanning(true);
-    clearError();
-    try {
-      const result = (await invoke("courier_list_senders", {})) as SenderInfo[];
-      setAvailableSenders(result);
-    } catch (err) {
-      const result = handleCommandError(err, "发送方扫描失败");
-      appendLog(`扫描失败：${result.message}`);
-    } finally {
-      setIsScanning(false);
-    }
-  }, [appendLog, handleCommandError, clearError]);
 
   const handleCopy = useCallback(
     async (field: string, value: string) => {
       try {
         await copyPlainText(value);
-        setInfo(`${field} 已复制到剪贴板。`);
+        setInfo(
+          t("info.fieldCopied", "{field} copied to clipboard.", {
+            field,
+          }),
+        );
         appendLog(`📋 ${field} 已复制。`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         showError(message);
       }
     },
-    [appendLog, showError]
+    [appendLog, showError, t]
   );
 
   const submitDeviceUpdate = useCallback(
@@ -2462,11 +2537,11 @@ const handleManualReceive = useCallback(async () => {
         invoke = resolveTauriInvoke();
       } catch (err) {
         console.warn("submitDeviceUpdate: invoke unavailable", err);
-        setInfo("终端信息更新仅在 Tauri 桌面环境可用。");
+        setInfo(t("info.deviceUpdateTauriOnly", "Device updates are only available in the desktop app."));
         return;
       }
       if (!identity) {
-        setInfo("请先注册身份。");
+        setInfo(t("info.needIdentity", "Please register an identity first."));
         return;
       }
       if (!identityPrivateKey) {
@@ -2475,7 +2550,7 @@ const handleManualReceive = useCallback(async () => {
       }
       const targetDeviceId = activeDeviceId ?? devices[0]?.deviceId ?? null;
       if (!targetDeviceId) {
-        setInfo("请至少登记一个终端设备。");
+        setInfo(t("info.needDevice", "Please register at least one device."));
         return;
       }
       setIsUpdatingDevice(true);
@@ -2485,23 +2560,24 @@ const handleManualReceive = useCallback(async () => {
         const statusValue = rawStatus && rawStatus.length > 0 ? rawStatus : "active";
         const signature = await signPurpose("update_device", targetDeviceId);
         const trimmedName = editDeviceName.trim();
+        const payload: DeviceUpdatePayloadDto = {
+          name: trimmedName.length > 0 ? trimmedName : null,
+          status: statusValue,
+          capabilities: heartbeatCapabilities,
+        };
         await invoke("auth_update_device", {
           auth: {
             identityId: identity.identityId,
             deviceId: targetDeviceId,
             signature,
-            payload: {
-              name: trimmedName.length > 0 ? trimmedName : null,
-              status: statusValue,
-              capabilities: heartbeatCapabilities,
-            },
+            payload,
           },
-  });
+        });
         await refreshDevices(identity.identityId);
         if (overrideStatus) {
           setEditDeviceStatus(statusValue);
         }
-        setInfo("终端信息已更新。");
+        setInfo(t("info.deviceUpdated", "Device updated."));
         appendLog(`🛠️ 终端 ${targetDeviceId} 已更新为 ${statusValue}。`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -2524,6 +2600,7 @@ const handleManualReceive = useCallback(async () => {
       appendLog,
       showError,
       clearError,
+      t,
     ]
   );
 
@@ -2531,9 +2608,26 @@ const handleManualReceive = useCallback(async () => {
     void submitDeviceUpdate("inactive");
   }, [submitDeviceUpdate]);
 
+  const handleSetDeviceStandby = useCallback(() => {
+    void submitDeviceUpdate("standby");
+  }, [submitDeviceUpdate]);
+
+  const handleToggleEntitlement = useCallback(() => {
+    void upgradeEntitlement(entitlement?.plan === "pro" ? "free" : "pro");
+  }, [entitlement?.plan, upgradeEntitlement]);
+
+  const handleSyncIdentity = useCallback(() => {
+    if (!detectTauri()) {
+      setInfo(t("info.syncTauriOnly", "Resync requires the desktop app."));
+      return;
+    }
+    void refreshDevices();
+    void refreshEntitlement();
+  }, [refreshDevices, refreshEntitlement, setInfo, t]);
+
   const forgetCurrentIdentity = useCallback(async () => {
     if (!identity) {
-      setInfo("暂无可移除的身份。");
+      setInfo(t("info.noIdentityToRemove", "No identity to remove."));
       return;
     }
     setIsForgettingIdentity(true);
@@ -2555,9 +2649,9 @@ const handleManualReceive = useCallback(async () => {
       setSenderPublicKey(null);
       setRouteAttempts(null);
       setProgress(null);
-      setLogs([]);
+      resetLogs();
       appendLog(`🧹 已忘记身份 ${identity.identityId}`);
-      setInfo("身份已从本机移除，下次启动需重新导入。");
+      setInfo(t("info.identityRemoved", "Identity removed from this device. Import it again next time."));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       showError(message);
@@ -2565,7 +2659,7 @@ const handleManualReceive = useCallback(async () => {
     } finally {
       setIsForgettingIdentity(false);
     }
-  }, [identity, appendLog, clearError, showError]);
+  }, [identity, appendLog, clearError, showError, resetLogs, t]);
 
   useEffect(() => {
     if (!isTauri) {
@@ -2577,7 +2671,6 @@ const handleManualReceive = useCallback(async () => {
       const tauri = getTauri();
       const listen = tauri?.event?.listen;
       if (!listen) {
-        showError("Tauri 事件模块不可用，无法监听传输进度。");
         return;
       }
       const progressListener = await listen<TransferProgressPayload>("transfer_progress", (event) => {
@@ -2588,15 +2681,6 @@ const handleManualReceive = useCallback(async () => {
         if (Array.isArray(event.payload.routeAttempts)) {
           setRouteAttempts(event.payload.routeAttempts);
         }
-        if (event.payload.message) {
-          appendLog(event.payload.message);
-        }
-      });
-      const logListener = await listen<TransferLogPayload>("transfer_log", (event) => {
-        if (!active) {
-          return;
-        }
-        appendLog(event.payload.message);
       });
       const devicesListener = await listen<IdentityDevicesEventPayload>(
         "identity_devices_updated",
@@ -2634,14 +2718,12 @@ const handleManualReceive = useCallback(async () => {
         }
         const message = event.payload.message ?? "传输失败。";
         showError(message);
-        appendLog(`✖ 传输失败：${event.payload.message ?? "未知错误"}`);
       });
-      const completedListener = await listen<TransferLifecyclePayload>("transfer_completed", (event) => {
+      const completedListener = await listen<TransferLifecyclePayload>("transfer_completed", (_event) => {
         if (!active) {
           return;
         }
-        setInfo("传输完成，PoT 证明已生成。");
-        appendLog(`✔ 传输完成：${event.payload.message ?? "PoT 已就绪"}`);
+        setInfo(t("info.transferComplete", "Transfer complete. PoT generated."));
       });
       const peerListener = await listen<PeerDiscoveredPayload>("peer_discovered", (event) => {
         if (!active) {
@@ -2664,25 +2746,15 @@ const handleManualReceive = useCallback(async () => {
             ...prev,
             [event.payload.deviceId]: event.payload,
           }));
-          appendLog(
-            `🤝 自动信任设备 ${event.payload.deviceName ?? event.payload.deviceId}${
-              event.payload.verified ? "（签名通过）" : "（来源于已信任列表）"
-            }`
-          );
           return;
         }
         setPeerPrompt(event.payload);
         setPeerFingerprintInput("");
-        appendLog(
-          `🔔 发现新设备 ${event.payload.deviceName ?? event.payload.deviceId}${
-            event.payload.verified ? "（已签名验证）" : ""
-          }`
-        );
       });
-      unlistenRefs.push(progressListener, logListener, failedListener, completedListener);
+      unlistenRefs.push(progressListener, failedListener, completedListener);
       unlistenRefs.push(devicesListener, peerListener);
     };
-    setup();
+    void setup();
     return () => {
       active = false;
       unlistenRefs.forEach((unlisten) => {
@@ -2693,7 +2765,7 @@ const handleManualReceive = useCallback(async () => {
         }
       });
     };
-  }, [appendLog, identity, isTauri, showError]);
+  }, [identity, isTauri, showError, t]);
 
   useEffect(() => {
     if (progress?.phase === "done") {
@@ -2714,1093 +2786,166 @@ const handleManualReceive = useCallback(async () => {
     }
   }, [settings]);
 
+  useEffect(() => {
+    if ((taskId || taskCode || progress) && currentPage !== "control") {
+      setCurrentPage("control");
+    }
+  }, [taskId, taskCode, progress, currentPage]);
+
   return (
     <div className="app-surface">
-      <div
-        className={`${hovered ? "dropzone is-hovered" : "dropzone"} ${absorbing ? "is-absorbing" : ""}`}
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            handleBrowse();
-          }
-        }}
-        aria-label={t("dropzone.label", "拖拽或选择文件上传")}
+      <MainLayout
+        currentPage={currentPage}
+        onPageChange={setCurrentPage}
+        hasActiveTransfer={hasActiveTransfer}
+        hasLogs={logs.length > 0}
       >
-        <div className="rings">
-          <span className="ring ring-outer" />
-          <span className="ring ring-middle" />
-          <span className="ring ring-inner" />
-          <div className="absorb-particles" aria-hidden="true">
-            <span className="p p1" />
-            <span className="p p2" />
-            <span className="p p3" />
-            <span className="p p4" />
-            <span className="p p5" />
-            <span className="p p6" />
-            <span className="p p7" />
-            <span className="p p8" />
-            <span className="p p9" />
-            <span className="p p10" />
-            <span className="p p11" />
-            <span className="p p12" />
-          </div>
-        </div>
-        <div className="cta">
-          <div className="cta-header">
-            <h1>{t("app.title", "Quantum Drop · 量子快传")}</h1>
-            <LocaleSwitch />
-          </div>
-          <p>{t("hero.tagline", "轻松拖拽，极速直达。")}</p>
-          <button className="browse" onClick={handleBrowse} type="button">
-            {t("hero.selectFiles", "选择文件")}
-          </button>
-        </div>
-        <input
-          ref={fileInputRef}
-          className="file-input"
-          type="file"
-          multiple
-          onChange={handleFileInput}
-        />
-      </div>
-      {files.length > 0 && (
-        <div className="file-panel" aria-live="polite">
-          <h2>{t("filePanel.title", "已准备传输的文件")}</h2>
-          <ul>
-            {files.map((file) => (
-              <li key={`${file.name}-${file.path ?? file.size ?? 0}`}>
-                <span className="file-name">{file.name}</span>
-                <span className="file-size">
-                  {file.size !== undefined ? formatSize(file.size) : file.path ?? ""}
-                </span>
-              </li>
-            ))}
-          </ul>
-          {isTauri && !(identity && identityPrivateKey && (activeDeviceId || devices[0])) && (
-            <div className="actions-row">
-              <button
-                className="primary"
-                type="button"
-                onClick={() => beginTransferRef.current?.()}
-                disabled={pendingPaths.length === 0 || isSending}
-              >
-                {isSending
-                  ? t("filePanel.starting", "启动中…")
-                  : t("filePanel.start", "启动传输")}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-      <div className="receive-panel" aria-live="polite">
-        <h3>{t("receive.heading", "接收（同网模式）")}</h3>
-        <div className="mode-tabs">
-          <button
-            type="button"
-            className={receiveMode === "code" ? "active" : ""}
-            onClick={() => setReceiveMode("code")}
-          >
-            {t("receive.tab.code", "配对码")}
-          </button>
-          <button
-            type="button"
-            className={receiveMode === "scan" ? "active" : ""}
-            onClick={() => {
-              setReceiveMode("scan");
-              void scanSenders();
+        {currentPage === "send" && (
+          <SendPage
+            files={files}
+            hovered={hovered}
+            absorbing={absorbing}
+            onDrop={handleDrop}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onBrowse={() => {
+              void handleBrowse();
             }}
-          >
-            {t("receive.tab.scan", "扫描")}
-          </button>
-          <button
-            type="button"
-            className={receiveMode === "manual" ? "active" : ""}
-            onClick={() => setReceiveMode("manual")}
-          >
-            {t("receive.tab.manual", "手动")}
-          </button>
-        </div>
+            onFileInputChange={handleFileInput}
+            fileInputRef={fileInputRef}
+            showInlineStartButton={showInlineStartButton}
+            canStartTransfer={canStartTransfer}
+            isSending={isSending}
+            onStartTransfer={() => {
+              void beginTransferRef.current?.();
+            }}
+          />
+        )}
 
-        {receiveMode === "code" && (
-          <div className="code-input-mode">
-            <p>{t("receive.instructions", "输入 6 位配对码，应用会自动发现发送方。")}</p>
-            <div className="receive-grid">
-              <label>
-                <span>{t("receive.tab.code", "配对码")}</span>
-                <input
-                  type="text"
-                  value={receiveCode}
-                  onChange={(event) => setReceiveCode(event.target.value.toUpperCase())}
-                  maxLength={6}
-                  placeholder="例如：QDX9Z3"
+        {currentPage === "identity" && (
+          <IdentityPage
+            identity={identity}
+            identityPrivateKeyAvailable={Boolean(identity && identityPrivateKey)}
+            activeDeviceId={activeDeviceId}
+            devices={devices}
+            entitlement={entitlement}
+            isTauri={isTauri}
+            isRegisteringIdentity={isRegisteringIdentity}
+            isRegisteringDevice={isRegisteringDevice}
+            isForgettingIdentity={isForgettingIdentity}
+            isUpdatingEntitlement={isUpdatingEntitlement}
+            importIdentityId={importIdentityId}
+            importPrivateKey={importPrivateKey}
+            isImportingIdentity={isImportingIdentity}
+            selectedDevice={selectedDevice ?? null}
+            editDeviceName={editDeviceName}
+            editDeviceStatus={editDeviceStatus}
+            deviceStatusOptions={deviceStatusOptions}
+            isUpdatingDevice={isUpdatingDevice}
+            onCopy={(label, value) => {
+              void handleCopy(label, value);
+            }}
+            onRegisterIdentity={() => {
+              void registerIdentity();
+            }}
+            onRegisterDevice={() => {
+              void registerDevice();
+            }}
+            onExportPrivateKey={() => {
+              void exportPrivateKey();
+            }}
+            onForgetIdentity={() => {
+              void forgetCurrentIdentity();
+            }}
+            onSync={handleSyncIdentity}
+            onTogglePlan={handleToggleEntitlement}
+            onImportIdentityIdChange={setImportIdentityId}
+            onImportPrivateKeyChange={setImportPrivateKey}
+            onImportIdentity={(event) => {
+              void importIdentity(event);
+            }}
+            onSelectDevice={setActiveDeviceId}
+            onEditDeviceNameChange={setEditDeviceName}
+            onEditDeviceStatusChange={setEditDeviceStatus}
+            onSubmitDeviceUpdate={() => void submitDeviceUpdate()}
+            onSetDeviceStandby={handleSetDeviceStandby}
+            onMarkDeviceInactive={markDeviceInactive}
+          />
+        )}
+
+        {currentPage === "webrtc" && (
+          <WebRTCPage
+            onStartSender={() => void handleWebRtcSenderTest()}
+            canStartSender={pendingPaths.length > 0}
+            isSending={isSending}
+          />
+        )}
+        {currentPage === "control" && (
+          <div className="control-center">
+            <section className="control-section">
+              <h3>{t("control.transferHeading", "Transfer Status")}</h3>
+              {hasActiveTransfer ? (
+                <TransferStatusPage
+                  taskCode={taskCode}
+                  taskId={taskId}
+                  senderPublicKey={senderPublicKey}
+                  phase={progress?.phase ?? null}
+                  route={progress?.route ?? null}
+                  routeAttempts={routeAttempts}
+                  progressValue={typeof progress?.progress === "number" ? progress.progress : null}
+                  speedBps={progress?.speedBps ?? null}
+                  bytesSent={progress?.bytesSent ?? null}
+                  bytesTotal={progress?.bytesTotal ?? null}
+                  monitorExtra={monitorExtra}
+                  statsContent={statsContent}
+                  auditContent={auditContent}
+                  securityContent={securityContent}
+                  settingsContent={settingsContent}
                 />
-              </label>
-              <label className="receive-dir">
-                <span>保存目录</span>
-                <div className="dir-field">
-                  <input
-                    type="text"
-                    value={receiveDir}
-                    onChange={(event) => setReceiveDir(event.target.value)}
-                    placeholder="请选择或输入文件夹"
-                  />
-                  <button type="button" onClick={chooseReceiveDirectory} className="secondary">
-                    选择
-                  </button>
-                </div>
-              </label>
-            </div>
-            <div className="actions-row">
-              <button
-                type="button"
-                className="primary"
-                onClick={() => void connectByCode()}
-                disabled={isReceiving}
-              >
-                {isReceiving ? "正在连接…" : "开始接收"}
-              </button>
-            </div>
+              ) : (
+                <p className="stats-empty">{t("control.transferEmpty", "No active transfer.")}</p>
+              )}
+            </section>
+            <section className="control-section">
+              <h3>{t("control.logsHeading", "Event Logs")}</h3>
+              {logs.length > 0 ? <LogsPage logs={logs} /> : <p className="stats-empty">{t("control.logsEmpty", "No logs yet.")}</p>}
+            </section>
           </div>
         )}
+      </MainLayout>
 
-        {receiveMode === "scan" && (
-          <div className="scan-mode">
-            <div className="actions-row">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => void scanSenders()}
-                disabled={isScanning}
-              >
-                {isScanning ? "扫描中…" : "重新扫描"}
-              </button>
-            </div>
-            {availableSenders.length === 0 ? (
-              <p>未发现可用的发送方，请确保对方已启动并在同一网络。</p>
-            ) : (
-              <ul className="sender-list">
-                {availableSenders.map((sender) => (
-                  <li key={`${sender.code}-${sender.host}`}>
-                    <div className="sender-info">
-                      <strong>{sender.deviceName}</strong>
-                      <span className="code">{sender.code}</span>
-                      <span className="addr">
-                        {sender.host}:{sender.port}
-                      </span>
-                      <span className="pubkey">
-                        {sender.publicKey.length > 16
-                          ? `${sender.publicKey.slice(0, 10)}…${sender.publicKey.slice(-6)}`
-                          : sender.publicKey}
-                      </span>
-                      <span className="fp">
-                        {sender.certFingerprint.length > 16
-                          ? `${sender.certFingerprint.slice(0, 10)}…${sender.certFingerprint.slice(-6)}`
-                          : sender.certFingerprint}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className="primary"
-                      onClick={() => void connectByCode(sender.code)}
-                      disabled={isReceiving}
-                    >
-                      连接
-                    </button>
-                    <button
-                      type="button"
-                      className="plain"
-                      onClick={() => handleCopy("发送方公钥", sender.publicKey)}
-                    >
-                      复制公钥
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-
-        {receiveMode === "manual" && (
-          <div className="receive-grid manual-mode">
-            <p>请向发送方索取 IP、端口与公钥，再选择保存目录即可建立加密 QUIC 连接。</p>
-            <label>
-              <span>配对码</span>
-              <input
-                type="text"
-                value={receiveCode}
-                onChange={(event) => setReceiveCode(event.target.value.toUpperCase())}
-                maxLength={6}
-                placeholder="例如：QDX9Z3"
-              />
-            </label>
-            <label>
-              <span>发送方 IP</span>
-              <input
-                type="text"
-                value={receiveHost}
-                onChange={(event) => setReceiveHost(event.target.value)}
-                placeholder="192.168.1.10"
-              />
-            </label>
-            <label>
-              <span>端口</span>
-              <input
-                type="number"
-                value={receivePort}
-                onChange={(event) => setReceivePort(event.target.value)}
-                min={1}
-                max={65535}
-              />
-            </label>
-            <label>
-              <span>发送方公钥</span>
-              <input
-                type="text"
-                value={receiveSenderKey}
-                onChange={(event) => setReceiveSenderKey(event.target.value.trim())}
-                maxLength={64}
-                placeholder="64 位十六进制，例如 E4A1…"
-              />
-            </label>
-            <label>
-              <span>证书指纹</span>
-              <input
-                type="text"
-                value={receiveSenderFingerprint}
-                onChange={(event) => setReceiveSenderFingerprint(event.target.value.trim())}
-                maxLength={64}
-                placeholder="64 位十六进制，例如 9AF2…"
-              />
-            </label>
-            <label className="receive-dir">
-              <span>保存目录</span>
-              <div className="dir-field">
-                <input
-                  type="text"
-                  value={receiveDir}
-                  onChange={(event) => setReceiveDir(event.target.value)}
-                  placeholder="请选择或输入文件夹"
-                />
-                <button type="button" onClick={chooseReceiveDirectory} className="secondary">
-                  选择
-                </button>
-              </div>
-            </label>
-            <div className="actions-row">
-              <button
-                type="button"
-                className="primary"
-                onClick={() => void handleManualReceive()}
-                disabled={isReceiving}
-              >
-                {isReceiving ? "正在连接…" : "开始接收"}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-      <div className="webrtc-panel" aria-live="polite">
-        <h3>WebRTC 跨网实验（阶段三）</h3>
-        <p className="hint">
-          发送端会在缺少配对码时自动生成 6 位随机码，接收端沿用上方“接收”面板中的配对码与保存目录。该功能目前为实验性质，仅验证 P2P 信令链路。
-        </p>
-        <div className="actions-row">
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => void handleWebRtcSenderTest()}
-            disabled={pendingPaths.length === 0 || isSending}
-          >
-            {isSending ? "WebRTC 发送启动中…" : "启动 WebRTC 发送"}
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => void handleWebRtcReceiverTest()}
-            disabled={isReceiving}
-          >
-            {isReceiving ? "WebRTC 接收等待中…" : "启动 WebRTC 接收"}
-          </button>
-        </div>
-      </div>
-      <div className="identity-panel" aria-live="polite">
-        <h3>身份与设备</h3>
-        {identity ? (
-          <div className="status-grid">
-            <div>
-              <span className="status-label">身份标识</span>
-              <span className="status-value with-actions">
-                <code>{identity.identityId}</code>
-                <button
-                  type="button"
-                  className="copy-button"
-                  onClick={() => handleCopy("身份标识", identity.identityId)}
-                >
-                  复制
-                </button>
-              </span>
-            </div>
-            <div>
-              <span className="status-label">主公钥</span>
-              <span className="status-value with-actions">
-                <code>{identity.publicKey}</code>
-                <button
-                  type="button"
-                  className="copy-button"
-                  onClick={() => handleCopy("主公钥", identity.publicKey)}
-                >
-                  复制
-                </button>
-              </span>
-            </div>
-          </div>
-        ) : (
-          <p className="identity-empty">尚未注册身份，点击“创建主身份”即可生成量子身份。</p>
-        )}
-        {identity && activeDeviceId && (
-          <div className="active-device-banner">
-            当前终端：
-            {devices.find((device) => device.deviceId === activeDeviceId)?.name ?? activeDeviceId}
-          </div>
-        )}
-        {!isTauri && (
-          <p className="identity-hint">
-            当前运行在浏览器预览模式，身份相关操作会提示如何在桌面端执行。
-          </p>
-        )}
-        <div className="actions-row identity-actions">
-          <button
-            type="button"
-            className="secondary"
-            onClick={registerIdentity}
-            disabled={isRegisteringIdentity}
-          >
-            {isRegisteringIdentity ? "创建中…" : "创建主身份"}
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={registerDevice}
-            disabled={!identity || isRegisteringDevice}
-          >
-            {isRegisteringDevice ? "登记中…" : "登记新设备"}
-          </button>
-          <button
-            type="button"
-            className="plain"
-            onClick={exportPrivateKey}
-            disabled={!identity || !identityPrivateKey}
-          >
-            导出私钥
-          </button>
-          <button
-            type="button"
-            className="plain"
-            onClick={forgetCurrentIdentity}
-            disabled={!identity || isForgettingIdentity}
-          >
-            {isForgettingIdentity ? "移除中…" : "忘记当前身份"}
-          </button>
-          <button
-            type="button"
-            className="plain"
-            onClick={() => {
-              if (!detectTauri()) {
-                setInfo("刷新同频需在桌面端运行。");
-                return;
+      {info && <div className="toast toast-success">{info}</div>}
+      {error && (
+        <div className="toast toast-error">
+          <div>{error}</div>
+          <div className="toast-actions">
+            {errorActionKeys.map((key) => {
+              const handler = errorActionHandlers[key];
+              const label = ERROR_ACTION_LABELS[key];
+              if (!handler || !label) {
+                return null;
               }
-              refreshDevices();
-              refreshEntitlement();
-            }}
-            disabled={!identity}
-          >
-            刷新同频
-          </button>
-          <button
-            type="button"
-            className="primary"
-            onClick={() => upgradeEntitlement(entitlement?.plan === "pro" ? "free" : "pro")}
-            disabled={!identity || isUpdatingEntitlement}
-          >
-            {isUpdatingEntitlement
-              ? "更新中…"
-              : entitlement?.plan === "pro"
-                ? "降级为 Free"
-                : "升级 PRO"}
-          </button>
-        </div>
-        <form className="identity-import" onSubmit={importIdentity}>
-          <input
-            type="text"
-            placeholder="身份标识"
-            value={importIdentityId}
-            onChange={(event) => setImportIdentityId(event.target.value)}
-            autoComplete="off"
-          />
-          <input
-            type="text"
-            placeholder="私钥十六进制"
-            value={importPrivateKey}
-            onChange={(event) => setImportPrivateKey(event.target.value)}
-            autoComplete="off"
-          />
-          <button type="submit" className="secondary" disabled={isImportingIdentity}>
-            {isImportingIdentity ? "导入中…" : "导入身份"}
-          </button>
-        </form>
-        <div className="entitlement-panel">
-          <span className="status-label">当前权益</span>
-          <span className="status-value">
-            {entitlement ? entitlement.plan : "free"}
-            {entitlement?.features?.length ? ` · ${entitlement.features.join(" · ")}` : ""}
-          </span>
-        </div>
-        <div className="device-list" role="list">
-          {identity ? (
-            devices.length > 0 ? (
-              devices.map((device) => (
-                <div
-                  key={device.deviceId}
-                  className="device-item"
-                  role="listitem"
-                  data-active={device.deviceId === activeDeviceId}
-                  onClick={() => setActiveDeviceId(device.deviceId)}
+              return (
+                <button
+                  key={`${key}-action`}
+                  type="button"
+                  onClick={() => {
+                    void handler();
+                  }}
                 >
-                  <span className="device-name">{device.name ?? device.deviceId}</span>
-                  <span className="device-meta">
-                    <span className={`status-badge status-${device.status.toLowerCase()}`}>
-                      {device.status}
-                    </span>
-                    <span className="device-meta-text">
-                      {`上次心跳 ${formatRelativeTime(device.lastSeenAt)}`}
-                    </span>
-                    {device.capabilities.length > 0 && (
-                      <span className="device-meta-text">能力 {device.capabilities.join("，")}</span>
-                    )}
-                    {activeDeviceId === device.deviceId && (
-                      <span className="device-active-flag">当前终端</span>
-                    )}
-                  </span>
-                </div>
-              ))
-            ) : (
-              <p className="identity-empty">暂无已登记设备。</p>
-            )
-          ) : (
-            <p className="identity-empty">创建身份后可在此查看设备列表。</p>
-          )}
-        </div>
-        {identity && selectedDevice && (
-          <div className="device-editor" role="group" aria-label="终端设置">
-            <div className="device-editor-grid">
-              <label>
-                <span>终端名称</span>
-                <input
-                  type="text"
-                  value={editDeviceName}
-                  onChange={(event) => setEditDeviceName(event.target.value)}
-                  placeholder="例如：工作站、笔电"
-                />
-              </label>
-              <label>
-                <span>终端状态</span>
-                <select
-                  value={editDeviceStatus}
-                  onChange={(event) => setEditDeviceStatus(event.target.value)}
-                >
-                  {deviceStatusOptions.map((option) => (
-                    <option key={option} value={option}>
-                      {option === "active"
-                        ? "active · 在线"
-                        : option === "standby"
-                          ? "standby · 待命"
-                          : "inactive · 停用"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="device-editor-actions actions-row">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => void submitDeviceUpdate()}
-                disabled={isUpdatingDevice}
-              >
-                {isUpdatingDevice ? "保存中…" : "保存终端信息"}
-              </button>
-              <button
-                type="button"
-                className="plain"
-                onClick={() => void submitDeviceUpdate("standby")}
-                disabled={isUpdatingDevice || editDeviceStatus === "standby"}
-              >
-                设为待命
-              </button>
-              <button
-                type="button"
-                className="plain"
-                onClick={markDeviceInactive}
-                disabled={isUpdatingDevice || editDeviceStatus === "inactive"}
-              >
-                标记为停用
-              </button>
-            </div>
-            <p className="device-editor-hint">
-              更新操作会生成签名并通过 `auth_update_device` 提交，保持设备名称统一方便在多设备间切换。
-            </p>
-          </div>
-        )}
-      </div>
-      {(taskId || taskCode || progress || info || error) && (
-        <div className="status-panel" aria-live="polite">
-          <h3>传输状态</h3>
-          <div className="status-grid">
-            {taskCode && (
-              <div>
-                <span className="status-label">取件码</span>
-                <span className="status-value">{taskCode}</span>
-              </div>
-            )}
-            {senderPublicKey && (
-              <div>
-                <span className="status-label">发送方公钥</span>
-                <span className="status-value with-actions">
-                  <code>{senderPublicKey}</code>
-                  <button
-                    type="button"
-                    className="copy-button"
-                    onClick={() => handleCopy("发送方公钥", senderPublicKey)}
-                  >
-                    复制
-                  </button>
-                </span>
-              </div>
-            )}
-            {taskId && (
-              <div>
-                <span className="status-label">任务 ID</span>
-                <span className="status-value">{taskId}</span>
-              </div>
-            )}
-            {progress?.phase && (
-              <div>
-                <span className="status-label">阶段</span>
-                <span className="status-value">{progress.phase}</span>
-              </div>
-            )}
-            {progress?.route && (
-              <div>
-                <span className="status-label">路由</span>
-                <span className="status-value">{progress.route}</span>
-              </div>
-            )}
-            {routeAttempts && routeAttempts.length > 0 && (
-              <div>
-                <span className="status-label">路由策略</span>
-                <span className="status-value route-sequence">
-                  {routeAttempts.map((route, index) => (
-                    <span key={`${route}-${index}`}>
-                      {index > 0 && <span className="route-arrow"> → </span>}
-                      {route.toUpperCase()}
-                    </span>
-                  ))}
-                  {progress?.route && (
-                    <span className="route-current">
-                      {" "}
-                      · 当前 {progress.route.toUpperCase()}
-                    </span>
-                  )}
-                </span>
-              </div>
-            )}
-            {typeof progress?.progress === "number" && (
-              <div>
-                <span className="status-label">进度</span>
-                <span className="status-value">{Math.round(progress.progress * 100)}%</span>
-              </div>
-            )}
-            {humanSpeed && (
-              <div>
-                <span className="status-label">速度</span>
-                <span className="status-value">{humanSpeed}</span>
-              </div>
-            )}
-          </div>
-          <div className="route-metrics-actions">
+                  {label}
+                </button>
+              );
+            })}
             <button
               type="button"
-              className="secondary"
-              onClick={() => void refreshRouteMetrics()}
-              disabled={isRouteMetricsLoading}
+              onClick={() => {
+                clearError();
+              }}
             >
-              {isRouteMetricsLoading ? "正在获取…" : "查看路由统计"}
+              知道了
             </button>
           </div>
-          {routeMetrics && routeMetrics.length > 0 && (
-            <div className="route-metrics-panel">
-              <table>
-                <thead>
-                  <tr>
-                    <th>路由</th>
-                    <th>尝试次数</th>
-                    <th>成功次数</th>
-                    <th>失败次数</th>
-                    <th>成功率</th>
-                    <th>平均握手 (ms)</th>
-                    <th>最后错误</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {routeMetrics.map((metric) => (
-                    <tr key={metric.route}>
-                      <td>{metric.route.toUpperCase()}</td>
-                      <td>{metric.attempts}</td>
-                      <td>{metric.successes}</td>
-                      <td>{metric.failures}</td>
-                      <td>
-                        {typeof metric.successRate === "number"
-                          ? `${(metric.successRate * 100).toFixed(1)}%`
-                          : "—"}
-                      </td>
-                      <td>{metric.avgLatencyMs ? metric.avgLatencyMs.toFixed(1) : "—"}</td>
-                      <td>{metric.lastError ?? "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {identity && (
-            <div className="insights-grid">
-              <PanelBoundary
-                fallbackKey="panel.statsError"
-                fallbackDefault="无法加载传输统计，请刷新重试。"
-                onRetry={() => {
-                  void refreshTransferStats();
-                  void refreshLicenseStatus();
-                }}
-              >
-                <section className="stats-panel" aria-label={t("panel.stats", "传输统计")}>
-                <div className="panel-header">
-                  <h4>{t("panel.stats", "传输统计")}</h4>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => void refreshTransferStats()}
-                    disabled={isStatsLoading}
-                  >
-                    {isStatsLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
-                  </button>
-                </div>
-                <div className="license-summary">
-                  <div className="license-header">
-                    <div>
-                      <span className="stat-label">{t("license.current", "当前权益")}</span>
-                      <strong className="stat-value">
-                        {licenseStatus ? licenseStatus.tier.toUpperCase() : "—"}
-                      </strong>
-                    </div>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => void refreshLicenseStatus()}
-                      disabled={isLicenseLoading}
-                    >
-                      {isLicenseLoading
-                        ? t("actions.syncingLicense", "同步权益…")
-                        : t("actions.syncLicense", "刷新权益")}
-                    </button>
-                  </div>
-                  {licenseStatus ? (
-                    <>
-                      {typeof licenseStatus.p2pQuota === "number" && (
-                        <div className="quota-section">
-                          <span className="stat-label">{t("license.quota", "跨网配额")}</span>
-                          <div className="quota-bar">
-                            <span
-                              className="quota-progress"
-                              style={{
-                                width: `${Math.min(
-                                  100,
-                                  (licenseStatus.p2pUsed / Math.max(licenseStatus.p2pQuota, 1)) * 100
-                                ).toFixed(0)}%`,
-                              }}
-                            />
-                          </div>
-                          <span className="quota-text">
-                            {t("license.quotaUsage", "已用 {used} / {quota} 次", {
-                              used: licenseStatus.p2pUsed,
-                              quota: licenseStatus.p2pQuota ?? 0,
-                            })}
-                          </span>
-                        </div>
-                      )}
-                      <ul className="license-meta">
-                        <li>License Key：{maskLicenseKey(licenseStatus.licenseKey)}</li>
-                        <li>签发：{formatAbsoluteTime(licenseStatus.issuedAt)}</li>
-                        <li>
-                          到期：
-                          {licenseStatus.expiresAt ? formatAbsoluteTime(licenseStatus.expiresAt) : "无固定期限"}
-                        </li>
-                      </ul>
-                      <div className="license-limits">
-                        <span>
-                          {licenseStatus.limits.resumeEnabled ? "✅ 支持断点续传" : "⚠️ 无断点续传"}
-                        </span>
-                        <span>
-                          {licenseStatus.limits.maxFileSizeMb
-                            ? `单文件 ≤ ${(licenseStatus.limits.maxFileSizeMb / 1024).toFixed(1)} GB`
-                            : "文件大小无限制"}
-                        </span>
-                        <span>
-                          {licenseStatus.limits.maxDevices
-                            ? `设备上限 ${licenseStatus.limits.maxDevices}`
-                            : "设备数量无限制"}
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <p className="stats-empty">{t("license.empty", "暂无权益信息，请刷新后重试。")}</p>
-                  )}
-                  <form
-                    className="license-activate"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void activateLicense();
-                    }}
-                  >
-                    <input
-                      type="text"
-                      placeholder={t("license.placeholder", "输入 License Key，例如 QD-PRO-XXXX-YYYY")}
-                      value={licenseInput}
-                      onChange={(event) => setLicenseInput(event.target.value)}
-                      disabled={isActivatingLicense}
-                    />
-                    <button
-                      type="submit"
-                      className="primary"
-                      disabled={isActivatingLicense || licenseInput.trim().length === 0}
-                    >
-                      {isActivatingLicense ? "激活中…" : "激活 License"}
-                    </button>
-                    <button type="button" className="secondary" onClick={copySampleLicense}>
-                      复制示例
-                    </button>
-                  </form>
-                </div>
-                {transferStats ? (
-                  <>
-                    <div className="stat-cards">
-                      <div className="stat-card">
-                        <span className="stat-label">总传输次数</span>
-                        <strong className="stat-value">{transferStats.totalTransfers}</strong>
-                      </div>
-                      <div className="stat-card">
-                        <span className="stat-label">传输总量</span>
-                        <strong className="stat-value">{formatSize(transferStats.totalBytes)}</strong>
-                      </div>
-                      <div className="stat-card">
-                        <span className="stat-label">成功率</span>
-                        <strong className="stat-value">
-                          {(transferStats.successRate * 100).toFixed(1)}%
-                        </strong>
-                        <span className="stat-subtext">
-                          成功 {transferStats.successCount} · 失败 {transferStats.failureCount}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="route-distribution">
-                      <div className="route-bar" aria-hidden="true">
-                        <span
-                          className="route-segment route-lan"
-                          style={{ width: `${transferStats.lanPercent}%` }}
-                        />
-                        <span
-                          className="route-segment route-p2p"
-                          style={{ width: `${transferStats.p2pPercent}%` }}
-                        />
-                        <span
-                          className="route-segment route-relay"
-                          style={{ width: `${transferStats.relayPercent}%` }}
-                        />
-                      </div>
-                      <ul className="route-legend">
-                        <li>
-                          <span className="legend-dot route-lan" />
-                          LAN {transferStats.lanPercent.toFixed(0)}%
-                        </li>
-                        <li>
-                          <span className="legend-dot route-p2p" />
-                          P2P {transferStats.p2pPercent.toFixed(0)}%
-                        </li>
-                        <li>
-                          <span className="legend-dot route-relay" />
-                          Relay {transferStats.relayPercent.toFixed(0)}%
-                        </li>
-                      </ul>
-                    </div>
-                  </>
-                ) : (
-                  <p className="stats-empty">{t("stats.emptyTransfers", "暂无传输记录。")}</p>
-                )}
-                </section>
-              </PanelBoundary>
-              <PanelBoundary
-                fallbackKey="panel.auditError"
-                fallbackDefault="无法加载审计日志，请刷新重试。"
-                onRetry={() => void refreshAuditLogs()}
-              >
-                <section className="audit-panel" aria-label={t("panel.audit", "操作审计")}>
-                <div className="panel-header">
-                  <h4>{t("panel.audit", "操作审计")}</h4>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => void refreshAuditLogs()}
-                    disabled={isAuditLoading}
-                  >
-                    {isAuditLoading
-                      ? t("actions.syncingAudit", "同步中…")
-                      : t("actions.syncAudit", "刷新")}
-                  </button>
-                </div>
-                {auditLogs.length > 0 ? (
-                  <ul className="audit-list">
-                    {auditLogs.slice(0, 8).map((entry) => {
-                      const detailRaw = summarizeAuditDetails(entry.details ?? {});
-                      const detailText =
-                        detailRaw.length > 160 ? `${detailRaw.slice(0, 157)}…` : detailRaw;
-                      return (
-                        <li key={entry.id}>
-                          <div className="audit-header">
-                            <span className="audit-event">{entry.eventType}</span>
-                            <span className="audit-time">{formatRelativeTime(entry.timestamp)}</span>
-                          </div>
-                          <div className="audit-meta">
-                            <span>{formatAbsoluteTime(entry.timestamp)}</span>
-                            {entry.deviceId && <span>终端 {entry.deviceId}</span>}
-                            {entry.taskId && <span>任务 {entry.taskId}</span>}
-                          </div>
-                          {detailText && <p className="audit-details">{detailText}</p>}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : (
-                  <p className="stats-empty">{t("audit.empty", "暂无审计记录。")}</p>
-                )}
-                </section>
-              </PanelBoundary>
-              <PanelBoundary
-                fallbackKey="panel.securityError"
-                fallbackDefault="无法加载安全策略，请刷新重试。"
-                onRetry={() => void refreshSecurityConfig()}
-              >
-                <section className="security-panel" aria-label={t("panel.security", "安全策略")}>
-                  <div className="panel-header">
-                    <h4>{t("panel.security", "安全策略")}</h4>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => void refreshSecurityConfig()}
-                      disabled={isSecurityLoading}
-                    >
-                      {isSecurityLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
-                    </button>
-                  </div>
-                  {securityConfig ? (
-                    <ul className="security-list">
-                      <li data-enabled={securityConfig.enforceSignatureVerification}>
-                        <strong>{t("settings.security.signature", "签名校验")}</strong>
-                        <span>
-                          {securityConfig.enforceSignatureVerification
-                            ? t("settings.security.enabledRecommended", "已启用（推荐）")
-                            : t("settings.security.disabled", "未启用")}
-                        </span>
-                      </li>
-                      <li data-enabled={securityConfig.disconnectOnVerificationFail}>
-                        <strong>{t("settings.security.disconnect", "验签失败断开")}</strong>
-                        <span>
-                          {securityConfig.disconnectOnVerificationFail
-                            ? t("settings.security.disconnect.strict", "失败即断开")
-                            : t("settings.security.disconnect.warn", "失败仅警告")}
-                        </span>
-                      </li>
-                      <li data-enabled={securityConfig.enableAuditLog}>
-                        <strong>{t("settings.security.audit", "审计日志")}</strong>
-                        <span>
-                          {securityConfig.enableAuditLog
-                            ? t("settings.security.audit.enabled", "记录到本地 SQLite")
-                            : t("settings.security.audit.disabled", "未记录")}
-                        </span>
-                      </li>
-                    </ul>
-                  ) : (
-                    <p className="stats-empty">{t("settings.security.empty", "无法读取安全策略，请刷新或检查配置。")}</p>
-                  )}
-                </section>
-              </PanelBoundary>
-              <PanelBoundary
-                fallbackKey="panel.settingsError"
-                fallbackDefault="无法加载传输设置，请刷新重试。"
-                onRetry={() => void refreshSettings()}
-              >
-                <section className="settings-panel" aria-label={t("panel.settings", "传输设置")}>
-                  <div className="panel-header">
-                    <h4>{t("panel.settings", "传输设置")}</h4>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => void refreshSettings()}
-                      disabled={isSettingsLoading}
-                    >
-                      {isSettingsLoading ? t("actions.refreshing", "更新中…") : t("actions.refresh", "刷新")}
-                    </button>
-                  </div>
-                  {chunkPolicyDraft ? (
-                    <form
-                      className="settings-form"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        void saveChunkPolicy();
-                      }}
-                    >
-                      <div className="form-grid">
-                        <label className="field-group">
-                          <span className="field-label">{t("settings.chunk.adaptive", "自适应 Chunk")}</span>
-                          <span className="field-hint">{t("settings.chunk.help", "根据网络情况自动调整 Chunk")}</span>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={chunkPolicyDraft.adaptive}
-                              onChange={handleChunkAdaptiveChange}
-                              disabled={chunkSettingsDisabled}
-                            />
-                            <span>{chunkPolicyDraft.adaptive ? "已开启" : "已关闭"}</span>
-                          </label>
-                        </label>
-                        <label className="field-group">
-                          <span className="field-label">{t("settings.chunk.min", "最小 Chunk (MiB)")}</span>
-                          <input
-                            type="number"
-                            min={2}
-                            max={16}
-                            value={chunkMinMb}
-                            onChange={handleChunkMinChange}
-                            disabled={chunkSettingsDisabled}
-                          />
-                        </label>
-                        <label className="field-group">
-                          <span className="field-label">{t("settings.chunk.max", "最大 Chunk (MiB)")}</span>
-                          <input
-                            type="number"
-                            min={chunkMinMb}
-                            max={16}
-                            value={chunkMaxMb}
-                            onChange={handleChunkMaxChange}
-                            disabled={chunkSettingsDisabled}
-                          />
-                        </label>
-                        <label className="field-group">
-                          <span className="field-label">{t("settings.chunk.streams", "LAN 并发流数")}</span>
-                          <select
-                            value={lanStreamsDraft}
-                            onChange={handleLanStreamsChange}
-                            disabled={chunkSettingsDisabled}
-                          >
-                            {[1, 2, 3, 4].map((count) => (
-                              <option key={count} value={count}>
-                                {count}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      </div>
-                      <div className="actions-row">
-                        <button type="submit" className="primary" disabled={chunkSettingsDisabled || isSavingSettings}>
-                          {isSavingSettings ? t("settings.chunk.saving", "保存中…") : t("settings.chunk.save", "保存设置")}
-                        </button>
-                      </div>
-                    </form>
-                  ) : (
-                    <p className="stats-empty">{t("settings.chunk.empty", "暂无设置，请刷新或稍后重试。")}</p>
-                  )}
-                </section>
-              </PanelBoundary>
-            </div>
-          )}
-          <PanelBoundary
-            fallbackKey="panel.trustedError"
-            fallbackDefault="无法读取信任列表，请刷新。"
-            onRetry={() => void refreshDevices()}
-          >
-            {Object.keys(trustedPeers).length > 0 && (
-              <div className="trusted-peers-panel">
-                <div className="panel-header">
-                  <h4>{t("panel.trusted", "已信任设备")}</h4>
-                  <button type="button" className="secondary" onClick={clearTrustedPeers}>
-                    {t("trusted.clear", "清空")}
-                  </button>
-                </div>
-                <ul>
-                  {Object.values(trustedPeers).map((peer) => (
-                    <li key={`${peer.sessionId}-${peer.deviceId}`}>
-                      <strong>{peer.deviceName ?? peer.deviceId}</strong>
-                      <span className="peer-fingerprint">
-                        {peer.fingerprint ?? t("trusted.unknownFingerprint", "未知指纹")}
-                      </span>
-                      <span className="peer-status">
-                        {peer.verified
-                          ? t("trusted.status.verified", "签名通过")
-                          : t("trusted.status.manual", "手动信任")}
-                      </span>
-                      <button
-                        type="button"
-                        className="plain"
-                        onClick={() => removeTrustedPeer(peer.deviceId)}
-                      >
-                        {t("trusted.remove", "移除")}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </PanelBoundary>
-          {info && <div className="toast toast-success">{info}</div>}
-          {error && (
-            <div className="toast toast-error">
-              <div>{error}</div>
-              {errorActionKeys.length > 0 && (
-                <div className="toast-actions">
-                  {errorActionKeys.map((key) => {
-                    const handler = errorActionHandlers[key];
-                    const label = ERROR_ACTION_LABELS[key];
-                    if (!handler || !label) {
-                      return null;
-                    }
-                    return (
-                      <button
-                        key={`${key}-action`}
-                        type="button"
-                        onClick={() => {
-                          void handler();
-                        }}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
       {peerPrompt && (
@@ -3820,11 +2965,7 @@ const handleManualReceive = useCallback(async () => {
           {!peerPrompt.verified && (
             <label>
               <span>输入对方提供的指纹</span>
-              <input
-                value={peerFingerprintInput}
-                onChange={(event) => setPeerFingerprintInput(event.target.value)}
-                placeholder="例如：1A:2B:3C:4D"
-              />
+              <input value={peerFingerprintInput} onChange={(event) => setPeerFingerprintInput(event.target.value)} placeholder="例如：1A:2B:3C:4D" />
             </label>
           )}
           <div className="actions-row">
@@ -3832,14 +2973,9 @@ const handleManualReceive = useCallback(async () => {
               type="button"
               className="primary"
               onClick={() => {
-                const reference = peerPrompt.fingerprint
-                  ? normalizeFingerprint(peerPrompt.fingerprint)
-                  : null;
+                const reference = peerPrompt.fingerprint ? normalizeFingerprint(peerPrompt.fingerprint) : null;
                 const provided = normalizeFingerprint(peerFingerprintInput);
-                if (
-                  peerPrompt.verified ||
-                  (reference && provided.length > 0 && provided === reference)
-                ) {
+                if (peerPrompt.verified || (reference && provided.length > 0 && provided === reference)) {
                   setTrustedPeers((prev) => ({
                     ...prev,
                     [peerPrompt.deviceId]: peerPrompt,
@@ -3862,9 +2998,7 @@ const handleManualReceive = useCallback(async () => {
               type="button"
               className="secondary"
               onClick={() => {
-                appendLog(
-                  `⛔ 拒绝设备 ${peerPrompt.deviceName ?? peerPrompt.deviceId} 的连接请求`
-                );
+                appendLog(`⛔ 拒绝设备 ${peerPrompt.deviceName ?? peerPrompt.deviceId} 的连接请求`);
                 setPeerPrompt(null);
                 setPeerFingerprintInput("");
               }}
@@ -3872,16 +3006,6 @@ const handleManualReceive = useCallback(async () => {
               拒绝
             </button>
           </div>
-        </div>
-      )}
-      {logs.length > 0 && (
-        <div className="log-panel" aria-live="polite">
-          <h3>事件流</h3>
-          <ul>
-            {logs.map((entry, index) => (
-              <li key={`${entry}-${index}`}>{entry}</li>
-            ))}
-          </ul>
         </div>
       )}
       {upgradeReason && (
@@ -3896,41 +3020,24 @@ const handleManualReceive = useCallback(async () => {
     </div>
   );
 }
+const concatUint8Arrays = (chunks: Uint8Array[]) => {
+  const length = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return output;
+};
+
 const ensureEd25519Hash = () => {
-  const hashConcat = (...messages: Uint8Array[]) => {
-    let total: Uint8Array;
-    try {
-      // prefer noble's internal concat if available
-      // @ts-expect-error runtime check
-      total = (ed25519Etc as any).concatBytes
-        ? (ed25519Etc as any).concatBytes(...messages)
-        : (() => {
-            const len = messages.reduce((acc, m) => acc + m.length, 0);
-            const out = new Uint8Array(len);
-            let off = 0;
-            for (const m of messages) {
-              out.set(m, off);
-              off += m.length;
-            }
-            return out;
-          })();
-    } catch {
-      const len = messages.reduce((acc, m) => acc + m.length, 0);
-      const out = new Uint8Array(len);
-      let off = 0;
-      for (const m of messages) {
-        out.set(m, off);
-        off += m.length;
-      }
-      total = out;
-    }
-    return sha512(total);
-  };
+  const hashConcat = (...messages: Uint8Array[]) => sha512(concatUint8Arrays(messages));
   if (!ed25519Etc.sha512Sync) {
     ed25519Etc.sha512Sync = (...messages: Uint8Array[]) => hashConcat(...messages);
   }
   if (!ed25519Etc.sha512Async) {
-    ed25519Etc.sha512Async = async (...messages: Uint8Array[]) => hashConcat(...messages);
+    ed25519Etc.sha512Async = (...messages: Uint8Array[]) => Promise.resolve(hashConcat(...messages));
   }
 };
 ensureEd25519Hash();

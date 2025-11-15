@@ -49,7 +49,7 @@ export default [
       ...sharedLanguageOptions,
       parser: tsParser,
       parserOptions: {
-        project: "./tsconfig.json",
+        project: ["./tsconfig.json", "./server/payment-gateway/tsconfig.json"],
         tsconfigRootDir: import.meta.dirname,
         ecmaFeatures: {
           jsx: true
