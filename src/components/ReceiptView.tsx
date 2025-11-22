@@ -12,7 +12,7 @@ export const ReceiptView: React.FC<ReceiptViewProps> = ({ receipt, onClose }) =>
     const isVerified = !!receipt.receiver_signature;
 
     return (
-        <div className="glass-panel receipt-view">
+        <div className="glass-panel receipt-view animate-collapse">
             <div className="receipt-header">
                 <div className={`status-badge ${isVerified ? "verified" : "pending"}`}>
                     {isVerified ? "✓ VERIFIED" : "⚠ PENDING"}
@@ -45,7 +45,7 @@ export const ReceiptView: React.FC<ReceiptViewProps> = ({ receipt, onClose }) =>
                         {receipt.files.map((f, i) => (
                             <li key={i}>
                                 <span className="file-name">{f.name}</span>
-                                <span className="file-cid" title={f.cid}>CID: {f.cid.substring(0, 16)}...</span>
+                                <span className="file-cid" title={f.merkle_root}>CID: {f.merkle_root.substring(0, 16)}...</span>
                             </li>
                         ))}
                     </ul>

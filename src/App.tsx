@@ -2851,9 +2851,74 @@ export default function App(): JSX.Element {
     }
   }, [taskId, taskCode, progress, currentPage]);
 
+  // --- Visual Test Mode Logic ---
+  const [debugTransferState, setDebugTransferState] = useState<"idle" | "transferring" | "completed">("idle");
+
+  const simulateTransfer = () => {
+    // 1. Start Transfer (Warp Speed)
+    setDebugTransferState("transferring");
+
+    // 2. Complete Transfer (Collapse & Receipt) after 2 seconds
+    setTimeout(() => {
+      setDebugTransferState("completed");
+
+      // Delay receipt appearance to let the collapse/explosion animation play out
+      setTimeout(() => {
+        // Mock Receipt
+        setReceipt({
+          version: 1,
+          transfer_id: "simulated-transfer-id",
+          session_id: "simulated-session-id",
+          sender_identity: "simulated-sender",
+          receiver_identity: "simulated-receiver",
+          files: [{ path: "quantum_blueprint_v1.pdf", size: 1024 * 1024 * 45, merkle_root: "mock-hash" }],
+          timestamp_start: new Date().toISOString(),
+          timestamp_end: new Date().toISOString(),
+          route_type: "p2p",
+          sender_signature: "mock-sig",
+          receiver_signature: "mock-sig",
+        } as any);
+      }, 2500); // Wait 2.5s after collapse starts before showing receipt
+    }, 2000);
+
+    // 3. Reset state is handled by closing the receipt or manual reset
+  };
+
+  const transferState = useMemo(() => {
+    if (debugTransferState !== "idle") return debugTransferState; // Debug priority
+    if (!progress) return "idle";
+    switch (progress.phase) {
+      case "transferring":
+      case "finalizing":
+        return "transferring";
+      case "done":
+        return "completed";
+      case "error":
+        return "error";
+      default:
+        return "idle";
+    }
+  }, [progress, debugTransferState]);
+
   return (
     <>
-      <QuantumBackground />
+      <QuantumBackground transferState={transferState} />
+
+      {/* Debug Button */}
+      <button
+        onClick={simulateTransfer}
+        className="glass-button"
+        style={{
+          position: 'fixed',
+          bottom: '20px',
+          right: '20px',
+          zIndex: 9999,
+          opacity: 0.8
+        }}
+      >
+        🔮 Test UI
+      </button>
+
       <MainLayout
         currentPage={currentPage}
         onPageChange={setCurrentPage}
