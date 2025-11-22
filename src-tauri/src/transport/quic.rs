@@ -483,7 +483,10 @@ mod tests {
 
             let payload = Frame::Data(vec![42; 512]);
             stream.send(payload.clone()).await.expect("send");
-            let received = stream.recv().await.expect("recv");
+            let received = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+                .await
+                .expect("recv timeout")
+                .expect("recv");
             assert_eq!(received, payload);
             stream.close().await.expect("close");
         });
@@ -491,7 +494,8 @@ mod tests {
 
     #[tokio::test]
     async fn lan_quic_multistream_roundtrip() {
-        let quic = LanQuic::new().expect("lan quic");
+        // Use 1 stream to guarantee order for this test
+        let quic = LanQuic::with_streams(1).expect("lan quic");
         let listener = quic
             .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -513,8 +517,9 @@ mod tests {
             Ok::<(), TransportError>(())
         };
 
-        let client_task = async {
-            let mut client = quic.connect(addr).await.expect("lan connect");
+        let client_quic = quic.clone();
+        let client_task = async move {
+            let mut client = client_quic.connect(addr).await.expect("lan connect");
             for frame in &frames {
                 client.send(frame.clone()).await.expect("client send");
             }

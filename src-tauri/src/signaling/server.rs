@@ -22,27 +22,27 @@ use crate::security::SecurityConfig;
 
 use super::SessionDesc;
 
-type SharedState = Arc<SignalingState>;
+pub type SharedState = Arc<SignalingState>;
 
 #[derive(Debug, Clone)]
-struct SignalingState {
-    registry: SessionRegistry,
-    security: SecurityConfig,
+pub struct SignalingState {
+    pub registry: SessionRegistry,
+    pub security: SecurityConfig,
 }
 
 #[derive(Debug, Clone, Default)]
-struct SessionRegistry {
+pub struct SessionRegistry {
     inner: Arc<RwLock<HashMap<String, SessionEntry>>>,
 }
 
 #[derive(Debug, Clone)]
-struct SessionEntry {
+pub struct SessionEntry {
     state: SessionDesc,
     peers: HashMap<Uuid, PeerHandle>,
 }
 
-#[derive(Clone)]
-struct PeerHandle {
+#[derive(Clone, Debug)]
+pub struct PeerHandle {
     tx: mpsc::UnboundedSender<SessionDesc>,
     device_id: String,
     device_name: Option<String>,
@@ -51,13 +51,13 @@ struct PeerHandle {
 }
 
 impl SessionRegistry {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    async fn register(
+    pub async fn register(
         &self,
         session_id: &str,
         peer_id: Uuid,
@@ -81,7 +81,7 @@ impl SessionRegistry {
         }
     }
 
-    async fn merge_and_broadcast(
+    pub async fn merge_and_broadcast(
         &self,
         session_id: &str,
         from_peer: Uuid,
@@ -156,7 +156,7 @@ impl SessionRegistry {
         Ok(())
     }
 
-    async fn remove(&self, session_id: &str, peer_id: Uuid) {
+    pub async fn remove(&self, session_id: &str, peer_id: Uuid) {
         let mut guard = self.inner.write().await;
         if let Some(entry) = guard.get_mut(session_id) {
             entry.peers.remove(&peer_id);
@@ -168,7 +168,7 @@ impl SessionRegistry {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-struct SessionQuery {
+pub struct SessionQuery {
     #[serde(rename = "sessionId")]
     session_id: String,
     #[serde(rename = "deviceId")]
@@ -179,7 +179,29 @@ struct SessionQuery {
     public_key: Option<String>,
 }
 
-pub fn router(config: SecurityConfig) -> Router<SharedState> {
+#[derive(Debug)]
+pub enum SignalingError {
+    UnknownPeer,
+    Signature(String),
+}
+
+impl SignalingError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            SignalingError::UnknownPeer => "E_SESSION_UNKNOWN",
+            SignalingError::Signature(_) => "E_SIGNATURE_INVALID",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            SignalingError::UnknownPeer => "peer not registered for session".into(),
+            SignalingError::Signature(reason) => reason.clone(),
+        }
+    }
+}
+
+pub fn router(config: SecurityConfig) -> Router {
     let state = SignalingState {
         registry: SessionRegistry::new(),
         security: config,
@@ -396,24 +418,4 @@ fn verify_signature(update: &SessionDesc, peer: &PeerHandle) -> Result<(), Strin
         .map_err(|_| "signature verification failed".to_string())
 }
 
-#[derive(Debug)]
-enum SignalingError {
-    UnknownPeer,
-    Signature(String),
-}
 
-impl SignalingError {
-    fn code(&self) -> &'static str {
-        match self {
-            SignalingError::UnknownPeer => "E_SESSION_UNKNOWN",
-            SignalingError::Signature(_) => "E_SIGNATURE_INVALID",
-        }
-    }
-
-    fn message(&self) -> String {
-        match self {
-            SignalingError::UnknownPeer => "peer not registered for session".into(),
-            SignalingError::Signature(reason) => reason.clone(),
-        }
-    }
-}

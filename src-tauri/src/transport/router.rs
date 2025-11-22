@@ -614,6 +614,12 @@ mod tests {
                 "p2p failure",
                 TestDuration::from_millis(2),
             )));
+            // Router automatically adds MockLocal which succeeds by default.
+            // We must override it to fail for this test.
+            router.mock = Arc::new(StubAdapter::failure(
+                "mock failure",
+                TestDuration::from_millis(1),
+            ));
 
             let session = SessionDesc::new("attempt-notes-error");
             let err = match router.connect(&session).await {

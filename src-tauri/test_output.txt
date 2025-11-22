@@ -1,0 +1,458 @@
+warning: unused import: `serde::Deserialize`
+  --> src/signaling/server.rs:13:5
+   |
+13 | use serde::Deserialize;
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `json`
+  --> src/signaling/server.rs:14:24
+   |
+14 | use serde_json::{self, json};
+   |                        ^^^^
+
+warning: unused imports: `error` and `warn`
+ --> src/transport/relay/mod.rs:6:17
+  |
+6 | use log::{info, warn, error};
+  |                 ^^^^  ^^^^^
+
+warning: unused variable: `license`
+   --> src/commands/mod.rs:411:5
+    |
+411 |     license: State<'_, LicenseManager>,
+    |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_license`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: use of deprecated associated function `sha2::digest::generic_array::GenericArray::<T, N>::from_slice`: please upgrade to generic-array 1.x
+  --> src/crypto/session.rs:36:49
+   |
+36 | ...   let cipher = ChaCha20Poly1305::new(Key::from_slice(&shared_s...
+   |                                               ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated associated function `sha2::digest::generic_array::GenericArray::<T, N>::from_slice`: please upgrade to generic-array 1.x
+  --> src/crypto/session.rs:68:16
+   |
+68 |         Nonce::from_slice(&bytes).clone()
+   |                ^^^^^^^^^^
+
+warning: use of deprecated associated function `sha2::digest::generic_array::GenericArray::<T, N>::from_slice`: please upgrade to generic-array 1.x
+  --> src/crypto/session.rs:75:16
+   |
+75 |         Nonce::from_slice(&bytes).clone()
+   |                ^^^^^^^^^^
+
+warning: use of deprecated associated function `x25519_dalek::EphemeralSecret::new`: Renamed to `random_from_rng`. This will be removed in 2.1.0
+  --> src/crypto/session.rs:80:35
+   |
+80 |     let secret = EphemeralSecret::new(OsRng);
+   |                                   ^^^
+
+warning: use of deprecated associated function `chrono::DateTime::<Tz>::from_utc`: Use TimeZone::from_utc_datetime() or DateTime::from_naive_utc_and_offset instead
+   --> src/license/storage.rs:181:45
+    |
+181 |                 issued_at: DateTime::<Utc>::from_utc(
+    |                                             ^^^^^^^^
+
+warning: use of deprecated associated function `chrono::NaiveDateTime::from_timestamp_millis`: use `DateTime::from_timestamp_millis` instead
+   --> src/license/storage.rs:182:36
+    |
+182 |                     NaiveDateTime::from_timestamp_millis(issued_at)
+    |                                    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `chrono::NaiveDateTime::from_timestamp_millis`: use `DateTime::from_timestamp_millis` instead
+   --> src/license/storage.rs:183:59
+    |
+183 | ...   .unwrap_or_else(|| NaiveDateTime::from_timestamp_millis(0)....
+    |                                         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `chrono::NaiveDateTime::from_timestamp_millis`: use `DateTime::from_timestamp_millis` instead
+   --> src/license/storage.rs:188:54
+    |
+188 | ...   .and_then(|value| NaiveDateTime::from_timestamp_millis(value))
+    |                                        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `chrono::DateTime::<Tz>::from_utc`: Use TimeZone::from_utc_datetime() or DateTime::from_naive_utc_and_offset instead
+   --> src/license/storage.rs:189:48
+    |
+189 |                     .map(|dt| DateTime::<Utc>::from_utc(dt, Utc)),
+    |                                                ^^^^^^^^
+
+warning: field `db_path` is never read
+  --> src/license/storage.rs:22:5
+   |
+20 | pub struct LicenseStore {
+   |            ------------ field in this struct
+21 |     identity_store: IdentityStore,
+22 |     db_path: PathBuf,
+   |     ^^^^^^^
+   |
+   = note: `LicenseStore` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `fingerprint` is never read
+  --> src/signaling/server.rs:50:5
+   |
+45 | pub struct PeerHandle {
+   |            ---------- field in this struct
+...
+50 |     fingerprint: Option<String>,
+   |     ^^^^^^^^^^^
+   |
+   = note: `PeerHandle` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `courier-agent` (lib) generated 15 warnings (run `cargo fix --lib -p courier-agent` to apply 3 suggestions)
+warning: unused import: `AsyncWriteExt`
+ --> src/bin/relay_server.rs:4:31
+  |
+4 | use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  |                               ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `LicenseTier`
+ --> src/license/mod.rs:5:61
+  |
+5 | ...nseLimits, LicenseStatus, LicenseTier};
+  |                              ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `serde::Deserialize`
+  --> src/signaling/server.rs:13:5
+   |
+13 | use serde::Deserialize;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `server::router as signaling_router`
+   --> src/signaling/mod.rs:110:9
+    |
+110 | pub use server::router as signaling_router;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `complete`, `sign_sender`, `sign_receiver`, `compute_sender_commitment`, and `compute_receiver_commitment` are never used
+   --> src/attestation/pot.rs:62:12
+    |
+ 38 | impl TransitionReceipt {
+    | ---------------------- methods in this implementation
+...
+ 62 |     pub fn complete(&mut self) {
+    |            ^^^^^^^^
+...
+ 66 |     pub fn sign_sender(&mut self, key: &SigningKey) -> Result<()> {
+    |            ^^^^^^^^^^^
+...
+ 73 |     pub fn sign_receiver(&mut self, key: &SigningKey) -> Result<(...
+    |            ^^^^^^^^^^^^^
+...
+ 86 |     pub fn compute_sender_commitment(&self) -> Vec<u8> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+102 |     pub fn compute_receiver_commitment(&self) -> Result<Vec<u8>> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: function `get_pot_commitment` is never used
+    --> src/commands/mod.rs:1189:14
+     |
+1189 | pub async fn get_pot_commitment(
+     |              ^^^^^^^^^^^^^^^^^^
+
+warning: function `sign_pot` is never used
+    --> src/commands/mod.rs:1214:14
+     |
+1214 | pub async fn sign_pot(
+     |              ^^^^^^^^
+
+warning: field `device_public_key` is never read
+   --> src/commands/types.rs:445:9
+    |
+442 | pub struct WebRtcSenderPayload {
+    |            ------------------- field in this struct
+...
+445 |     pub device_public_key: String,
+    |         ^^^^^^^^^^^^^^^^^
+    |
+    = note: `WebRtcSenderPayload` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `device_public_key` is never read
+   --> src/commands/types.rs:454:9
+    |
+451 | pub struct WebRtcReceiverPayload {
+    |            --------------------- field in this struct
+...
+454 |     pub device_public_key: String,
+    |         ^^^^^^^^^^^^^^^^^
+    |
+    = note: `WebRtcReceiverPayload` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `SessionKeyResponse` is never constructed
+  --> src/crypto/session.rs:13:12
+   |
+13 | pub struct SessionKeyResponse {
+   |            ^^^^^^^^^^^^^^^^^^
+
+warning: function `generate_ephemeral_keypair` is never used
+  --> src/crypto/session.rs:79:8
+   |
+79 | pub fn generate_ephemeral_keypair() -> (EphemeralSecret, SessionPu...
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `derive_shared_key` is never used
+  --> src/crypto/session.rs:87:8
+   |
+87 | pub fn derive_shared_key(secret: EphemeralSecret, peer: &SessionPu...
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: associated items `from_bytes`, `as_bytes`, and `public_key` are never used
+   --> src/crypto/session.rs:115:12
+    |
+ 99 | impl SessionSecretBytes {
+    | ----------------------- associated items in this implementation
+...
+115 |     pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    |            ^^^^^^^^^^
+...
+119 |     pub fn as_bytes(&self) -> [u8; 32] {
+    |            ^^^^^^^^
+...
+123 |     pub fn public_key(&self) -> SessionPublicKey {
+    |            ^^^^^^^^^^
+
+warning: field `db_path` is never read
+  --> src/license/storage.rs:22:5
+   |
+20 | pub struct LicenseStore {
+   |            ------------ field in this struct
+21 |     identity_store: IdentityStore,
+22 |     db_path: PathBuf,
+   |     ^^^^^^^
+   |
+   = note: `LicenseStore` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: type alias `SharedState` is never used
+  --> src/signaling/server.rs:25:10
+   |
+25 | pub type SharedState = Arc<SignalingState>;
+   |          ^^^^^^^^^^^
+
+warning: struct `SignalingState` is never constructed
+  --> src/signaling/server.rs:28:12
+   |
+28 | pub struct SignalingState {
+   |            ^^^^^^^^^^^^^^
+
+warning: struct `SessionRegistry` is never constructed
+  --> src/signaling/server.rs:34:12
+   |
+34 | pub struct SessionRegistry {
+   |            ^^^^^^^^^^^^^^^
+
+warning: struct `SessionEntry` is never constructed
+  --> src/signaling/server.rs:39:12
+   |
+39 | pub struct SessionEntry {
+   |            ^^^^^^^^^^^^
+
+warning: struct `PeerHandle` is never constructed
+  --> src/signaling/server.rs:45:12
+   |
+45 | pub struct PeerHandle {
+   |            ^^^^^^^^^^
+
+warning: associated items `new`, `register`, `merge_and_broadcast`, and `remove` are never used
+   --> src/signaling/server.rs:54:12
+    |
+ 53 | impl SessionRegistry {
+    | -------------------- associated items in this implementation
+ 54 |     pub fn new() -> Self {
+    |            ^^^
+...
+ 60 |     pub async fn register(
+    |                  ^^^^^^^^
+...
+ 84 |     pub async fn merge_and_broadcast(
+    |                  ^^^^^^^^^^^^^^^^^^^
+...
+159 |     pub async fn remove(&self, session_id: &str, peer_id: Uuid) {
+    |                  ^^^^^^
+
+warning: struct `SessionQuery` is never constructed
+   --> src/signaling/server.rs:171:12
+    |
+171 | pub struct SessionQuery {
+    |            ^^^^^^^^^^^^
+
+warning: enum `SignalingError` is never used
+   --> src/signaling/server.rs:183:10
+    |
+183 | pub enum SignalingError {
+    |          ^^^^^^^^^^^^^^
+
+warning: methods `code` and `message` are never used
+   --> src/signaling/server.rs:189:12
+    |
+188 | impl SignalingError {
+    | ------------------- methods in this implementation
+189 |     pub fn code(&self) -> &'static str {
+    |            ^^^^
+...
+196 |     pub fn message(&self) -> String {
+    |            ^^^^^^^
+
+warning: function `router` is never used
+   --> src/signaling/server.rs:204:8
+    |
+204 | pub fn router(config: SecurityConfig) -> Router<SharedState> {
+    |        ^^^^^^
+
+warning: function `upgrade` is never used
+   --> src/signaling/server.rs:219:10
+    |
+219 | async fn upgrade(
+    |          ^^^^^^^
+
+warning: function `handle_socket` is never used
+   --> src/signaling/server.rs:229:10
+    |
+229 | async fn handle_socket(socket: WebSocket, state: SharedState, que...
+    |          ^^^^^^^^^^^^^
+
+warning: function `send_snapshot` is never used
+   --> src/signaling/server.rs:314:10
+    |
+314 | async fn send_snapshot(
+    |          ^^^^^^^^^^^^^
+
+warning: struct `RelayRegistryResponse` is never constructed
+   --> src/signaling/server.rs:324:8
+    |
+324 | struct RelayRegistryResponse {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `relay_registry` is never used
+   --> src/signaling/server.rs:330:10
+    |
+330 | async fn relay_registry() -> Json<RelayRegistryResponse> {
+    |          ^^^^^^^^^^^^^^
+
+warning: constant `SIGNATURE_DOMAIN` is never used
+   --> src/signaling/server.rs:337:7
+    |
+337 | const SIGNATURE_DOMAIN: &str = "quantumdrop.signaling.v1";
+    |       ^^^^^^^^^^^^^^^^
+
+warning: function `parse_peer_metadata` is never used
+   --> src/signaling/server.rs:339:4
+    |
+339 | fn parse_peer_metadata(
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `fingerprint_from_public_key` is never used
+   --> src/signaling/server.rs:359:4
+    |
+359 | fn fingerprint_from_public_key(bytes: &[u8]) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `build_sign_message` is never used
+   --> src/signaling/server.rs:368:4
+    |
+368 | fn build_sign_message(desc: &SessionDesc, device_id: &str) -> Str...
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `verify_signature` is never used
+   --> src/signaling/server.rs:391:4
+    |
+391 | fn verify_signature(update: &SessionDesc, peer: &PeerHandle) -> R...
+    |    ^^^^^^^^^^^^^^^^
+
+warning: constant `DEFAULT_LAN_STREAMS` is never used
+  --> src/transport/quic.rs:23:7
+   |
+23 | const DEFAULT_LAN_STREAMS: usize = 3;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/transport/quic.rs:302:12
+    |
+301 | impl LanQuic {
+    | ------------ associated function in this implementation
+302 |     pub fn new() -> Result<Self, TransportError> {
+    |            ^^^
+
+warning: `courier-agent` (bin "relay_server") generated 1 warning (run `cargo fix --bin "relay_server"` to apply 1 suggestion)
+warning: `courier-agent` (bin "courier-agent") generated 47 warnings (12 duplicates) (run `cargo fix --bin "courier-agent"` to apply 3 suggestions)
+   Compiling courier-agent v0.1.8 (/Users/eason/Documents/智能体/时光穿梭机/src-tauri)
+warning: unused import: `std::net::SocketAddr`
+ --> tests/transport_integration.rs:1:5
+  |
+1 | use std::net::SocketAddr;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::sync::Arc`
+ --> tests/transport_integration.rs:2:5
+  |
+2 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `Router<Arc<SignalingState>>: Service<IncomingStream<'a>>` is not satisfied
+  --> tests/transport_integration.rs:78:31
+   |
+78 |         axum::serve(listener, app).await.unwrap();
+   |         -----------           ^^^ the trait `for<'a> tower_service::Service<IncomingStream<'a>>` is not implemented for `axum::Router<Arc<signaling::server::SignalingState>>`
+   |         |
+   |         required by a bound introduced by this call
+   |
+   = help: the following other types implement trait `tower_service::Service<Request>`:
+             `axum::Router` implements `tower_service::Service<IncomingStream<'_>>`
+             `axum::Router` implements `tower_service::Service<axum::http::Request<B>>`
+note: required by a bound in `serve`
+  --> /Users/eason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/axum-0.7.9/src/serve.rs:94:8
+   |
+92 | pub fn serve<M, S>(tcp_listener: TcpListener, make_service: M) -> Serve<M, S>
+   |        ----- required by a bound in this function
+93 | where
+94 |     M: for<'a> Service<IncomingStream<'a>, Error = Infallible, Response = S>,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `serve`
+   = note: the full name for the type has been written to '/Users/eason/Documents/智能体/时光穿梭机/src-tauri/target/debug/deps/transport_integration-f3f5b4a9a7bf670b.long-type-16114050880884541676.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: `Serve<axum::Router<Arc<signaling::server::SignalingState>>, _>` is not a future
+  --> tests/transport_integration.rs:78:36
+   |
+78 |         axum::serve(listener, app).await.unwrap();
+   |         -------------------------- ^^^^^ `Serve<axum::Router<Arc<signaling::server::SignalingState>>, _>` is not a future
+   |         |
+   |         this call returns `Serve<axum::Router<Arc<signaling::server::SignalingState>>, _>`
+   |
+   = help: the trait `IntoFuture` is not implemented for `Serve<axum::Router<Arc<signaling::server::SignalingState>>, _>`
+   = note: Serve<axum::Router<Arc<signaling::server::SignalingState>>, _> must be a future or must implement `IntoFuture` to be awaited
+   = help: the trait `IntoFuture` is implemented for `Serve<M, S>`
+help: remove the `.await`
+   |
+78 -         axum::serve(listener, app).await.unwrap();
+78 +         axum::serve(listener, app).unwrap();
+   |
+
+error[E0277]: the trait bound `WebRtcHint: Default` is not satisfied
+  --> tests/transport_integration.rs:91:11
+   |
+91 |         ..Default::default()
+   |           ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `WebRtcHint`
+
+error[E0277]: the trait bound `WebRtcHint: Default` is not satisfied
+   --> tests/transport_integration.rs:104:11
+    |
+104 |         ..Default::default()
+    |           ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `WebRtcHint`
+
+For more information about this error, try `rustc --explain E0277`.
+warning: `courier-agent` (test "transport_integration") generated 2 warnings
+error: could not compile `courier-agent` (test "transport_integration") due to 4 previous errors; 2 warnings emitted

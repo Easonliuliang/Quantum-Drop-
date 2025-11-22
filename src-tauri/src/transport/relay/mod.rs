@@ -3,17 +3,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use log::{info, warn};
+use log::{info, warn, error};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::Mutex,
-    try_join,
 };
 
 use crate::transport::{Frame, SessionDesc, TransportAdapter, TransportError, TransportStream};
 
 const FRAME_HEADER_LEN: usize = 5;
+const MAGIC_HEADER: u8 = 0x52; // 'R'
 
 #[derive(Debug, Clone, Default)]
 pub struct RelayAdapter;
@@ -30,72 +30,75 @@ impl TransportAdapter for RelayAdapter {
         &self,
         session: &SessionDesc,
     ) -> Result<Box<dyn TransportStream>, TransportError> {
-        if let Some(hint) = &session.relay {
+        // 1. Determine Relay Server Address
+        // Default to local dev server if no hint provided
+        let relay_addr = if let Some(hint) = &session.relay {
             if hint.port != 0 {
-                warn!(
-                    "relay hint {}:{} ignored by loopback adapter",
-                    hint.host, hint.port
-                );
+                format!("{}:{}", hint.host, hint.port)
+            } else {
+                "127.0.0.1:8080".to_string()
             }
-        }
+        } else {
+            "127.0.0.1:8080".to_string()
+        };
 
-        let listener = TcpListener::bind(("127.0.0.1", 0))
+        info!("Connecting to Relay Server at {} for session {}", relay_addr, session.session_id);
+
+        // 2. Connect to Server
+        let mut stream = TcpStream::connect(&relay_addr)
             .await
-            .map_err(|err| TransportError::Setup(format!("relay bind failed: {err}")))?;
-        let listen_addr = listener
-            .local_addr()
-            .map_err(|err| TransportError::Setup(format!("relay addr lookup failed: {err}")))?;
+            .map_err(|err| TransportError::Setup(format!("relay connect failed: {err}")))?;
 
-        let accept_future = async move {
-            listener
-                .accept()
-                .await
-                .map_err(|err| TransportError::Setup(format!("relay accept failed: {err}")))
-        };
-        let connect_future = async move {
-            TcpStream::connect(listen_addr)
-                .await
-                .map_err(|err| TransportError::Setup(format!("relay connect failed: {err}")))
-        };
-        let ((server_stream, peer_addr), client_stream) = try_join!(accept_future, connect_future)?;
-        info!(
-            "relay loopback established for session {} via {}",
-            session.session_id, peer_addr
-        );
+        // 3. Handshake
+        // Protocol: [Magic(1)][SessionID(32)][Role(1)]
+        // Role: We don't strictly distinguish sender/receiver in the adapter interface yet, 
+        // but we can use a placeholder or derive it if needed. 
+        // For now, let's use 0x00 as a generic role since the server just pairs any two.
+        let mut handshake = Vec::with_capacity(34);
+        handshake.push(MAGIC_HEADER);
+        
+        // Ensure SessionID is exactly 32 bytes. If shorter, pad; if longer, truncate (or hash).
+        // Assuming SessionID is a UUID string (36 chars) or similar. 
+        // For simplicity, let's take the first 32 bytes or pad with spaces.
+        let session_bytes = session.session_id.as_bytes();
+        let mut id_buf = [0x20u8; 32]; // Space padding
+        let len = std::cmp::min(session_bytes.len(), 32);
+        id_buf[..len].copy_from_slice(&session_bytes[..len]);
+        handshake.extend_from_slice(&id_buf);
+        
+        handshake.push(0x00); // Role (Generic)
 
-        let stream = RelayLoopbackStream::new(client_stream, server_stream).await?;
+        stream.write_all(&handshake).await.map_err(|err| {
+            TransportError::Setup(format!("relay handshake failed: {err}"))
+        })?;
+
+        info!("Relay handshake sent for session {}", session.session_id);
+
+        // 4. Wrap Stream
+        // The server will bridge us when the other peer connects. 
+        // We can now treat this TCP stream as a direct link to the peer.
+        let stream = RelayStream::new(stream);
         Ok(Box::new(stream))
     }
 }
 
-struct RelayLoopbackStream {
+struct RelayStream {
     reader: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
     writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 }
 
-impl RelayLoopbackStream {
-    async fn new(
-        client_stream: TcpStream,
-        server_stream: TcpStream,
-    ) -> Result<Self, TransportError> {
-        let (client_reader, client_writer) = client_stream.into_split();
-        let (server_reader, server_writer) = server_stream.into_split();
-
-        tokio::spawn(async move {
-            if let Err(err) = relay_echo(server_reader, server_writer).await {
-                warn!("relay echo loop exited: {err}");
-            }
-        });
-
-        Ok(Self {
-            reader: Arc::new(Mutex::new(client_reader)),
-            writer: Arc::new(Mutex::new(client_writer)),
-        })
+impl RelayStream {
+    fn new(stream: TcpStream) -> Self {
+        let (reader, writer) = stream.into_split();
+        Self {
+            reader: Arc::new(Mutex::new(reader)),
+            writer: Arc::new(Mutex::new(writer)),
+        }
     }
 }
 
 #[async_trait]
-impl TransportStream for RelayLoopbackStream {
+impl TransportStream for RelayStream {
     async fn send(&mut self, frame: Frame) -> Result<(), TransportError> {
         let mut writer = self.writer.lock().await;
         let payload = encode_frame(frame);
@@ -112,48 +115,13 @@ impl TransportStream for RelayLoopbackStream {
 
     async fn close(&mut self) -> Result<(), TransportError> {
         let mut writer = self.writer.lock().await;
+        // Sending a close frame might be good practice, but TCP shutdown is sufficient for now
         writer
             .shutdown()
             .await
             .map_err(|err| TransportError::Io(format!("relay shutdown failed: {err}")))?;
         Ok(())
     }
-}
-
-async fn relay_echo(
-    mut inbound: tokio::net::tcp::OwnedReadHalf,
-    mut outbound: tokio::net::tcp::OwnedWriteHalf,
-) -> Result<(), TransportError> {
-    loop {
-        let mut header = [0u8; FRAME_HEADER_LEN];
-        if inbound.read_exact(&mut header).await.is_err() {
-            break;
-        }
-        let frame_type = header[0];
-        let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
-        let mut payload = vec![0u8; len];
-        inbound
-            .read_exact(&mut payload)
-            .await
-            .map_err(|err| TransportError::Io(format!("relay echo read failed: {err}")))?;
-
-        outbound
-            .write_all(&header)
-            .await
-            .map_err(|err| TransportError::Io(format!("relay echo header write failed: {err}")))?;
-        if !payload.is_empty() {
-            outbound.write_all(&payload).await.map_err(|err| {
-                TransportError::Io(format!("relay echo payload write failed: {err}"))
-            })?;
-        }
-
-        // End-of-stream marker for control frames carrying "close".
-        if frame_type == 0 && payload == b"close" {
-            break;
-        }
-    }
-    outbound.shutdown().await.ok();
-    Ok(())
 }
 
 fn encode_frame(frame: Frame) -> Vec<u8> {
@@ -211,49 +179,3 @@ fn map_read_error(err: std::io::Error) -> TransportError {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::runtime::Runtime;
-
-    #[test]
-    fn relay_loopback_transfers_frames() {
-        let rt = Runtime::new().expect("runtime");
-        rt.block_on(async {
-            let adapter = RelayAdapter::new();
-            let session = SessionDesc::new("relay-loopback");
-            let mut stream = adapter.connect(&session).await.expect("connect relay");
-
-            let payload = Frame::Control("relay-ping".into());
-            stream.send(payload.clone()).await.expect("send control");
-            let echoed = stream.recv().await.expect("recv control");
-            assert_eq!(echoed, payload);
-
-            let data = Frame::Data(vec![7, 8, 9]);
-            stream.send(data.clone()).await.expect("send data");
-            let echoed = stream.recv().await.expect("recv data");
-            assert_eq!(echoed, data);
-
-            stream.close().await.expect("close");
-        });
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual relay smoke test to avoid CI hangs"]
-    async fn relay_manual_smoke() {
-        let adapter = RelayAdapter::new();
-        let session = SessionDesc::new("relay-manual");
-        let mut stream = adapter.connect(&session).await.expect("connect relay");
-
-        stream
-            .send(Frame::Data(vec![1, 2, 3, 4]))
-            .await
-            .expect("send data");
-
-        let echo = stream.recv().await.expect("recv data");
-        match echo {
-            Frame::Data(bytes) => assert_eq!(bytes, vec![1, 2, 3, 4]),
-            other => panic!("unexpected frame: {:?}", other),
-        }
-    }
-}

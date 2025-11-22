@@ -1451,7 +1451,7 @@ fn decode_hex_to_array<const N: usize>(input: &str, field: &str) -> Result<[u8; 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attestation::{pot::ProofSignature, FileAttestation};
+    use crate::attestation::{pot::TransitionReceipt, FileAttestation};
     use crate::commands::types::ErrorCode;
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
@@ -1471,19 +1471,19 @@ mod tests {
         }
     }
 
-    fn sample_proof() -> ProofOfTransition {
-        ProofOfTransition {
-            version: "1".into(),
-            task_id: "task_123".into(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            sender_fingerprint: "ed25519:sender".into(),
-            receiver_fingerprint: "ed25519:receiver".into(),
-            route: "relay".into(),
+    fn sample_proof() -> TransitionReceipt {
+        TransitionReceipt {
+            version: 1,
+            transfer_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            sender_identity: "ed25519:sender".into(),
+            receiver_identity: "ed25519:receiver".into(),
+            route_type: "relay".into(),
             files: vec![sample_attestation()],
-            attest: ProofSignature {
-                receiver_signature: "ed25519:sig".into(),
-                algo: "ed25519".into(),
-            },
+            timestamp_start: chrono::Utc::now(),
+            timestamp_complete: Some(chrono::Utc::now()),
+            sender_signature: None,
+            receiver_signature: Some("ed25519:sig".into()),
         }
     }
 
@@ -1700,15 +1700,18 @@ mod tests {
     fn verify_pot_command_reports_invalid_structure() {
         let mut temp = NamedTempFile::new().expect("temp file");
         let payload = json!({
-            "version": "1",
-            "files": [],
-            "route": "lan",
-            "attest": { "receiver_signature": "", "algo": "" },
-            "task_id": "task",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "sender_fingerprint": "sender",
-            "receiver_fingerprint": "receiver"
-        });
+        "version": 1,
+        "transfer_id": Uuid::new_v4(),
+        "session_id": Uuid::new_v4(),
+        "sender_identity": "sender",
+        "receiver_identity": "receiver",
+        "files": [],
+        "route_type": "lan",
+        "timestamp_start": chrono::Utc::now().to_rfc3339(),
+        "timestamp_complete": null,
+        "sender_signature": null,
+        "receiver_signature": null
+    });
         serde_json::to_writer(&mut temp, &payload).expect("write payload");
         let path = temp.path().display().to_string();
         let result = tauri::async_runtime::block_on(verify_pot(path));
