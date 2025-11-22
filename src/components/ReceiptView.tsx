@@ -12,14 +12,14 @@ export const ReceiptView: React.FC<ReceiptViewProps> = ({ receipt, onClose }) =>
     const isVerified = !!receipt.receiver_signature;
 
     return (
-        <div className="panel-section receipt-view">
+        <div className="glass-panel receipt-view">
             <div className="receipt-header">
                 <div className={`status-badge ${isVerified ? "verified" : "pending"}`}>
                     {isVerified ? "✓ VERIFIED" : "⚠ PENDING"}
                 </div>
                 <h2 className="text-gradient">Proof of Transition</h2>
                 {onClose && (
-                    <button className="close-btn" onClick={onClose}>
+                    <button className="glass-button" onClick={onClose} style={{ padding: "4px 8px", minWidth: "auto" }}>
                         ×
                     </button>
                 )}
@@ -51,7 +51,7 @@ export const ReceiptView: React.FC<ReceiptViewProps> = ({ receipt, onClose }) =>
                     </ul>
                 </div>
 
-                <button className="toggle-details" onClick={() => setExpanded(!expanded)}>
+                <button className="glass-button" onClick={() => setExpanded(!expanded)} style={{ width: "100%", marginTop: "16px", justifyContent: "center" }}>
                     {expanded ? "Hide Cryptographic Details" : "Show Cryptographic Details"}
                 </button>
 

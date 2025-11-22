@@ -83,7 +83,7 @@ impl TransitionReceipt {
         Ok(())
     }
 
-    fn compute_sender_commitment(&self) -> Vec<u8> {
+    pub fn compute_sender_commitment(&self) -> Vec<u8> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&[self.version]);
         hasher.update(self.transfer_id.as_bytes());
@@ -99,7 +99,7 @@ impl TransitionReceipt {
         hasher.finalize().as_bytes().to_vec()
     }
 
-    fn compute_receiver_commitment(&self) -> Result<Vec<u8>> {
+    pub fn compute_receiver_commitment(&self) -> Result<Vec<u8>> {
         let mut hasher = blake3::Hasher::new();
         let sender_sig = self
             .sender_signature

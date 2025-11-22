@@ -4,6 +4,7 @@ pub mod types;
 use std::{
     collections::HashSet,
     fs,
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -20,7 +21,6 @@ use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
 use tokio::time::{sleep, timeout};
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
     io::{AsyncReadExt, AsyncWriteExt},
     task::spawn_blocking,
 };
@@ -2941,12 +2941,6 @@ struct LogPayload {
     message: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct VerifyPotResponse {
-    pub valid: bool,
-    pub reason: Option<String>,
-    pub receipt: Option<TransitionReceipt>,
-}
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    attestation::TransitionReceipt,
     audit::AuditEntry,
     config::default_lan_streams,
     license::{LicenseError, LicenseLimits, LicenseStatus},
@@ -126,6 +127,7 @@ pub struct ExportPotResponse {
 pub struct VerifyPotResponse {
     pub valid: bool,
     pub reason: Option<String>,
+    pub receipt: Option<TransitionReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize)]
