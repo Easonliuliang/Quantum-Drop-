@@ -37,6 +37,9 @@ import {
   maskLicenseKey,
   summarizeAuditDetails,
 } from "./lib/format";
+import { QuantumBackground } from "./components/QuantumBackground";
+import { ReceiptView } from "./components/ReceiptView";
+import { TransitionReceipt, VerifyPotResponse } from "./lib/types";
 
 type SelectedFile = {
   name: string;
@@ -557,6 +560,7 @@ export default function App(): JSX.Element {
   const [progress, setProgress] = useState<TransferProgressPayload | null>(null);
   type LogEntry = { id: string; message: string; count: number; timestamp: number };
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [receipt, setReceipt] = useState<TransitionReceipt | null>(null);
 
   const resetLogs = useCallback(() => {
     setLogs([]);
@@ -704,8 +708,8 @@ export default function App(): JSX.Element {
     if (typeof window !== "undefined") {
       window.open(DOCS_URL, "_blank", "noopener,noreferrer");
     }
-      appendLog("📖 打开故障排查文档。");
-    }, [appendLog]);
+    appendLog("📖 打开故障排查文档。");
+  }, [appendLog]);
 
   const removeTrustedPeer = useCallback(
     (deviceId: string) => {
@@ -1097,7 +1101,7 @@ export default function App(): JSX.Element {
     [updateChunkPolicyDraft],
   );
 
-  const refreshSettingsRef = useRef<() => void>(() => {});
+  const refreshSettingsRef = useRef<() => void>(() => { });
   useEffect(() => {
     refreshSettingsRef.current = () => {
       void refreshSettings();
@@ -1508,17 +1512,17 @@ export default function App(): JSX.Element {
     }
     try {
       const hex = bytesToHex(identityPrivateKey);
-        await rememberIdentity({
-          identityId: identity.identityId,
-          publicKeyHex: identity.publicKey,
-          privateKeyHex: hex,
-        });
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(hex);
-          setInfo(t("info.privateKeyCopied", "Private key copied to clipboard. Keep it safe."));
-        } else {
-          setInfo(hex);
-        }
+      await rememberIdentity({
+        identityId: identity.identityId,
+        publicKeyHex: identity.publicKey,
+        privateKeyHex: hex,
+      });
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(hex);
+        setInfo(t("info.privateKeyCopied", "Private key copied to clipboard. Keep it safe."));
+      } else {
+        setInfo(hex);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       showError(message);
@@ -1538,11 +1542,11 @@ export default function App(): JSX.Element {
         showError("请输入私钥十六进制");
         return;
       }
-    setIsImportingIdentity(true);
-    clearError();
-    try {
-      ensureEd25519Hash();
-      const privateBytes = hexToBytes(privateHex);
+      setIsImportingIdentity(true);
+      clearError();
+      try {
+        ensureEd25519Hash();
+        const privateBytes = hexToBytes(privateHex);
         if (privateBytes.length !== 32) {
           throw new Error("私钥长度必须为 32 字节");
         }
@@ -1578,7 +1582,7 @@ export default function App(): JSX.Element {
         setImportPrivateKey("");
         await refreshEntitlement(resolvedId);
         await refreshDevices(resolvedId);
-    } catch (err) {
+      } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         showError(message);
         appendLog(`⚠️ 身份导入失败：${message}`);
@@ -1722,8 +1726,8 @@ export default function App(): JSX.Element {
       setSenderPublicKey(null);
       setRouteAttempts(null);
       setRouteMetrics(null);
-          setProgress(null);
-          resetLogs();
+      setProgress(null);
+      resetLogs();
       setPeerPrompt(null);
       setTrustedPeers({});
       setPeerFingerprintInput("");
@@ -1732,7 +1736,7 @@ export default function App(): JSX.Element {
       const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
       if (canAuto && !isSending) {
         window.setTimeout(() => {
-            void beginTransferRef.current?.(paths);
+          void beginTransferRef.current?.(paths);
         }, 220);
       }
     };
@@ -1791,7 +1795,7 @@ export default function App(): JSX.Element {
         }
       });
     };
-}, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, isSending, resetLogs]);
+  }, [isTauri, identity, identityPrivateKey, activeDeviceId, devices, isSending, resetLogs]);
 
   // 保险：在 Tauri 环境里，系统级拖拽可能不触发 DOM onDrop。
   // 用全局 dragenter/dragleave 保证至少出现一次吸入动效，提升反馈感知。
@@ -1861,46 +1865,46 @@ export default function App(): JSX.Element {
         const tauri = getTauri();
         const dialogAny = tauri;
         if (dialogAny?.dialog?.open) {
-        const selected = await dialogAny.dialog.open({
-          multiple: true,
-          filters: [{ name: "All Files", extensions: ["*"] }],
-        });
-        if (!selected) {
-          return;
+          const selected = await dialogAny.dialog.open({
+            multiple: true,
+            filters: [{ name: "All Files", extensions: ["*"] }],
+          });
+          if (!selected) {
+            return;
+          }
+          const selectedPaths = Array.isArray(selected) ? selected : [selected];
+          const normalized = selectedPaths.filter((value): value is string => typeof value === "string");
+          if (normalized.length === 0) {
+            return;
+          }
+          const displayFiles = normalized.map<SelectedFile>((path) => {
+            const parts = path.split(/[/\\]/);
+            const name = parts[parts.length - 1] ?? path;
+            return { name, path };
+          });
+          setFiles(displayFiles);
+          setPendingPaths(normalized);
+          setTaskId(null);
+          setTaskCode(null);
+          setSenderPublicKey(null);
+          setRouteAttempts(null);
+          setRouteMetrics(null);
+          setProgress(null);
+          resetLogs();
+          // 动效与自动传输
+          setAbsorbing(true);
+          window.setTimeout(() => setAbsorbing(false), 900);
+          const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
+          if (canAuto && !isSending) {
+            window.setTimeout(() => {
+              void beginTransferRef.current?.(normalized as unknown as string[]);
+            }, 220);
+          }
+        } else {
+          // Tauri dialog 插件不可用时，回退到浏览器文件选择器
+          fileInputRef.current?.click();
+          setInfo(t("info.dialogMissing", "Tauri dialog plugin missing. Used system file selector."));
         }
-        const selectedPaths = Array.isArray(selected) ? selected : [selected];
-        const normalized = selectedPaths.filter((value): value is string => typeof value === "string");
-        if (normalized.length === 0) {
-          return;
-        }
-        const displayFiles = normalized.map<SelectedFile>((path) => {
-          const parts = path.split(/[/\\]/);
-          const name = parts[parts.length - 1] ?? path;
-          return { name, path };
-        });
-        setFiles(displayFiles);
-        setPendingPaths(normalized);
-        setTaskId(null);
-        setTaskCode(null);
-        setSenderPublicKey(null);
-        setRouteAttempts(null);
-        setRouteMetrics(null);
-        setProgress(null);
-        resetLogs();
-        // 动效与自动传输
-        setAbsorbing(true);
-        window.setTimeout(() => setAbsorbing(false), 900);
-        const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
-        if (canAuto && !isSending) {
-          window.setTimeout(() => {
-            void beginTransferRef.current?.(normalized as unknown as string[]);
-          }, 220);
-        }
-      } else {
-        // Tauri dialog 插件不可用时，回退到浏览器文件选择器
-        fileInputRef.current?.click();
-        setInfo(t("info.dialogMissing", "Tauri dialog plugin missing. Used system file selector."));
-      }
       } catch {
         fileInputRef.current?.click();
         setInfo(t("info.dialogFallback", "File picker fell back to browser mode."));
@@ -2192,6 +2196,11 @@ export default function App(): JSX.Element {
           )}
         </section>
       </PanelBoundary>
+    </>
+  ) : null;
+
+  const trustedPeersContent = identity ? (
+    <>
       <PanelBoundary fallbackKey="panel.trustedError" fallbackDefault="无法读取信任列表，请刷新。" onRetry={() => void refreshDevices()}>
         {Object.keys(trustedPeers).length > 0 ? (
           <div className="trusted-peers-panel">
@@ -2673,13 +2682,63 @@ export default function App(): JSX.Element {
       if (!listen) {
         return;
       }
-      const progressListener = await listen<TransferProgressPayload>("transfer_progress", (event) => {
+      const progressListener = await listen<TransferProgressPayload>("transfer_progress", async (event) => {
         if (!active) {
           return;
         }
         setProgress(event.payload);
         if (Array.isArray(event.payload.routeAttempts)) {
           setRouteAttempts(event.payload.routeAttempts);
+        }
+
+        if (event.payload.phase === "done" && event.payload.message) {
+          const potPath = event.payload.message;
+          try {
+            const invoke = resolveTauriInvoke();
+            const response = await invoke("verify_pot", { potPath }) as VerifyPotResponse;
+
+            if (response.receipt && identity?.identityId) {
+              const stored = await loadIdentity(identity.identityId);
+              if (stored) {
+                const myPublicKey = stored.publicKeyHex;
+                let isSender = false;
+                let needsSigning = false;
+
+                if (response.receipt.sender_identity === myPublicKey && !response.receipt.sender_signature) {
+                  isSender = true;
+                  needsSigning = true;
+                } else if (response.receipt.receiver_identity === myPublicKey && !response.receipt.receiver_signature) {
+                  isSender = false;
+                  needsSigning = true;
+                }
+
+                if (needsSigning) {
+                  try {
+                    const commitmentHex = await invoke("get_pot_commitment", { potPath, isSender }) as string;
+                    const commitment = hexToBytes(commitmentHex);
+                    const signatureBytes = await signEd25519(commitment, stored.privateKeyHex);
+                    const signature = bytesToHex(signatureBytes);
+
+                    const signedResponse = await invoke("sign_pot", { potPath, signature, isSender }) as VerifyPotResponse;
+                    if (signedResponse.receipt) {
+                      setReceipt(signedResponse.receipt);
+                    } else {
+                      setReceipt(response.receipt);
+                    }
+                  } catch (signErr) {
+                    console.error("Failed to sign receipt:", signErr);
+                    setReceipt(response.receipt);
+                  }
+                } else {
+                  setReceipt(response.receipt);
+                }
+              } else {
+                setReceipt(response.receipt);
+              }
+            }
+          } catch (err) {
+            console.error("Failed to load PoT:", err);
+          }
         }
       });
       const devicesListener = await listen<IdentityDevicesEventPayload>(
@@ -2793,11 +2852,12 @@ export default function App(): JSX.Element {
   }, [taskId, taskCode, progress, currentPage]);
 
   return (
-    <div className="app-surface">
+    <>
+      <QuantumBackground />
       <MainLayout
         currentPage={currentPage}
         onPageChange={setCurrentPage}
-        hasActiveTransfer={hasActiveTransfer}
+        hasActiveTransfer={!!taskId}
         hasLogs={logs.length > 0}
       >
         {currentPage === "send" && (
@@ -2981,8 +3041,7 @@ export default function App(): JSX.Element {
                     [peerPrompt.deviceId]: peerPrompt,
                   }));
                   appendLog(
-                    `🤝 已信任设备 ${peerPrompt.deviceName ?? peerPrompt.deviceId}${
-                      peerPrompt.verified ? "（签名通过）" : ""
+                    `🤝 已信任设备 ${peerPrompt.deviceName ?? peerPrompt.deviceId}${peerPrompt.verified ? "（签名通过）" : ""
                     }`
                   );
                   setPeerPrompt(null);
@@ -3017,7 +3076,14 @@ export default function App(): JSX.Element {
           onClose={handleUpgradeDismiss}
         />
       )}
-    </div>
+      {receipt && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <ReceiptView receipt={receipt} onClose={() => setReceipt(null)} />
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 const concatUint8Arrays = (chunks: Uint8Array[]) => {

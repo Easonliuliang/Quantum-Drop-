@@ -1,24 +1,25 @@
-# 🚀 Quantum Drop · 量子快传
+# 🪐 Quantum Drop · 量子快传
 
 [![Release Bundles](https://github.com/Easonliuliang/Quantum-Drop-/actions/workflows/release.yml/badge.svg)](https://github.com/Easonliuliang/Quantum-Drop-/actions/workflows/release.yml)
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 ![Node](https://img.shields.io/badge/node-18.x-026e00?logo=node.js)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-> 消除路径感知、即时完成且可验证的文件传递体验。<br />
-> 基于 Tauri · Rust · React 构建，并与 AETHER OS 生态保持一致。
+> **下一代跨生态的“可信数据流协议栈”（Trusted Data Stream Protocol）。**<br />
+> 基于 Tauri · Rust · React 构建，为专业团队与 AI 智能体打造。
 
 ---
 
 ## 概览
 
-Quantum Drop · 量子快传 将文件传输重新定义为“存在”，而非“移动”。应用并非让字节穿梭于脆弱的中继链路，而是在设备之间折叠并显化数据，一旦传输启动便产出经过验证的成果。灵感来自 AETHER OS 的理念——智能体以念头协作，需要时显形，用毕即散。
+**Quantum Drop** 不仅仅是一个文件传输工具。当巨头们解决了普通用户的“照片互传”需求后，Quantum Drop 专注于解决**“专业级、可信级、可验证的数据移动”**问题。
 
-核心设计目标：
+我们致力于打造 **AETHER OS** 的数据层——当两个 AI 智能体需要交换 10GB 上下文，或者律师需要向客户交付不可抵赖的加密文档时，他们使用的是 Quantum Drop。
 
-- **存在优先的体验**：元数据与证明先行抵达，内容在后台快速收敛。
-- **多路径传输调度**：综合 QUIC、WebRTC、TURN 等链路，确保持续吞吐。
-- **可验证结果**：每次跃迁都会生成可携带的 Proof of Transition（PoT）文件。
+### 核心价值：
+- **存在证明 (Proof of Transition)**：每一次传输都会生成密码学签名的 PoT 收据，可用于法律举证与审计。
+- **私有化基础设施**：支持企业内网部署 Quantum Relay，数据主权完全掌控，不经过公有云。
+- **全网络路由**：智能调度 LAN (QUIC) -> P2P (WebRTC) -> Relay (TCP)，穿透复杂网络环境。
 
 演示（拖拽投递）：
 

@@ -63,6 +63,7 @@ export function SendPage({
           <span className="ring ring-outer" />
           <span className="ring ring-middle" />
           <span className="ring ring-inner" />
+          <div className="quantum-core" />
           <div className="absorb-particles" aria-hidden="true">
             {Array.from({ length: 12 }).map((_, index) => (
               <span key={`particle-${index}`} className={`p p${index + 1}`} />

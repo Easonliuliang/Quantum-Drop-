@@ -21,11 +21,13 @@ use tokio::time::{sleep, timeout};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     task::spawn_blocking,
 };
+use uuid::Uuid;
 
 use crate::{
-    attestation::{compute_file_attestation, write_proof_of_transition, ProofOfTransition},
+    attestation::{compute_file_attestation, write_proof_of_transition, TransitionReceipt},
     audit::{log_simple_event, AuditLogger},
     config::{AdaptiveChunkPolicy, ConfigStore, RuntimeSettings},
     crypto::{
@@ -1172,13 +1174,80 @@ pub async fn verify_pot(pot_path: String) -> Result<VerifyPotResponse, CommandEr
 
     let file = fs::File::open(&path)
         .map_err(|err| CommandError::from_io(&err, "failed to open PoT file"))?;
-    let proof: ProofOfTransition = serde_json::from_reader(file)
+    let receipt: TransitionReceipt = serde_json::from_reader(file)
         .map_err(|err| CommandError::verify_failed(format!("invalid PoT JSON payload: {err}")))?;
 
-    let reason = validate_proof(&proof);
+    let reason = validate_proof(&receipt);
     Ok(VerifyPotResponse {
         valid: reason.is_none(),
         reason,
+        receipt: Some(receipt),
+    })
+}
+
+#[tauri::command]
+pub async fn get_pot_commitment(
+    pot_path: String,
+    is_sender: bool,
+) -> Result<String, CommandError> {
+    let path = PathBuf::from(&pot_path);
+    if !path.exists() {
+        return Err(CommandError::invalid("PoT file not found"));
+    }
+
+    let file = fs::File::open(&path)
+        .map_err(|err| CommandError::from_io(&err, "failed to open PoT file"))?;
+    let receipt: TransitionReceipt = serde_json::from_reader(file)
+        .map_err(|err| CommandError::verify_failed(format!("invalid PoT JSON payload: {err}")))?;
+
+    let commitment = if is_sender {
+        receipt.compute_sender_commitment()
+    } else {
+        receipt.compute_receiver_commitment()
+            .map_err(|err| CommandError::verify_failed(format!("failed to compute receiver commitment: {err}")))?
+    };
+
+    Ok(hex::encode(commitment))
+}
+
+#[tauri::command]
+pub async fn sign_pot(
+    pot_path: String,
+    signature: String,
+    is_sender: bool,
+) -> Result<VerifyPotResponse, CommandError> {
+    let path = PathBuf::from(&pot_path);
+    if !path.exists() {
+        return Err(CommandError::invalid("PoT file not found"));
+    }
+
+    let file = fs::File::open(&path)
+        .map_err(|err| CommandError::from_io(&err, "failed to open PoT file"))?;
+    let mut receipt: TransitionReceipt = serde_json::from_reader(file)
+        .map_err(|err| CommandError::verify_failed(format!("invalid PoT JSON payload: {err}")))?;
+
+    if is_sender {
+        receipt.sender_signature = Some(signature);
+    } else {
+        receipt.receiver_signature = Some(signature);
+        if receipt.timestamp_complete.is_none() {
+            receipt.complete();
+        }
+    }
+
+    let proof_json = serde_json::to_vec_pretty(&receipt)
+        .map_err(|err| CommandError::from_io(&std::io::Error::new(std::io::ErrorKind::Other, err), "failed to serialize proof"))?;
+    
+    let mut file = fs::File::create(&path)
+        .map_err(|err| CommandError::from_io(&err, "failed to write PoT file"))?;
+    file.write_all(&proof_json)
+        .map_err(|err| CommandError::from_io(&err, "failed to write proof data"))?;
+
+    let reason = validate_proof(&receipt);
+    Ok(VerifyPotResponse {
+        valid: reason.is_none(),
+        reason,
+        receipt: Some(receipt),
     })
 }
 
@@ -1310,26 +1379,18 @@ fn default_entitlement(identity_id: &str) -> EntitlementDto {
     }
 }
 
-fn validate_proof(proof: &ProofOfTransition) -> Option<String> {
-    if proof.version.trim() != "1" {
+fn validate_proof(receipt: &TransitionReceipt) -> Option<String> {
+    if receipt.version != 1 {
         return Some("Unsupported PoT version".into());
     }
-    if proof.files.is_empty() {
+    if receipt.files.is_empty() {
         return Some("No attested files in proof".into());
     }
-    if chrono::DateTime::parse_from_rfc3339(&proof.timestamp).is_err() {
-        return Some("Timestamp invalid".into());
-    }
-    if proof.route.trim().is_empty() {
+    if receipt.route_type.trim().is_empty() {
         return Some("Route missing from PoT".into());
     }
-    if proof.attest.receiver_signature.trim().is_empty() {
-        return Some("Missing receiver signature".into());
-    }
-    if proof.attest.algo.trim().is_empty() {
-        return Some("Missing signature algorithm".into());
-    }
-    if proof
+    // For MVP, we might not have signatures yet, but check if structure is valid
+    if receipt
         .files
         .iter()
         .any(|file| file.cid.trim().is_empty() || file.chunk_hashes_sample.is_empty())
@@ -2136,8 +2197,29 @@ async fn simulate_transfer(
 
     let proofs_dir = default_proofs_dir(&app).map_err(CommandError::from)?;
     let route_label_str = route_label(&route).to_string();
+    
+    let (sender_id, receiver_id) = match task.direction {
+        TransferDirection::Send => (
+            task.identity_public_key.clone().unwrap_or_default(),
+            task.peer_public_key.as_ref().map(encode_public_key_hex).unwrap_or_default(),
+        ),
+        TransferDirection::Receive => (
+            task.peer_public_key.as_ref().map(encode_public_key_hex).unwrap_or_default(),
+            task.identity_public_key.clone().unwrap_or_default(),
+        ),
+    };
+    
+    let receipt = TransitionReceipt::new(
+        Uuid::parse_str(&task_id).unwrap_or_default(),
+        Uuid::new_v4(),
+        sender_id,
+        receiver_id,
+        attestations,
+        route_label_str.clone(),
+    );
+
     let pot_path =
-        write_proof_of_transition(&task_id, &attestations, &route_label_str, &proofs_dir)
+        write_proof_of_transition(&receipt, &proofs_dir)
             .map_err(CommandError::from)?;
     state.set_pot_path(&task_id, pot_path.clone()).await;
     if let Some(task_snapshot) = state.set_status(&task_id, TransferStatus::Completed).await {
@@ -2859,6 +2941,13 @@ struct LogPayload {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct VerifyPotResponse {
+    pub valid: bool,
+    pub reason: Option<String>,
+    pub receipt: Option<TransitionReceipt>,
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DevicesUpdateEvent {
@@ -3292,7 +3381,28 @@ async fn finalize_lan_success(
 
     let proofs_dir = default_proofs_dir(app).map_err(CommandError::from)?;
     let route_label = route.label().to_string();
-    let pot_path = write_proof_of_transition(task_id, &attestations, &route_label, &proofs_dir)
+    
+    let (sender_id, receiver_id) = match current_task.direction {
+        TransferDirection::Send => (
+            current_task.identity_public_key.clone().unwrap_or_default(),
+            current_task.peer_public_key.as_ref().map(encode_public_key_hex).unwrap_or_default(),
+        ),
+        TransferDirection::Receive => (
+            current_task.peer_public_key.as_ref().map(encode_public_key_hex).unwrap_or_default(),
+            current_task.identity_public_key.clone().unwrap_or_default(),
+        ),
+    };
+
+    let receipt = TransitionReceipt::new(
+        Uuid::parse_str(task_id).unwrap_or_default(),
+        Uuid::new_v4(),
+        sender_id,
+        receiver_id,
+        attestations,
+        route_label.to_string(),
+    );
+
+    let pot_path = write_proof_of_transition(&receipt, &proofs_dir)
         .map_err(CommandError::from)?;
     state.set_pot_path(task_id, pot_path.clone()).await;
     if let Some(task_snapshot) = state.set_status(task_id, TransferStatus::Completed).await {

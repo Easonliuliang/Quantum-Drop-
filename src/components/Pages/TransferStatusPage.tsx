@@ -66,7 +66,7 @@ export function TransferStatusPage({
   ];
 
   return (
-    <div className="transfer-status-page">
+    <div className="transfer-status-page glass">
       <div className="tab-navigation">
         {tabs.map((tab) => (
           <button
@@ -81,7 +81,10 @@ export function TransferStatusPage({
         ))}
       </div>
       <div className="tab-content">
-        <PanelBoundary>
+        <PanelBoundary
+          fallbackKey="error.transferPanel"
+          fallbackDefault="Failed to load transfer details."
+        >
           {activeTab === "basic" && (
             <div className="basic-info-tab">
               <div className="info-grid">

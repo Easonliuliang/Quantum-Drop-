@@ -93,7 +93,7 @@ export function IdentityPage({
   const planKey = entitlement?.plan?.toLowerCase() ?? "free";
   return (
     <div className="identity-page">
-      <div className="identity-panel" aria-live="polite">
+      <div className="identity-panel glass" aria-live="polite">
         <h3>{t("identity.heading", "Identity & Devices")}</h3>
         {identity ? (
           <div className="status-grid">
@@ -157,8 +157,8 @@ export function IdentityPage({
             {isUpdatingEntitlement
               ? t("identity.actions.updating", "Updating…")
               : planKey === "pro"
-              ? t("identity.actions.downgrade", "Downgrade to Free")
-              : t("identity.actions.upgrade", "Upgrade to PRO")}
+                ? t("identity.actions.downgrade", "Downgrade to Free")
+                : t("identity.actions.upgrade", "Upgrade to PRO")}
           </button>
         </div>
         <form className="identity-import" onSubmit={onImportIdentity}>
