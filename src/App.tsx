@@ -145,6 +145,12 @@ type PeerDiscoveredPayload = {
   verified: boolean;
 };
 
+type P2pConnectionFailedPayload = {
+  sessionId: string;
+  reason: string;
+  suggestion: string;
+};
+
 type NormalizedCommandError = {
   code?: string;
   message: string;
@@ -2810,8 +2816,16 @@ export default function App(): JSX.Element {
         setPeerPrompt(event.payload);
         setPeerFingerprintInput("");
       });
+      const p2pFailedListener = await listen<P2pConnectionFailedPayload>("p2p_connection_failed", (event) => {
+        if (!active) {
+          return;
+        }
+        const { reason, suggestion } = event.payload;
+        console.warn(`P2P connection failed: ${reason}`);
+        setInfo(suggestion || t("info.p2pFailed", "P2P connection failed. Falling back to local transfer."));
+      });
       unlistenRefs.push(progressListener, failedListener, completedListener);
-      unlistenRefs.push(devicesListener, peerListener);
+      unlistenRefs.push(devicesListener, peerListener, p2pFailedListener);
     };
     void setup();
     return () => {

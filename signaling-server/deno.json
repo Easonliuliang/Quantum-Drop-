@@ -1,0 +1,12 @@
+{
+  "name": "quantumdrop-signaling",
+  "version": "1.0.0",
+  "tasks": {
+    "dev": "deno run --allow-net main.ts",
+    "start": "deno run --allow-net main.ts"
+  },
+  "deploy": {
+    "project": "quantumdrop-signaling",
+    "entrypoint": "main.ts"
+  }
+}

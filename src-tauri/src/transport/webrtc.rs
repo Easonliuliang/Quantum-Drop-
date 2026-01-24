@@ -71,6 +71,14 @@ struct PeerDiscoveredEvent {
     verified: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct P2pConnectionFailedEvent {
+    session_id: String,
+    reason: String,
+    suggestion: String,
+}
+
 #[derive(Clone)]
 pub struct WebRtcAdapter {
     config: Arc<RTCConfiguration>,
@@ -132,6 +140,17 @@ impl TransportAdapter for WebRtcAdapter {
                         "webrtc signaling failed for session {}: {err}; falling back to loopback",
                         session.session_id
                     );
+                    // Emit P2P connection failure event to notify frontend
+                    if let Some(app) = self.app_handle.as_ref() {
+                        let payload = P2pConnectionFailedEvent {
+                            session_id: session.session_id.clone(),
+                            reason: err.to_string(),
+                            suggestion: "网络环境复杂，P2P 打洞失败。建议：1) 切换到同一局域网 2) 检查防火墙设置 3) 稍后重试".into(),
+                        };
+                        if let Err(emit_err) = app.emit("p2p_connection_failed", payload) {
+                            warn!("failed to emit p2p_connection_failed event: {emit_err}");
+                        }
+                    }
                 }
             }
         }

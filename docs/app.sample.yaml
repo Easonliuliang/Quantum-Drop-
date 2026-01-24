@@ -5,18 +5,28 @@ s2:
       - lan
       - p2p
       - relay
-    signalingUrl: wss://signaling.quantumdrop.dev/ws
+    # Cloudflare Workers 信令服务器（国内可访问）
+    signalingUrl: wss://quantumdrop-signaling.eason1319.workers.dev/ws
     stun:
+      # 国内可用 STUN 服务器
+      - stun:stun.ekiga.net:3478
+      - stun:stun.voipstunt.com:3478
+      - stun:openrelay.metered.ca:80
+      # 国外备用（被墙时自动跳过）
       - stun:stun.l.google.com:19302
       - stun:stun1.l.google.com:19302
     turn:
+      # Metered.ca 免费 TURN 服务（全球节点，20-50GB/月免费）
+      # 注册获取凭证: https://www.metered.ca/stun-turn
       urls:
-        - turn:turn.quantumdrop.dev:3478?transport=udp
-      username: quantum
-      credential: drop123
+        - turn:a.relay.metered.ca:80
+        - turn:a.relay.metered.ca:80?transport=tcp
+        - turns:a.relay.metered.ca:443
+      username: <metered_username>
+      credential: <metered_credential>
     timeouts:
       lan: 3s
-      p2p: 10s
+      p2p: 15s
       relay: 8s
     relayEndpoint: tcp://127.0.0.1:6200
 
