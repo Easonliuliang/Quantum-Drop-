@@ -23,6 +23,24 @@ const LOCALE_STORAGE_KEY = "qd_locale";
 const DEFAULT_MESSAGES: Record<string, Messages> = {
   "zh-CN": {
     "app.title": "Quantum Drop · 量子快传",
+    "settings.title": "设置",
+    "settings.myCode": "我的码",
+    "settings.tapToCopy": "点击复制",
+    "settings.generating": "生成中...",
+    "settings.addFriend": "添加好友",
+    "settings.scanQR": "扫描二维码",
+    "settings.orEnterCode": "或输入码",
+    "settings.add": "添加",
+    "settings.friends": "好友",
+    "settings.linkDevice": "关联设备",
+    "settings.showDeviceCode": "显示我的设备码",
+    "settings.orEnterDeviceCode": "或输入其他设备的码",
+    "settings.link": "关联",
+    "settings.transfer": "传输",
+    "settings.recentLogs": "最近日志",
+    "settings.copied": "已复制！",
+    "settings.deviceCodeExpires": "你的设备码（5分钟后过期）",
+    "settings.codeCopied": "码已复制！",
     "hero.tagline": "轻松拖拽，极速直达。",
     "hero.selectFiles": "选择文件",
     "dropzone.label": "拖拽或选择文件上传",
@@ -225,6 +243,24 @@ const DEFAULT_MESSAGES: Record<string, Messages> = {
   },
   en: {
     "app.title": "Quantum Drop",
+    "settings.title": "Settings",
+    "settings.myCode": "My Code",
+    "settings.tapToCopy": "Tap to copy",
+    "settings.generating": "Generating...",
+    "settings.addFriend": "Add Friend",
+    "settings.scanQR": "Scan QR Code",
+    "settings.orEnterCode": "or enter code",
+    "settings.add": "Add",
+    "settings.friends": "Friends",
+    "settings.linkDevice": "Link Device",
+    "settings.showDeviceCode": "Show My Device Code",
+    "settings.orEnterDeviceCode": "or enter code from another device",
+    "settings.link": "Link",
+    "settings.transfer": "Transfer",
+    "settings.recentLogs": "Recent Logs",
+    "settings.copied": "Copied!",
+    "settings.deviceCodeExpires": "Your device code (expires in 5 min)",
+    "settings.codeCopied": "Code copied!",
     "hero.tagline": "Drag & drop files, transfer instantly.",
     "hero.selectFiles": "Select Files",
     "dropzone.label": "Drag or choose files to upload",
@@ -440,15 +476,38 @@ export const SUPPORTED_LOCALES: Array<{
 
 const isLocaleKey = (value: string): value is LocaleKey => value in DEFAULT_MESSAGES;
 
+const detectSystemLocale = (): LocaleKey => {
+  if (typeof navigator === "undefined") {
+    return DEFAULT_LOCALE;
+  }
+  // 检测系统语言，优先使用 navigator.languages
+  const languages = navigator.languages ?? [navigator.language];
+  for (const lang of languages) {
+    const lower = lang.toLowerCase();
+    // 中文系统（zh, zh-CN, zh-TW, zh-HK 等）使用中文
+    if (lower.startsWith("zh")) {
+      return "zh-CN";
+    }
+    // 英文系统使用英文
+    if (lower.startsWith("en")) {
+      return "en";
+    }
+  }
+  // 其他语言默认使用中文（照顾国内用户）
+  return DEFAULT_LOCALE;
+};
+
 const getInitialLocale = (): LocaleKey => {
   if (typeof window === "undefined") {
     return DEFAULT_LOCALE;
   }
+  // 优先使用用户手动设置的语言
   const stored = window.localStorage.getItem(LOCALE_STORAGE_KEY);
   if (stored && isLocaleKey(stored)) {
     return stored;
   }
-  return DEFAULT_LOCALE;
+  // 否则检测系统语言
+  return detectSystemLocale();
 };
 
 const I18nContext = createContext<I18nContextValue>({
@@ -458,12 +517,20 @@ const I18nContext = createContext<I18nContextValue>({
 });
 
 export const I18nProvider = ({ children }: { children: ReactNode }) => {
-  const [locale, setLocale] = useState<LocaleKey>(getInitialLocale);
+  const [locale, setLocaleState] = useState<LocaleKey>(getInitialLocale);
+
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
     }
   }, [locale]);
+
+  const handleSetLocale = useCallback((next: string) => {
+    if (isLocaleKey(next)) {
+      setLocaleState(next);
+    }
+  }, []);
+
   const translate = useCallback(
     (key: string, fallback?: string, params?: TranslateParams) => {
       const template = DEFAULT_MESSAGES[locale]?.[key] ?? fallback ?? key;
@@ -477,18 +544,16 @@ export const I18nProvider = ({ children }: { children: ReactNode }) => {
     },
     [locale],
   );
+
   const value = useMemo<I18nContextValue>(
     () => ({
       locale,
-      setLocale: (next) => {
-        if (isLocaleKey(next)) {
-          setLocale(next);
-        }
-      },
+      setLocale: handleSetLocale,
       t: translate,
     }),
-    [locale, translate],
+    [locale, handleSetLocale, translate],
   );
+
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 };
 

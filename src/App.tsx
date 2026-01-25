@@ -13,6 +13,7 @@ import {
 } from "./lib/identityVault";
 import { UpgradePrompt } from "./components/UpgradePrompt";
 import { PanelBoundary } from "./components/ErrorBoundary/PanelBoundary";
+import "./components/Layout/layout.css";
 import { MainLayout } from "./components/Layout/MainLayout";
 import type { Page } from "./components/Layout/types";
 import { SendPage } from "./components/Pages/SendPage";
@@ -28,7 +29,7 @@ import {
   UPGRADE_URL,
   type UpgradeReason,
 } from "./lib/upgrade";
-import { useI18n } from "./lib/i18n";
+import { useI18n, SUPPORTED_LOCALES } from "./lib/i18n";
 import {
   formatAbsoluteTime,
   formatBytes,
@@ -539,7 +540,7 @@ const resolveTauriInvoke = (): TauriInvokeFn => {
 };
 
 export default function App(): JSX.Element {
-  const { t, locale } = useI18n();
+  const { t, locale, setLocale } = useI18n();
   const [isTauri, setIsTauri] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [files, setFiles] = useState<SelectedFile[]>([]);
@@ -869,14 +870,14 @@ export default function App(): JSX.Element {
         setInfo(`Friend already exists: ${code}`);
       }
     } else {
-      setError("Invalid QR code. Please scan a valid friend code.");
+      showError("Invalid QR code. Please scan a valid friend code.");
     }
-  }, [appendLog]);
+  }, [appendLog, showError]);
 
   const handleAddFriendByCode = useCallback((code: string) => {
     const trimmedCode = code.trim().toLowerCase();
     if (!trimmedCode) {
-      setError("Please enter a friend code.");
+      showError("Please enter a friend code.");
       return;
     }
     if (isValidFriendCode(trimmedCode)) {
@@ -887,12 +888,13 @@ export default function App(): JSX.Element {
         appendLog(`👥 Added friend: ${trimmedCode}`);
         setFriendCodeInput('');
       } else {
-        setError("Friend already exists.");
+        showError("Friend already exists.");
       }
     } else {
-      setError("Invalid friend code format. Expected: word-word-word");
+      showError("Invalid friend code format. Expected: word-word-word");
     }
-  }, [appendLog]);
+  }, [appendLog, showError]);
+
 
   const handleRemoveFriend = useCallback((code: string) => {
     if (removeFriend(code)) {
@@ -914,7 +916,7 @@ export default function App(): JSX.Element {
   const handleLinkDevice = useCallback((code: string) => {
     const trimmedCode = code.replace(/\s/g, '').trim();
     if (trimmedCode.length !== 6 || !/^\d+$/.test(trimmedCode)) {
-      setError("Invalid device code. Please enter a 6-digit code.");
+      showError("Invalid device code. Please enter a 6-digit code.");
       return;
     }
     // TODO: Implement actual device linking via signaling server
@@ -1701,7 +1703,7 @@ export default function App(): JSX.Element {
             const publicHex = bytesToHex(publicKey);
             // Generate a local identity ID from public key
             const newId = publicHex.slice(0, 32);
-            await rememberIdentity(newId, publicHex, privateHex);
+            await rememberIdentity({ identityId: newId, publicKeyHex: publicHex, privateKeyHex: privateHex });
             await rememberLastIdentityId(newId);
             stored = { identityId: newId, publicKeyHex: publicHex, privateKeyHex: privateHex };
             console.log("Auto-created local identity:", newId);
@@ -2982,15 +2984,15 @@ export default function App(): JSX.Element {
             name: "quantum_blueprint_v1.pdf",
             size: 1024 * 1024 * 45,
             cid: "Qm" + Math.random().toString(36).slice(2, 12).toUpperCase(),
-            merkle_root: "0x" + Array.from({length: 16}, () => Math.floor(Math.random() * 16).toString(16)).join(''),
+            merkle_root: "0x" + Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join(''),
             chunks: 45,
             chunk_hashes_sample: []
           }],
           timestamp_start: started.toISOString(),
           timestamp_complete: now.toISOString(),
           route_type: "p2p",
-          sender_signature: "ed25519:" + Array.from({length: 32}, () => Math.floor(Math.random() * 16).toString(16)).join(''),
-          receiver_signature: "ed25519:" + Array.from({length: 32}, () => Math.floor(Math.random() * 16).toString(16)).join(''),
+          sender_signature: "ed25519:" + Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join(''),
+          receiver_signature: "ed25519:" + Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join(''),
         });
       }, 1500);
     }, 1000);
@@ -3066,7 +3068,7 @@ export default function App(): JSX.Element {
       {/* Settings Panel */}
       <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)}>
         <div className="settings-section">
-          <div className="settings-section-title">My Code</div>
+          <div className="settings-section-title">{t('settings.myCode', '我的码')}</div>
           {identity ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
               <QRCode value={generateFriendCode(hexToBytes(identity.publicKey))} size={140} />
@@ -3074,7 +3076,7 @@ export default function App(): JSX.Element {
                 onClick={() => {
                   const code = generateFriendCode(hexToBytes(identity.publicKey));
                   navigator.clipboard.writeText(code);
-                  setInfo('Copied!');
+                  setInfo(t('settings.copied', '已复制！'));
                 }}
                 style={{
                   fontSize: '16px',
@@ -3087,18 +3089,17 @@ export default function App(): JSX.Element {
                 {generateFriendCode(hexToBytes(identity.publicKey))}
               </div>
               <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)' }}>
-                Tap to copy
+                {t('settings.tapToCopy', '点击复制')}
               </div>
             </div>
           ) : (
             <div style={{ textAlign: 'center', color: 'rgba(255,255,255,0.4)', padding: '12px' }}>
-              Generating...
+              {t('settings.generating', '生成中...')}
             </div>
           )}
         </div>
-
         <div className="settings-section">
-          <div className="settings-section-title">Add Friend</div>
+          <div className="settings-section-title">{t('settings.addFriend', '添加好友')}</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <button
               onClick={() => {
@@ -3123,15 +3124,15 @@ export default function App(): JSX.Element {
               }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                <circle cx="12" cy="13" r="4"/>
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                <circle cx="12" cy="13" r="4" />
               </svg>
-              Scan QR Code
+              {t('settings.scanQR', '扫描二维码')}
             </button>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgba(255,255,255,0.3)', fontSize: '12px' }}>
               <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
-              <span>or enter code</span>
+              <span>{t('settings.orEnterCode', '或输入码')}</span>
               <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
             </div>
 
@@ -3143,10 +3144,11 @@ export default function App(): JSX.Element {
                 placeholder="word-word-word"
                 style={{
                   flex: 1,
-                  padding: '10px 12px',
+                  minWidth: 0,
+                  padding: '12px 14px',
                   background: 'rgba(0, 0, 0, 0.3)',
                   border: '1px solid rgba(255, 255, 255, 0.1)',
-                  borderRadius: '8px',
+                  borderRadius: '10px',
                   color: 'rgba(255, 255, 255, 0.9)',
                   fontSize: '14px',
                   outline: 'none',
@@ -3160,10 +3162,12 @@ export default function App(): JSX.Element {
               <button
                 onClick={() => handleAddFriendByCode(friendCodeInput)}
                 style={{
-                  padding: '10px 16px',
+                  padding: '12px 20px',
+                  minWidth: '64px',
+                  flexShrink: 0,
                   background: 'rgba(0, 200, 150, 0.15)',
                   border: '1px solid rgba(0, 200, 150, 0.3)',
-                  borderRadius: '8px',
+                  borderRadius: '10px',
                   color: 'rgba(0, 200, 150, 0.9)',
                   fontSize: '14px',
                   fontWeight: 500,
@@ -3171,7 +3175,7 @@ export default function App(): JSX.Element {
                   transition: 'all 0.2s',
                 }}
               >
-                Add
+                {t('settings.add', '添加')}
               </button>
             </div>
           </div>
@@ -3179,7 +3183,7 @@ export default function App(): JSX.Element {
 
         {friends.length > 0 && (
           <div className="settings-section">
-            <div className="settings-section-title">Friends ({friends.length})</div>
+            <div className="settings-section-title">{t('settings.friends', '好友')} ({friends.length})</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               {friends.map((friend) => (
                 <div
@@ -3217,8 +3221,8 @@ export default function App(): JSX.Element {
                     title="Remove friend"
                   >
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <line x1="18" y1="6" x2="6" y2="18"/>
-                      <line x1="6" y1="6" x2="18" y2="18"/>
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
                     </svg>
                   </button>
                 </div>
@@ -3228,7 +3232,7 @@ export default function App(): JSX.Element {
         )}
 
         <div className="settings-section">
-          <div className="settings-section-title">Link Device</div>
+          <div className="settings-section-title">{t('settings.linkDevice', '关联设备')}</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {/* Show my pairing code */}
             {devicePairingCode ? (
@@ -3243,12 +3247,12 @@ export default function App(): JSX.Element {
                 border: '1px dashed rgba(0, 200, 150, 0.3)',
               }}>
                 <div style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.4)' }}>
-                  Your device code (expires in 5 min)
+                  {t('settings.deviceCodeExpires', '你的设备码（5分钟后过期）')}
                 </div>
                 <div
                   onClick={() => {
                     navigator.clipboard.writeText(devicePairingCode);
-                    setInfo('Code copied!');
+                    setInfo(t('settings.codeCopied', '码已复制！'));
                   }}
                   style={{
                     fontSize: '28px',
@@ -3262,7 +3266,7 @@ export default function App(): JSX.Element {
                   {formatDeviceCode(devicePairingCode)}
                 </div>
                 <div style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.3)' }}>
-                  Tap to copy
+                  {t('settings.tapToCopy', '点击复制')}
                 </div>
               </div>
             ) : (
@@ -3286,16 +3290,16 @@ export default function App(): JSX.Element {
                 }}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
-                  <line x1="12" y1="18" x2="12.01" y2="18"/>
+                  <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+                  <line x1="12" y1="18" x2="12.01" y2="18" />
                 </svg>
-                Show My Device Code
+                {t('settings.showDeviceCode', '显示我的设备码')}
               </button>
             )}
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgba(255,255,255,0.3)', fontSize: '12px' }}>
               <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
-              <span>or enter code from another device</span>
+              <span>{t('settings.orEnterDeviceCode', '或输入其他设备的码')}</span>
               <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
             </div>
 
@@ -3311,12 +3315,13 @@ export default function App(): JSX.Element {
                 placeholder="XXX XXX"
                 style={{
                   flex: 1,
-                  padding: '10px 12px',
+                  minWidth: 0,
+                  padding: '12px 14px',
                   background: 'rgba(0, 0, 0, 0.3)',
                   border: '1px solid rgba(255, 255, 255, 0.1)',
-                  borderRadius: '8px',
+                  borderRadius: '10px',
                   color: 'rgba(255, 255, 255, 0.9)',
-                  fontSize: '16px',
+                  fontSize: '14px',
                   fontFamily: 'monospace',
                   letterSpacing: '2px',
                   textAlign: 'center',
@@ -3331,25 +3336,28 @@ export default function App(): JSX.Element {
               <button
                 onClick={() => handleLinkDevice(deviceCodeInput)}
                 style={{
-                  padding: '10px 16px',
-                  background: 'rgba(100, 150, 255, 0.15)',
-                  border: '1px solid rgba(100, 150, 255, 0.3)',
-                  borderRadius: '8px',
-                  color: 'rgba(100, 150, 255, 0.9)',
+                  padding: '12px 20px',
+                  minWidth: '64px',
+                  flexShrink: 0,
+                  background: 'rgba(0, 200, 150, 0.15)',
+                  border: '1px solid rgba(0, 200, 150, 0.3)',
+                  borderRadius: '10px',
+                  color: 'rgba(0, 200, 150, 0.9)',
                   fontSize: '14px',
                   fontWeight: 500,
                   cursor: 'pointer',
                   transition: 'all 0.2s',
                 }}
               >
-                Link
+                {t('settings.link', '关联')}
               </button>
             </div>
           </div>
         </div>
 
+
         <div className="settings-section">
-          <div className="settings-section-title">Transfer</div>
+          <div className="settings-section-title">{t('settings.transfer', '传输')}</div>
           {hasActiveTransfer && (
             <>
               <div className="settings-item">
@@ -3362,14 +3370,54 @@ export default function App(): JSX.Element {
 
         {logs.length > 0 && (
           <div className="settings-section">
-            <div className="settings-section-title">Recent Logs</div>
+            <div className="settings-section-title">{t('settings.recentLogs', '最近日志')}</div>
             <div style={{ maxHeight: '150px', overflow: 'auto', fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>
               {logs.slice(-5).map((log, i) => (
-                <div key={i} style={{ marginBottom: '4px' }}>{log}</div>
+                <div key={i} style={{ marginBottom: '4px' }}>{log.message}</div>
               ))}
             </div>
           </div>
         )}
+
+        <div className="settings-section">
+          <div className="settings-section-title">{t('locale.label', '界面语言')}</div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={() => setLocale('zh-CN')}
+              style={{
+                flex: 1,
+                padding: '10px 12px',
+                background: locale === 'zh-CN' ? 'rgba(0, 200, 150, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                border: locale === 'zh-CN' ? '1px solid rgba(0, 200, 150, 0.3)' : '1px solid rgba(255, 255, 255, 0.1)',
+                borderRadius: '10px',
+                color: locale === 'zh-CN' ? 'rgba(0, 200, 150, 0.9)' : 'rgba(255, 255, 255, 0.6)',
+                fontSize: '14px',
+                fontWeight: 500,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              中文
+            </button>
+            <button
+              onClick={() => setLocale('en')}
+              style={{
+                flex: 1,
+                padding: '10px 12px',
+                background: locale === 'en' ? 'rgba(0, 200, 150, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                border: locale === 'en' ? '1px solid rgba(0, 200, 150, 0.3)' : '1px solid rgba(255, 255, 255, 0.1)',
+                borderRadius: '10px',
+                color: locale === 'en' ? 'rgba(0, 200, 150, 0.9)' : 'rgba(255, 255, 255, 0.6)',
+                fontSize: '14px',
+                fontWeight: 500,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              English
+            </button>
+          </div>
+        </div>
       </SettingsPanel>
 
       {/* QR Scanner Modal */}

@@ -18,16 +18,16 @@ export function Sidebar({ currentPage, onPageChange, hasActiveTransfer, hasLogs 
     badge?: boolean;
     disabled?: boolean;
   }> = [
-    { id: "send", icon: "📤", label: t("nav.send", "发送文件") },
-    { id: "identity", icon: "👤", label: t("nav.identity", "身份管理") },
-    { id: "webrtc", icon: "🔗", label: t("nav.webrtc", "跨网实验") },
-    {
-      id: "control",
-      icon: "⚙️",
-      label: t("nav.control", "控制面板"),
-      badge: hasActiveTransfer || hasLogs,
-    },
-  ];
+      { id: "send", icon: "📤", label: t("nav.send", "发送文件") },
+      { id: "identity", icon: "👤", label: t("nav.identity", "身份管理") },
+      { id: "webrtc", icon: "🔗", label: t("nav.webrtc", "跨网实验") },
+      {
+        id: "control",
+        icon: "⚙️",
+        label: t("nav.control", "控制面板"),
+        badge: hasActiveTransfer || hasLogs,
+      },
+    ];
 
   return (
     <aside className="sidebar">
@@ -36,9 +36,8 @@ export function Sidebar({ currentPage, onPageChange, hasActiveTransfer, hasLogs 
           <button
             key={item.id}
             type="button"
-            className={`nav-item ${currentPage === item.id ? "active" : ""} ${
-              item.disabled ? "disabled" : ""
-            }`}
+            className={`nav-item ${currentPage === item.id ? "active" : ""} ${item.disabled ? "disabled" : ""
+              }`}
             onClick={() => !item.disabled && onPageChange(item.id)}
             disabled={item.disabled}
             aria-current={currentPage === item.id ? "page" : undefined}
