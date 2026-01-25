@@ -37,7 +37,7 @@ import {
   maskLicenseKey,
   summarizeAuditDetails,
 } from "./lib/format";
-import { GridScan } from "./components/GridScan";
+import { QuantumBackground } from "./components/QuantumBackground";
 import { ReceiptView } from "./components/ReceiptView";
 import { TransitionReceipt, VerifyPotResponse } from "./lib/types";
 import { MinimalUI } from "./components/MinimalUI";
@@ -2966,33 +2966,34 @@ export default function App(): JSX.Element {
   const [debugTransferState, setDebugTransferState] = useState<"idle" | "transferring" | "completed">("idle");
 
   const simulateTransfer = () => {
-    // 1. Start Transfer (Warp Speed)
     setDebugTransferState("transferring");
-
-    // 2. Complete Transfer (Collapse & Receipt) after 2 seconds
     setTimeout(() => {
       setDebugTransferState("completed");
-
-      // Delay receipt appearance to let the collapse/explosion animation play out
       setTimeout(() => {
-        // Mock Receipt
+        const now = new Date();
+        const started = new Date(now.getTime() - 3200); // 3.2s ago
         setReceipt({
           version: 1,
-          transfer_id: "simulated-transfer-id",
-          session_id: "simulated-session-id",
-          sender_identity: "simulated-sender",
-          receiver_identity: "simulated-receiver",
-          files: [{ path: "quantum_blueprint_v1.pdf", size: 1024 * 1024 * 45, merkle_root: "mock-hash" }],
-          timestamp_start: new Date().toISOString(),
-          timestamp_end: new Date().toISOString(),
+          transfer_id: `QD-${Date.now().toString(36).toUpperCase()}`,
+          session_id: `sess-${Math.random().toString(36).slice(2, 8)}`,
+          sender_identity: "crystal-phoenix-aurora",
+          receiver_identity: "silver-dragon-nebula",
+          files: [{
+            name: "quantum_blueprint_v1.pdf",
+            size: 1024 * 1024 * 45,
+            cid: "Qm" + Math.random().toString(36).slice(2, 12).toUpperCase(),
+            merkle_root: "0x" + Array.from({length: 16}, () => Math.floor(Math.random() * 16).toString(16)).join(''),
+            chunks: 45,
+            chunk_hashes_sample: []
+          }],
+          timestamp_start: started.toISOString(),
+          timestamp_complete: now.toISOString(),
           route_type: "p2p",
-          sender_signature: "mock-sig",
-          receiver_signature: "mock-sig",
-        } as any);
-      }, 2500); // Wait 2.5s after collapse starts before showing receipt
-    }, 2000);
-
-    // 3. Reset state is handled by closing the receipt or manual reset
+          sender_signature: "ed25519:" + Array.from({length: 32}, () => Math.floor(Math.random() * 16).toString(16)).join(''),
+          receiver_signature: "ed25519:" + Array.from({length: 32}, () => Math.floor(Math.random() * 16).toString(16)).join(''),
+        });
+      }, 1500);
+    }, 1000);
   };
 
   const transferState = useMemo(() => {
@@ -3013,7 +3014,7 @@ export default function App(): JSX.Element {
 
   return (
     <>
-      <GridScan />
+      <QuantumBackground transferState={transferState} />
 
       {/* Minimal UI */}
       <MinimalUI
@@ -3032,6 +3033,26 @@ export default function App(): JSX.Element {
         progress={progress?.progress ?? 0}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+
+      {/* Debug Button */}
+      <button
+        onClick={simulateTransfer}
+        style={{
+          position: 'fixed',
+          bottom: '20px',
+          left: '20px',
+          padding: '8px 16px',
+          background: 'rgba(0, 200, 160, 0.15)',
+          border: '1px solid rgba(0, 200, 160, 0.3)',
+          borderRadius: '6px',
+          color: 'rgba(0, 200, 160, 0.7)',
+          fontSize: '12px',
+          cursor: 'pointer',
+          zIndex: 100,
+        }}
+      >
+        Test Animation
+      </button>
 
       {/* Hidden file input */}
       <input

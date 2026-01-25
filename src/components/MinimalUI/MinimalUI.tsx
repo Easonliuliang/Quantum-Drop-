@@ -1,5 +1,4 @@
 import { useState, useCallback } from 'react';
-import { WormholePortal } from '../WormholePortal';
 import './MinimalUI.css';
 
 interface MinimalUIProps {
@@ -18,7 +17,6 @@ export const MinimalUI = ({
   onOpenSettings,
 }: MinimalUIProps) => {
   const [isDragging, setIsDragging] = useState(false);
-  const [isCompleted, setIsCompleted] = useState(false);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -29,7 +27,6 @@ export const MinimalUI = ({
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    // Only set false if leaving the container entirely
     const rect = e.currentTarget.getBoundingClientRect();
     const { clientX, clientY } = e;
     if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
@@ -47,14 +44,6 @@ export const MinimalUI = ({
       onFilesSelected(files);
     }
   }, [onFilesSelected]);
-
-  // Determine portal state
-  const getPortalState = (): 'idle' | 'hover' | 'transferring' | 'completed' => {
-    if (isCompleted) return 'completed';
-    if (isTransferring) return 'transferring';
-    if (isDragging) return 'hover';
-    return 'idle';
-  };
 
   return (
     <div
@@ -79,24 +68,15 @@ export const MinimalUI = ({
         </svg>
       </button>
 
-      {/* Wormhole Portal as main visual */}
-      <div className="center-icon">
-        <WormholePortal
-          state={getPortalState()}
-          progress={progress}
-        />
-        {/* Hint text below portal */}
-        {!isTransferring && (
-          <div className="portal-hint">
-            {isDragging ? 'Drop to transfer' : 'Drop files or click'}
-          </div>
-        )}
-        {isTransferring && (
-          <div className="portal-status">
-            {Math.round(progress)}%
-          </div>
-        )}
-      </div>
+      {/* Minimal hint - only show when dragging */}
+      {isDragging && (
+        <div className="drag-hint">Drop to transfer</div>
+      )}
+
+      {/* Progress indicator */}
+      {isTransferring && (
+        <div className="transfer-progress">{Math.round(progress)}%</div>
+      )}
     </div>
   );
 };

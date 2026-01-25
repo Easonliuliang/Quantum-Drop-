@@ -10,11 +10,11 @@
   z-index: 10;
   cursor: pointer;
   transition: background 0.3s ease;
-  background: #08080c;
+  background: transparent;
 }
 
 .minimal-ui.dragging {
-  background: #0a0a10;
+  background: rgba(10, 10, 16, 0.3);
 }
 
 /* Settings Gear */
@@ -45,33 +45,28 @@
   height: 18px;
 }
 
-/* Center Icon */
-.center-icon {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-}
-
-/* Portal hint text */
-.portal-hint {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.2);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  transition: color 0.3s ease;
-}
-
-.minimal-ui.dragging .portal-hint {
-  color: rgba(0, 200, 160, 0.5);
-}
-
-/* Portal status (progress) */
-.portal-status {
+/* Drag hint - only visible when dragging */
+.drag-hint {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   font-size: 14px;
-  font-weight: 500;
-  color: rgba(0, 200, 160, 0.7);
+  color: rgba(0, 200, 160, 0.6);
   letter-spacing: 1px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+/* Transfer progress */
+.transfer-progress {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 16px;
+  font-weight: 500;
+  color: rgba(0, 200, 160, 0.8);
+  letter-spacing: 2px;
   font-variant-numeric: tabular-nums;
 }
