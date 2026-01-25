@@ -1,0 +1,11 @@
+.wormhole-portal {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wormhole-canvas {
+  display: block;
+  background: transparent;
+}

@@ -37,9 +37,15 @@ import {
   maskLicenseKey,
   summarizeAuditDetails,
 } from "./lib/format";
-import { QuantumBackground } from "./components/QuantumBackground";
+import { GridScan } from "./components/GridScan";
 import { ReceiptView } from "./components/ReceiptView";
 import { TransitionReceipt, VerifyPotResponse } from "./lib/types";
+import { MinimalUI } from "./components/MinimalUI";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { generateFriendCode, isValidFriendCode, generateDeviceCode, formatDeviceCode } from "./lib/wordlist";
+import { QRCode } from "./components/QRCode";
+import { QRScanner } from "./components/QRScanner";
+import { loadFriends, addFriend, removeFriend, type Friend } from "./lib/friendsStore";
 
 type SelectedFile = {
   name: string;
@@ -572,6 +578,12 @@ export default function App(): JSX.Element {
     setLogs([]);
   }, []);
   const [currentPage, setCurrentPage] = useState<Page>("send");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [friendCodeInput, setFriendCodeInput] = useState('');
+  const [friends, setFriends] = useState<Friend[]>([]);
+  const [devicePairingCode, setDevicePairingCode] = useState<string | null>(null);
+  const [deviceCodeInput, setDeviceCodeInput] = useState('');
   const [identity, setIdentity] = useState<IdentityState | null>(null);
   const [identityPrivateKey, setIdentityPrivateKey] = useState<Uint8Array | null>(null);
   const [devices, setDevices] = useState<DeviceState[]>([]);
@@ -836,6 +848,79 @@ export default function App(): JSX.Element {
     }
     appendLog("💎 已打开定价页面了解 Pro 计划。");
     setUpgradeReason(null);
+  }, [appendLog]);
+
+  // Load friends on mount
+  useEffect(() => {
+    setFriends(loadFriends());
+  }, []);
+
+  const handleQRScan = useCallback((scannedCode: string) => {
+    setScannerOpen(false);
+    const code = scannedCode.trim().toLowerCase();
+    // Validate the scanned code
+    if (isValidFriendCode(code)) {
+      const newFriend = addFriend(code);
+      if (newFriend) {
+        setFriends(loadFriends());
+        setInfo(`Added friend: ${code}`);
+        appendLog(`📱 Scanned and added friend: ${code}`);
+      } else {
+        setInfo(`Friend already exists: ${code}`);
+      }
+    } else {
+      setError("Invalid QR code. Please scan a valid friend code.");
+    }
+  }, [appendLog]);
+
+  const handleAddFriendByCode = useCallback((code: string) => {
+    const trimmedCode = code.trim().toLowerCase();
+    if (!trimmedCode) {
+      setError("Please enter a friend code.");
+      return;
+    }
+    if (isValidFriendCode(trimmedCode)) {
+      const newFriend = addFriend(trimmedCode);
+      if (newFriend) {
+        setFriends(loadFriends());
+        setInfo(`Added friend: ${trimmedCode}`);
+        appendLog(`👥 Added friend: ${trimmedCode}`);
+        setFriendCodeInput('');
+      } else {
+        setError("Friend already exists.");
+      }
+    } else {
+      setError("Invalid friend code format. Expected: word-word-word");
+    }
+  }, [appendLog]);
+
+  const handleRemoveFriend = useCallback((code: string) => {
+    if (removeFriend(code)) {
+      setFriends(loadFriends());
+      appendLog(`❌ Removed friend: ${code}`);
+    }
+  }, [appendLog]);
+
+  const handleGenerateDeviceCode = useCallback(() => {
+    const code = generateDeviceCode();
+    setDevicePairingCode(code);
+    appendLog(`🔗 Generated device pairing code: ${formatDeviceCode(code)}`);
+    // Auto-expire after 5 minutes
+    setTimeout(() => {
+      setDevicePairingCode((current) => current === code ? null : current);
+    }, 5 * 60 * 1000);
+  }, [appendLog]);
+
+  const handleLinkDevice = useCallback((code: string) => {
+    const trimmedCode = code.replace(/\s/g, '').trim();
+    if (trimmedCode.length !== 6 || !/^\d+$/.test(trimmedCode)) {
+      setError("Invalid device code. Please enter a 6-digit code.");
+      return;
+    }
+    // TODO: Implement actual device linking via signaling server
+    setInfo(`Linking device with code: ${formatDeviceCode(trimmedCode)}`);
+    appendLog(`🔗 Attempting to link device: ${formatDeviceCode(trimmedCode)}`);
+    setDeviceCodeInput('');
   }, [appendLog]);
 
   const refreshRouteMetrics = useCallback(async (notify = false) => {
@@ -1604,10 +1689,27 @@ export default function App(): JSX.Element {
     const initialise = async () => {
       try {
         const lastId = await loadLastIdentityId();
-        if (!lastId) {
-          return;
+        let stored = lastId ? await loadIdentity(lastId) : null;
+
+        // Auto-create identity if none exists (local only, no backend needed)
+        if (!stored) {
+          try {
+            ensureEd25519Hash();
+            const privateKey = ed25519Utils.randomPrivateKey();
+            const publicKey = await getPublicKey(privateKey);
+            const privateHex = bytesToHex(privateKey);
+            const publicHex = bytesToHex(publicKey);
+            // Generate a local identity ID from public key
+            const newId = publicHex.slice(0, 32);
+            await rememberIdentity(newId, publicHex, privateHex);
+            await rememberLastIdentityId(newId);
+            stored = { identityId: newId, publicKeyHex: publicHex, privateKeyHex: privateHex };
+            console.log("Auto-created local identity:", newId);
+          } catch (err) {
+            console.warn("auto-create identity failed", err);
+          }
         }
-        const stored = await loadIdentity(lastId);
+
         if (!stored) {
           return;
         }
@@ -1739,11 +1841,11 @@ export default function App(): JSX.Element {
       setPeerFingerprintInput("");
       setAbsorbing(true);
       window.setTimeout(() => setAbsorbing(false), 900);
-      const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
-      if (canAuto && !isSending) {
+      // Auto-start transfer
+      if (!isSending) {
         window.setTimeout(() => {
           void beginTransferRef.current?.(paths);
-        }, 220);
+        }, 300);
       }
     };
 
@@ -1900,24 +2002,19 @@ export default function App(): JSX.Element {
           // 动效与自动传输
           setAbsorbing(true);
           window.setTimeout(() => setAbsorbing(false), 900);
-          const canAuto = Boolean(identity && identityPrivateKey && (activeDeviceId || devices[0]));
-          if (canAuto && !isSending) {
+          if (!isSending) {
             window.setTimeout(() => {
               void beginTransferRef.current?.(normalized as unknown as string[]);
-            }, 220);
+            }, 300);
           }
         } else {
-          // Tauri dialog 插件不可用时，回退到浏览器文件选择器
           fileInputRef.current?.click();
-          setInfo(t("info.dialogMissing", "Tauri dialog plugin missing. Used system file selector."));
         }
       } catch {
         fileInputRef.current?.click();
-        setInfo(t("info.dialogFallback", "File picker fell back to browser mode."));
       }
     } else {
       fileInputRef.current?.click();
-      setInfo(t("info.browserPreview", "Browser preview only shows the UI. Please use the desktop app for transfers."));
     }
   }, [activeDeviceId, clearError, devices, identity, identityPrivateKey, isSending, resetLogs, t]);
 
@@ -2916,142 +3013,351 @@ export default function App(): JSX.Element {
 
   return (
     <>
-      <QuantumBackground transferState={transferState} />
+      <GridScan />
 
-      {/* Debug Button */}
-      <button
-        onClick={simulateTransfer}
-        className="glass-button"
-        style={{
-          position: 'fixed',
-          bottom: '20px',
-          right: '20px',
-          zIndex: 9999,
-          opacity: 0.8
+      {/* Minimal UI */}
+      <MinimalUI
+        onFilesSelected={(files) => {
+          if (files.length > 0) {
+            if (typeof files[0] === 'string') {
+              setPendingPaths(files as string[]);
+            } else {
+              const fileList = files as File[];
+              setFiles(fileList.map(f => ({ name: f.name, size: f.size })));
+            }
+          }
         }}
-      >
-        🔮 Test UI
-      </button>
+        onBrowse={() => void handleBrowse()}
+        isTransferring={isSending}
+        progress={progress?.progress ?? 0}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
 
-      <MainLayout
-        currentPage={currentPage}
-        onPageChange={setCurrentPage}
-        hasActiveTransfer={!!taskId}
-        hasLogs={logs.length > 0}
-      >
-        {currentPage === "send" && (
-          <SendPage
-            files={files}
-            hovered={hovered}
-            absorbing={absorbing}
-            onDrop={handleDrop}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onBrowse={() => {
-              void handleBrowse();
-            }}
-            onFileInputChange={handleFileInput}
-            fileInputRef={fileInputRef}
-            showInlineStartButton={showInlineStartButton}
-            canStartTransfer={canStartTransfer}
-            isSending={isSending}
-            onStartTransfer={() => {
-              void beginTransferRef.current?.();
-            }}
-          />
-        )}
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFileInput}
+      />
 
-        {currentPage === "identity" && (
-          <IdentityPage
-            identity={identity}
-            identityPrivateKeyAvailable={Boolean(identity && identityPrivateKey)}
-            activeDeviceId={activeDeviceId}
-            devices={devices}
-            entitlement={entitlement}
-            isTauri={isTauri}
-            isRegisteringIdentity={isRegisteringIdentity}
-            isRegisteringDevice={isRegisteringDevice}
-            isForgettingIdentity={isForgettingIdentity}
-            isUpdatingEntitlement={isUpdatingEntitlement}
-            importIdentityId={importIdentityId}
-            importPrivateKey={importPrivateKey}
-            isImportingIdentity={isImportingIdentity}
-            selectedDevice={selectedDevice ?? null}
-            editDeviceName={editDeviceName}
-            editDeviceStatus={editDeviceStatus}
-            deviceStatusOptions={deviceStatusOptions}
-            isUpdatingDevice={isUpdatingDevice}
-            onCopy={(label, value) => {
-              void handleCopy(label, value);
-            }}
-            onRegisterIdentity={() => {
-              void registerIdentity();
-            }}
-            onRegisterDevice={() => {
-              void registerDevice();
-            }}
-            onExportPrivateKey={() => {
-              void exportPrivateKey();
-            }}
-            onForgetIdentity={() => {
-              void forgetCurrentIdentity();
-            }}
-            onSync={handleSyncIdentity}
-            onTogglePlan={handleToggleEntitlement}
-            onImportIdentityIdChange={setImportIdentityId}
-            onImportPrivateKeyChange={setImportPrivateKey}
-            onImportIdentity={(event) => {
-              void importIdentity(event);
-            }}
-            onSelectDevice={setActiveDeviceId}
-            onEditDeviceNameChange={setEditDeviceName}
-            onEditDeviceStatusChange={setEditDeviceStatus}
-            onSubmitDeviceUpdate={() => void submitDeviceUpdate()}
-            onSetDeviceStandby={handleSetDeviceStandby}
-            onMarkDeviceInactive={markDeviceInactive}
-          />
-        )}
+      {/* Settings Panel */}
+      <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)}>
+        <div className="settings-section">
+          <div className="settings-section-title">My Code</div>
+          {identity ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+              <QRCode value={generateFriendCode(hexToBytes(identity.publicKey))} size={140} />
+              <div
+                onClick={() => {
+                  const code = generateFriendCode(hexToBytes(identity.publicKey));
+                  navigator.clipboard.writeText(code);
+                  setInfo('Copied!');
+                }}
+                style={{
+                  fontSize: '16px',
+                  fontWeight: 600,
+                  color: 'rgba(0, 200, 150, 0.9)',
+                  cursor: 'pointer',
+                  letterSpacing: '1px',
+                }}
+              >
+                {generateFriendCode(hexToBytes(identity.publicKey))}
+              </div>
+              <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)' }}>
+                Tap to copy
+              </div>
+            </div>
+          ) : (
+            <div style={{ textAlign: 'center', color: 'rgba(255,255,255,0.4)', padding: '12px' }}>
+              Generating...
+            </div>
+          )}
+        </div>
 
-        {currentPage === "webrtc" && (
-          <WebRTCPage
-            onStartSender={() => void handleWebRtcSenderTest()}
-            canStartSender={pendingPaths.length > 0}
-            isSending={isSending}
-          />
-        )}
-        {currentPage === "control" && (
-          <div className="control-center">
-            <section className="control-section">
-              <h3>{t("control.transferHeading", "Transfer Status")}</h3>
-              {hasActiveTransfer ? (
-                <TransferStatusPage
-                  taskCode={taskCode}
-                  taskId={taskId}
-                  senderPublicKey={senderPublicKey}
-                  phase={progress?.phase ?? null}
-                  route={progress?.route ?? null}
-                  routeAttempts={routeAttempts}
-                  progressValue={typeof progress?.progress === "number" ? progress.progress : null}
-                  speedBps={progress?.speedBps ?? null}
-                  bytesSent={progress?.bytesSent ?? null}
-                  bytesTotal={progress?.bytesTotal ?? null}
-                  monitorExtra={monitorExtra}
-                  statsContent={statsContent}
-                  auditContent={auditContent}
-                  securityContent={securityContent}
-                  settingsContent={settingsContent}
-                />
-              ) : (
-                <p className="stats-empty">{t("control.transferEmpty", "No active transfer.")}</p>
-              )}
-            </section>
-            <section className="control-section">
-              <h3>{t("control.logsHeading", "Event Logs")}</h3>
-              {logs.length > 0 ? <LogsPage logs={logs} /> : <p className="stats-empty">{t("control.logsEmpty", "No logs yet.")}</p>}
-            </section>
+        <div className="settings-section">
+          <div className="settings-section-title">Add Friend</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <button
+              onClick={() => {
+                setSettingsOpen(false);
+                setScannerOpen(true);
+              }}
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                background: 'rgba(0, 200, 150, 0.15)',
+                border: '1px solid rgba(0, 200, 150, 0.3)',
+                borderRadius: '8px',
+                color: 'rgba(0, 200, 150, 0.9)',
+                fontSize: '14px',
+                fontWeight: 500,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                transition: 'all 0.2s',
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                <circle cx="12" cy="13" r="4"/>
+              </svg>
+              Scan QR Code
+            </button>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgba(255,255,255,0.3)', fontSize: '12px' }}>
+              <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
+              <span>or enter code</span>
+              <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                value={friendCodeInput}
+                onChange={(e) => setFriendCodeInput(e.target.value)}
+                placeholder="word-word-word"
+                style={{
+                  flex: 1,
+                  padding: '10px 12px',
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  borderRadius: '8px',
+                  color: 'rgba(255, 255, 255, 0.9)',
+                  fontSize: '14px',
+                  outline: 'none',
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleAddFriendByCode(friendCodeInput);
+                  }
+                }}
+              />
+              <button
+                onClick={() => handleAddFriendByCode(friendCodeInput)}
+                style={{
+                  padding: '10px 16px',
+                  background: 'rgba(0, 200, 150, 0.15)',
+                  border: '1px solid rgba(0, 200, 150, 0.3)',
+                  borderRadius: '8px',
+                  color: 'rgba(0, 200, 150, 0.9)',
+                  fontSize: '14px',
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {friends.length > 0 && (
+          <div className="settings-section">
+            <div className="settings-section-title">Friends ({friends.length})</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {friends.map((friend) => (
+                <div
+                  key={friend.code}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '10px 12px',
+                    background: 'rgba(0, 0, 0, 0.2)',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(255, 255, 255, 0.05)',
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                    <div style={{ fontSize: '14px', color: 'rgba(255, 255, 255, 0.9)', fontWeight: 500 }}>
+                      {friend.code}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.3)' }}>
+                      Added {new Date(friend.addedAt).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleRemoveFriend(friend.code)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'rgba(255, 100, 100, 0.6)',
+                      cursor: 'pointer',
+                      padding: '4px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                    title="Remove friend"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="18" y1="6" x2="6" y2="18"/>
+                      <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
-      </MainLayout>
+
+        <div className="settings-section">
+          <div className="settings-section-title">Link Device</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {/* Show my pairing code */}
+            {devicePairingCode ? (
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '16px',
+                background: 'rgba(0, 200, 150, 0.1)',
+                borderRadius: '12px',
+                border: '1px dashed rgba(0, 200, 150, 0.3)',
+              }}>
+                <div style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.4)' }}>
+                  Your device code (expires in 5 min)
+                </div>
+                <div
+                  onClick={() => {
+                    navigator.clipboard.writeText(devicePairingCode);
+                    setInfo('Code copied!');
+                  }}
+                  style={{
+                    fontSize: '28px',
+                    fontWeight: 700,
+                    color: 'rgba(0, 200, 150, 0.9)',
+                    letterSpacing: '4px',
+                    cursor: 'pointer',
+                    fontFamily: 'monospace',
+                  }}
+                >
+                  {formatDeviceCode(devicePairingCode)}
+                </div>
+                <div style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.3)' }}>
+                  Tap to copy
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={handleGenerateDeviceCode}
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  background: 'rgba(100, 150, 255, 0.15)',
+                  border: '1px solid rgba(100, 150, 255, 0.3)',
+                  borderRadius: '8px',
+                  color: 'rgba(100, 150, 255, 0.9)',
+                  fontSize: '14px',
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  transition: 'all 0.2s',
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
+                  <line x1="12" y1="18" x2="12.01" y2="18"/>
+                </svg>
+                Show My Device Code
+              </button>
+            )}
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'rgba(255,255,255,0.3)', fontSize: '12px' }}>
+              <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
+              <span>or enter code from another device</span>
+              <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                value={deviceCodeInput}
+                onChange={(e) => {
+                  // Format as "XXX XXX" while typing
+                  const raw = e.target.value.replace(/\D/g, '').slice(0, 6);
+                  setDeviceCodeInput(raw.length > 3 ? `${raw.slice(0, 3)} ${raw.slice(3)}` : raw);
+                }}
+                placeholder="XXX XXX"
+                style={{
+                  flex: 1,
+                  padding: '10px 12px',
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  borderRadius: '8px',
+                  color: 'rgba(255, 255, 255, 0.9)',
+                  fontSize: '16px',
+                  fontFamily: 'monospace',
+                  letterSpacing: '2px',
+                  textAlign: 'center',
+                  outline: 'none',
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleLinkDevice(deviceCodeInput);
+                  }
+                }}
+              />
+              <button
+                onClick={() => handleLinkDevice(deviceCodeInput)}
+                style={{
+                  padding: '10px 16px',
+                  background: 'rgba(100, 150, 255, 0.15)',
+                  border: '1px solid rgba(100, 150, 255, 0.3)',
+                  borderRadius: '8px',
+                  color: 'rgba(100, 150, 255, 0.9)',
+                  fontSize: '14px',
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                Link
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">Transfer</div>
+          {hasActiveTransfer && (
+            <>
+              <div className="settings-item">
+                <span className="settings-item-label">Status</span>
+                <span className="settings-item-value">{progress?.phase ?? 'idle'}</span>
+              </div>
+            </>
+          )}
+        </div>
+
+        {logs.length > 0 && (
+          <div className="settings-section">
+            <div className="settings-section-title">Recent Logs</div>
+            <div style={{ maxHeight: '150px', overflow: 'auto', fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>
+              {logs.slice(-5).map((log, i) => (
+                <div key={i} style={{ marginBottom: '4px' }}>{log}</div>
+              ))}
+            </div>
+          </div>
+        )}
+      </SettingsPanel>
+
+      {/* QR Scanner Modal */}
+      {scannerOpen && (
+        <QRScanner
+          onScan={handleQRScan}
+          onClose={() => setScannerOpen(false)}
+        />
+      )}
 
       {info && <div className="toast toast-success">{info}</div>}
       {error && (

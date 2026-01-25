@@ -1,8 +1,9 @@
 [package]
-name = "courier-agent"
+name = "quantum-drop"
 version = "0.1.8"
 edition = "2021"
 rust-version = "1.77"
+default-run = "quantum-drop"
 
 [features]
 default = ["transport-quic", "transport-webrtc", "transport-relay"]

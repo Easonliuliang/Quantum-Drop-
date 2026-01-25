@@ -754,48 +754,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "courier-agent"
-version = "0.1.8"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "bincode",
- "blake3",
- "bytes",
- "chacha20poly1305",
- "chrono",
- "ed25519-dalek",
- "futures",
- "hex",
- "humantime",
- "if-addrs",
- "log",
- "mdns-sd",
- "quinn",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "rcgen",
- "rusqlite",
- "rustls 0.23.34",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite 0.21.0",
- "url",
- "uuid",
- "webrtc",
- "x25519-dalek",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3525,6 +3483,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ee95bc4ef87b8d5ba32e8b7714ccc834865276eab0aed5c9958d00ec45f49e8"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quantum-drop"
+version = "0.1.8"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bincode",
+ "blake3",
+ "bytes",
+ "chacha20poly1305",
+ "chrono",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "humantime",
+ "if-addrs",
+ "log",
+ "mdns-sd",
+ "quinn",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rcgen",
+ "rusqlite",
+ "rustls 0.23.34",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "url",
+ "uuid",
+ "webrtc",
+ "x25519-dalek",
 ]
 
 [[package]]
