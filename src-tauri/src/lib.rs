@@ -18,10 +18,12 @@ use commands::{
     auth_register_device, auth_register_identity, auth_update_device, auth_update_entitlement,
     courier_cancel, courier_connect_by_code, courier_generate_code, courier_list_senders,
     courier_p2p_smoke_test, courier_receive, courier_relay_smoke_test, courier_resume,
-    courier_route_metrics, courier_send, courier_start_webrtc_receiver,
-    courier_start_webrtc_sender, export_pot, license_activate, license_get_status, list_transfers,
-    load_settings, security_get_config, transfer_stats, update_settings, verify_pot, SharedState,
+    courier_route_metrics, courier_send, export_pot, license_activate, license_get_status,
+    list_transfers, load_settings, security_get_config, transfer_stats, update_settings, verify_pot,
+    SharedState,
 };
+#[cfg(feature = "transport-webrtc")]
+use commands::{courier_start_webrtc_receiver, courier_start_webrtc_sender};
 use config::ConfigStore;
 use license::LicenseManager;
 use metrics::RouteMetricsRegistry;
@@ -29,6 +31,7 @@ use security::SecurityConfig;
 use serde::Serialize;
 use store::{IdentityStore, TransferStore};
 use tauri::Manager;
+use services::discovery::DiscoveryService;
 use services::mdns::MdnsRegistry;
 
 #[derive(Serialize)]
@@ -71,43 +74,81 @@ pub fn run() {
             app.manage(license_manager);
             app.manage(audit_logger);
             let mdns = MdnsRegistry::new().expect("failed to initialise mDNS registry");
-            app.manage(mdns);
+            app.manage(DiscoveryService::new(mdns));
             app.manage(RouteMetricsRegistry::default());
             Ok(())
         })
         .manage(SharedState::new())
-        .invoke_handler(tauri::generate_handler![
-            auth_register_identity,
-            auth_register_device,
-            auth_list_devices,
-            auth_load_entitlement,
-            auth_update_entitlement,
-            auth_update_device,
-            auth_heartbeat_device,
-            audit_get_logs,
-            health_check,
-            courier_generate_code,
-            courier_send,
-            courier_receive,
-            courier_connect_by_code,
-            courier_cancel,
-            courier_p2p_smoke_test,
-            courier_relay_smoke_test,
-            courier_resume,
-            courier_route_metrics,
-            export_pot,
-            courier_list_senders,
-            verify_pot,
-            security_get_config,
-            list_transfers,
-            load_settings,
-            update_settings,
-            courier_start_webrtc_sender,
-            courier_start_webrtc_receiver,
-            license_get_status,
-            license_activate,
-            transfer_stats,
-        ])
+        .invoke_handler({
+            #[cfg(feature = "transport-webrtc")]
+            {
+                tauri::generate_handler![
+                    auth_register_identity,
+                    auth_register_device,
+                    auth_list_devices,
+                    auth_load_entitlement,
+                    auth_update_entitlement,
+                    auth_update_device,
+                    auth_heartbeat_device,
+                    audit_get_logs,
+                    health_check,
+                    courier_generate_code,
+                    courier_send,
+                    courier_receive,
+                    courier_connect_by_code,
+                    courier_cancel,
+                    courier_p2p_smoke_test,
+                    courier_relay_smoke_test,
+                    courier_resume,
+                    courier_route_metrics,
+                    export_pot,
+                    courier_list_senders,
+                    verify_pot,
+                    security_get_config,
+                    list_transfers,
+                    load_settings,
+                    update_settings,
+                    courier_start_webrtc_sender,
+                    courier_start_webrtc_receiver,
+                    license_get_status,
+                    license_activate,
+                    transfer_stats,
+                ]
+            }
+            #[cfg(not(feature = "transport-webrtc"))]
+            {
+                tauri::generate_handler![
+                    auth_register_identity,
+                    auth_register_device,
+                    auth_list_devices,
+                    auth_load_entitlement,
+                    auth_update_entitlement,
+                    auth_update_device,
+                    auth_heartbeat_device,
+                    audit_get_logs,
+                    health_check,
+                    courier_generate_code,
+                    courier_send,
+                    courier_receive,
+                    courier_connect_by_code,
+                    courier_cancel,
+                    courier_p2p_smoke_test,
+                    courier_relay_smoke_test,
+                    courier_resume,
+                    courier_route_metrics,
+                    export_pot,
+                    courier_list_senders,
+                    verify_pot,
+                    security_get_config,
+                    list_transfers,
+                    load_settings,
+                    update_settings,
+                    license_get_status,
+                    license_activate,
+                    transfer_stats,
+                ]
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running Quantum Drop · 量子快传");
 }

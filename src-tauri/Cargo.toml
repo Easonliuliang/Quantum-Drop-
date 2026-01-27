@@ -45,7 +45,7 @@ mdns-sd = { version = "0.11", features = ["async"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
 url = "2.5"
 humantime = "2.1"
-x25519-dalek = { version = "2", default-features = false, features = ["reusable_secrets", "zeroize", "serde"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "reusable_secrets", "zeroize", "serde"] }
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 
 [dev-dependencies]

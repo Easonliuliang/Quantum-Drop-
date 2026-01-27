@@ -38,18 +38,22 @@ use crate::{
     metrics::RouteMetricsRegistry,
     resume::{derive_chunk_size, ChunkCatalog, ResumeStore},
     security::SecurityConfig,
-    services::mdns::{MdnsRegistry, SenderInfo as MdnsSenderInfo},
+    services::discovery::{DiscoveryService, DiscoverySource},
+    services::mdns::SenderInfo as MdnsSenderInfo,
     signaling::SessionTicket,
     store::{
         DeviceRecord, EntitlementRecord, IdentityRecord, IdentityStore, TransferRecord,
         TransferStore,
     },
     transport::{
-        adapter::{WebRtcHint, WebRtcRole},
-        Frame, LanQuic, RouteKind, Router, SelectedRoute, SessionDesc, TransportError,
+        Frame, RouteKind, Router, SelectedRoute, SessionDesc, TransportError,
         TransportStream,
     },
 };
+#[cfg(feature = "transport-webrtc")]
+use crate::transport::adapter::{WebRtcHint, WebRtcRole};
+#[cfg(feature = "transport-quic")]
+use crate::transport::LanQuic;
 
 use state::{LanMode, TrackedFile, TransferTask};
 use types::{
@@ -72,6 +76,7 @@ const MAX_PARALLEL_CHUNKS: usize = 4;
 
 pub use state::AppState as SharedState;
 
+#[cfg(feature = "transport-quic")]
 fn recommended_lan_streams(
     total_bytes: u64,
     policy: &AdaptiveChunkPolicy,
@@ -408,7 +413,7 @@ pub async fn courier_send(
     app: AppHandle,
     state: State<'_, SharedState>,
     store: State<'_, IdentityStore>,
-    license: State<'_, LicenseManager>,
+    _license: State<'_, LicenseManager>,
     auth: AuthenticatedPayload<SignedPathsPayload>,
     code: String,
 ) -> Result<TaskResponse, CommandError> {
@@ -552,7 +557,7 @@ pub async fn courier_connect_by_code(
     app: AppHandle,
     state: State<'_, SharedState>,
     store: State<'_, IdentityStore>,
-    mdns: State<'_, MdnsRegistry>,
+    discovery: State<'_, DiscoveryService>,
     auth: AuthenticatedPayload<ConnectByCodePayload>,
 ) -> Result<TaskResponse, CommandError> {
     verify_request(
@@ -571,10 +576,11 @@ pub async fn courier_connect_by_code(
         .get_device(auth.identity_id.trim(), auth.device_id.trim())
         .map_err(CommandError::from)?
         .ok_or_else(|| CommandError::invalid("device not registered"))?;
-    let sender_info = mdns
-        .discover_sender(&auth.payload.code, Duration::from_secs(10))
+    let result = discovery
+        .discover_by_code(&auth.payload.code, Duration::from_secs(10))
         .await
         .map_err(|err| CommandError::route_unreachable(format!("{err}")))?;
+    let sender_info = result.sender;
     let peer_key = decode_public_key(&sender_info.public_key)
         .map_err(|err| CommandError::invalid(format!("invalid sender public key: {err}")))?;
     let (session_secret, session_public_key) = SessionSecretBytes::generate();
@@ -626,6 +632,7 @@ pub async fn courier_connect_by_code(
     })
 }
 
+#[cfg(feature = "transport-webrtc")]
 #[tauri::command]
 pub async fn courier_start_webrtc_sender(
     app: AppHandle,
@@ -719,6 +726,7 @@ pub async fn courier_start_webrtc_sender(
     })
 }
 
+#[cfg(feature = "transport-webrtc")]
 #[tauri::command]
 pub async fn courier_start_webrtc_receiver(
     app: AppHandle,
@@ -807,13 +815,24 @@ pub async fn courier_start_webrtc_receiver(
 
 #[tauri::command]
 pub async fn courier_list_senders(
-    mdns: State<'_, MdnsRegistry>,
+    discovery: State<'_, DiscoveryService>,
 ) -> Result<Vec<SenderInfoDto>, CommandError> {
-    let items = mdns
+    let results = discovery
         .list_senders(Duration::from_secs(5))
         .await
         .map_err(|err| CommandError::route_unreachable(format!("{err}")))?;
-    Ok(items.into_iter().map(SenderInfoDto::from).collect())
+    Ok(results
+        .into_iter()
+        .map(|result| {
+            let mut dto = SenderInfoDto::from(result.sender);
+            let source = match result.source {
+                DiscoverySource::Mdns => "mdns",
+                DiscoverySource::Ble => "ble",
+            };
+            dto.discovered_via = Some(source.to_string());
+            dto
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1804,8 +1823,13 @@ async fn simulate_transfer(
         .await
         .ok_or_else(CommandError::not_found)?;
 
+    #[cfg(feature = "transport-quic")]
     if let Some(lan_mode) = task.lan_mode.clone() {
         return run_lan_transfer(app, state, task, lan_mode).await;
+    }
+    #[cfg(not(feature = "transport-quic"))]
+    if task.lan_mode.is_some() {
+        return Err(CommandError::route_unreachable("LAN transport (QUIC) not enabled"));
     }
 
     emit_log(
@@ -1877,6 +1901,7 @@ async fn simulate_transfer(
     sleep(Duration::from_millis(200)).await;
 
     let session_label = task.code.clone().unwrap_or_else(|| task_id.clone());
+    #[allow(unused_mut)]
     let mut session = SessionDesc::new(session_label);
     #[cfg(feature = "transport-webrtc")]
     {
@@ -2274,6 +2299,7 @@ async fn simulate_transfer(
     Ok(())
 }
 
+#[cfg(feature = "transport-quic")]
 async fn run_lan_transfer(
     app: AppHandle,
     state: SharedState,
@@ -2306,6 +2332,7 @@ async fn run_lan_transfer(
     }
 }
 
+#[cfg(feature = "transport-quic")]
 async fn run_lan_sender(
     app: AppHandle,
     state: SharedState,
@@ -2317,6 +2344,7 @@ async fn run_lan_sender(
     result
 }
 
+#[cfg(feature = "transport-quic")]
 async fn run_lan_sender_impl(
     app: AppHandle,
     state: SharedState,
@@ -2611,6 +2639,7 @@ async fn run_lan_sender_impl(
     finalize_lan_success(&app, &state, &task_id, TransferRoute::Lan, bytes_sent).await
 }
 
+#[cfg(feature = "transport-quic")]
 async fn run_lan_receiver(
     app: AppHandle,
     state: SharedState,
@@ -3110,10 +3139,12 @@ impl From<MdnsSenderInfo> for SenderInfoDto {
             port: value.port,
             public_key: value.public_key,
             cert_fingerprint: value.cert_fingerprint,
+            discovered_via: None,
         }
     }
 }
 
+#[cfg(feature = "transport-quic")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum LanControlMessage {
@@ -3139,6 +3170,7 @@ enum LanControlMessage {
     Done,
 }
 
+#[cfg(feature = "transport-quic")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LanFileManifestEntry {
     name: String,
@@ -3288,12 +3320,14 @@ async fn secure_router_stream(
     ))
 }
 
+#[cfg(feature = "transport-quic")]
 fn encode_control_message(message: &LanControlMessage) -> Result<Frame, CommandError> {
     serde_json::to_string(message)
         .map(Frame::Control)
         .map_err(|err| CommandError::route_unreachable(format!("control encode failed: {err}")))
 }
 
+#[cfg(feature = "transport-quic")]
 fn decode_control_message(payload: &str) -> Result<LanControlMessage, CommandError> {
     serde_json::from_str(payload)
         .map_err(|err| CommandError::route_unreachable(format!("control decode failed: {err}")))
@@ -3338,6 +3372,7 @@ fn unique_destination_path(base: &Path, file_name: &str) -> PathBuf {
     }
 }
 
+#[cfg(feature = "transport-quic")]
 async fn finalize_lan_success(
     app: &AppHandle,
     state: &SharedState,
@@ -3448,11 +3483,13 @@ async fn finalize_lan_success(
     Ok(())
 }
 
+#[cfg(feature = "transport-quic")]
 struct MdnsCleanup {
     app: AppHandle,
     code: Option<String>,
 }
 
+#[cfg(feature = "transport-quic")]
 impl MdnsCleanup {
     fn new(app: &AppHandle) -> Self {
         Self {
@@ -3471,7 +3508,8 @@ impl MdnsCleanup {
         public_key_hex: &str,
         cert_fingerprint: Option<&str>,
     ) -> Result<(), CommandError> {
-        let mdns = self.app.state::<MdnsRegistry>();
+        let discovery = self.app.state::<DiscoveryService>();
+        let mdns = discovery.mdns();
         mdns.register_sender(
             code,
             task_id,
@@ -3489,7 +3527,8 @@ impl MdnsCleanup {
 
     async fn finish(&mut self) {
         if let Some(code) = self.code.take() {
-            let mdns = self.app.state::<MdnsRegistry>();
+            let discovery = self.app.state::<DiscoveryService>();
+            let mdns = discovery.mdns();
             let _ = mdns.unregister(&code).await;
         }
     }
