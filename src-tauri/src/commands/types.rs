@@ -54,6 +54,8 @@ pub struct SenderInfoDto {
     pub port: u16,
     pub public_key: String,
     pub cert_fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovered_via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

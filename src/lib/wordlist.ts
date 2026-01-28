@@ -168,8 +168,6 @@ export const WORDLIST = [
 export function generateFriendCode(publicKey: Uint8Array): string {
   // Use first 6 bytes of public key to select 3 words
   // Each word index uses 11 bits (0-2047)
-  const view = new DataView(publicKey.buffer, publicKey.byteOffset, Math.min(6, publicKey.length));
-
   // Combine bytes into a 48-bit number, then extract 3 x 11-bit indices
   const b0 = publicKey[0] ?? 0;
   const b1 = publicKey[1] ?? 0;

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use log::{info, warn, error};
+use log::info;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use rusqlite::{named_params, OptionalExtension};
 
 use crate::{
@@ -19,6 +19,7 @@ pub struct LicenseUsage {
 #[derive(Debug, Clone)]
 pub struct LicenseStore {
     identity_store: IdentityStore,
+    #[allow(dead_code)]
     db_path: PathBuf,
 }
 
@@ -178,15 +179,11 @@ impl LicenseStore {
                 key: record.license_key,
                 tier,
                 identity_id: identity_id.to_string(),
-                issued_at: DateTime::<Utc>::from_utc(
-                    NaiveDateTime::from_timestamp_millis(issued_at)
-                        .unwrap_or_else(|| NaiveDateTime::from_timestamp_millis(0).unwrap()),
-                    Utc,
-                ),
+                issued_at: DateTime::from_timestamp_millis(issued_at)
+                    .unwrap_or_else(|| DateTime::from_timestamp_millis(0).unwrap()),
                 expires_at: record
                     .expires_at
-                    .and_then(|value| NaiveDateTime::from_timestamp_millis(value))
-                    .map(|dt| DateTime::<Utc>::from_utc(dt, Utc)),
+                    .and_then(DateTime::from_timestamp_millis),
                 limits,
                 signature: record.license_signature,
             }

@@ -1,0 +1,9 @@
+[default]
+description = "Allows all BLE plugin commands"
+permissions = [
+    "allow-start-advertising",
+    "allow-stop-advertising",
+    "allow-start-scanning",
+    "allow-stop-scanning",
+    "allow-read-sender-info",
+]

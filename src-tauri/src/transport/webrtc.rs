@@ -43,6 +43,7 @@ use webrtc::{
 };
 
 #[cfg(test)]
+#[allow(unused_imports)]
 use crate::security::SecurityConfig;
 use crate::signaling::{
     IceCandidate as SignalIceCandidate, SessionDesc as SignalSessionDesc,
@@ -1045,7 +1046,9 @@ fn fingerprint_from_public_key_hex(hex_str: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
+    #[allow(unused_imports)]
     use tokio::time::{timeout, Duration};
 
     #[cfg(feature = "signaling-server")]

@@ -3516,6 +3516,7 @@ dependencies = [
  "sha2",
  "tauri",
  "tauri-build",
+ "tauri-plugin-ble",
  "tauri-plugin-dialog",
  "tempfile",
  "thiserror 1.0.69",
@@ -4880,6 +4881,18 @@ dependencies = [
  "tauri-utils",
  "toml 0.9.8",
  "walkdir",
+]
+
+[[package]]
+name = "tauri-plugin-ble"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

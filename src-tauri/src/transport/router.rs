@@ -170,7 +170,7 @@ impl Router {
             if preferred.iter().any(|route| route == &RouteKind::P2p) {
                 warn!("transport-webrtc feature disabled; p2p route unavailable");
             }
-            let _ = &stun;
+            let _ = &prefs.stun;
             None
         };
 

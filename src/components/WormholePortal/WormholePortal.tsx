@@ -54,7 +54,6 @@ export const WormholePortal: React.FC<WormholePortalProps> = ({
     const centerY = height / 2;
 
     // Tunnel parameters
-    const tunnelLength = 1; // normalized 0-1
     const entryRadius = 100; // radius at entry (close to viewer)
     const exitRadius = 15;   // radius at exit (far end, small = perspective)
     const numRings = 12;
@@ -198,7 +197,6 @@ export const WormholePortal: React.FC<WormholePortalProps> = ({
         const opacity = p.opacity * perspectiveScale;
 
         // Draw particle with trail
-        const trailLength = 8 * speedMult * perspectiveScale;
         const prevT = Math.max(0, t - 0.05);
         const prevRadius = entryRadius - (entryRadius - exitRadius) * prevT;
         const prevR = prevRadius * (1 + tunnelPulse);

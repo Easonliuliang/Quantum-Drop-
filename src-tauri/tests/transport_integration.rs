@@ -1,17 +1,22 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::time::timeout;
 
-use courier_agent::transport::{
-    Frame, LanQuic, SessionDesc, TransportAdapter, TransportStream,
-};
-use courier_agent::transport::webrtc::WebRtcAdapter;
-use courier_agent::transport::adapter::{WebRtcHint, WebRtcRole};
-use courier_agent::security::SecurityConfig;
+use quantum_drop::transport::{Frame, LanQuic, TransportStream};
+
 #[cfg(feature = "signaling-server")]
-use courier_agent::signaling::signaling_router as router;
+use std::net::SocketAddr;
+#[cfg(feature = "signaling-server")]
+use tokio::net::TcpListener;
+#[cfg(feature = "signaling-server")]
+use quantum_drop::transport::{SessionDesc, TransportAdapter};
+#[cfg(feature = "signaling-server")]
+use quantum_drop::transport::webrtc::WebRtcAdapter;
+#[cfg(feature = "signaling-server")]
+use quantum_drop::transport::adapter::{WebRtcHint, WebRtcRole};
+#[cfg(feature = "signaling-server")]
+use quantum_drop::security::SecurityConfig;
+#[cfg(feature = "signaling-server")]
+use quantum_drop::signaling::signaling_router as router;
 
 #[tokio::test]
 async fn test_quic_integration() {

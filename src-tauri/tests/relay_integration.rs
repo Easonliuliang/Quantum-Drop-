@@ -1,7 +1,7 @@
 use std::process::{Command, Child};
 use std::time::Duration;
 use tokio::time::sleep;
-use courier_agent::transport::{RelayAdapter, SessionDesc, TransportAdapter, Frame, RelayHint};
+use quantum_drop::transport::{RelayAdapter, SessionDesc, TransportAdapter, Frame, RelayHint};
 
 struct ServerGuard(Child);
 

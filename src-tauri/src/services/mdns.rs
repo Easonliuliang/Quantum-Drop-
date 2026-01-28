@@ -11,7 +11,7 @@ use tokio::time;
 const SERVICE_TYPE: &str = "_quantumdrop._udp.local.";
 const VERSION: &str = "1.0";
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SenderInfo {
     pub code: String,

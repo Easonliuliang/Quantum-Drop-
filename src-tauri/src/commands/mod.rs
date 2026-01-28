@@ -3515,14 +3515,70 @@ impl MdnsCleanup {
             task_id,
             port,
             addresses,
-            device_name,
+            device_name.clone(),
             public_key_hex,
             cert_fingerprint,
         )
         .await
         .map_err(|err| CommandError::route_unreachable(format!("mDNS register failed: {err}")))?;
         self.code = Some(code.to_string());
+
+        // Also start BLE advertising if the feature is enabled
+        #[cfg(feature = "transport-ble")]
+        {
+            self.start_ble_advertising(
+                code,
+                port,
+                addresses,
+                device_name,
+                public_key_hex,
+                cert_fingerprint,
+            );
+        }
+
         Ok(())
+    }
+
+    #[cfg(feature = "transport-ble")]
+    fn start_ble_advertising(
+        &self,
+        code: &str,
+        port: u16,
+        addresses: &[String],
+        device_name: Option<String>,
+        public_key_hex: &str,
+        cert_fingerprint: Option<&str>,
+    ) {
+        use crate::services::ble_protocol::{encode_sender_info, BleServiceData, CAP_QUIC};
+        use crate::services::mdns::SenderInfo;
+        use tauri_plugin_ble::BleExt;
+
+        let service_data = BleServiceData::new(code, CAP_QUIC);
+        let host = addresses.first().cloned().unwrap_or_default();
+
+        let sender_info = SenderInfo {
+            code: code.to_string(),
+            device_name: device_name.unwrap_or_default(),
+            host,
+            port,
+            public_key: public_key_hex.to_string(),
+            cert_fingerprint: cert_fingerprint.unwrap_or_default().to_string(),
+        };
+
+        match encode_sender_info(&sender_info) {
+            Ok(json) => {
+                let payload = tauri_plugin_ble::StartAdvertisingRequest {
+                    service_data: service_data.encode().to_vec(),
+                    sender_info_json: json,
+                };
+                if let Err(e) = self.app.ble().start_advertising(payload) {
+                    log::warn!("BLE advertising start failed: {e}");
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to encode sender info for BLE: {e}");
+            }
+        }
     }
 
     async fn finish(&mut self) {
@@ -3530,6 +3586,13 @@ impl MdnsCleanup {
             let discovery = self.app.state::<DiscoveryService>();
             let mdns = discovery.mdns();
             let _ = mdns.unregister(&code).await;
+
+            // Also stop BLE advertising
+            #[cfg(feature = "transport-ble")]
+            {
+                use tauri_plugin_ble::BleExt;
+                let _ = self.app.ble().stop_advertising();
+            }
         }
     }
 }

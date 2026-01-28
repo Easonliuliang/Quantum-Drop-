@@ -239,7 +239,8 @@ export default function ColorBends({
         container.removeChild(renderer.domElement);
       }
     };
-  }, []); // Only run once on mount - updates handled by second useEffect
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only; prop updates handled by second useEffect
+  }, []);
 
   useEffect(() => {
     const material = materialRef.current;

@@ -10,6 +10,7 @@ default = ["transport-quic", "transport-webrtc", "transport-relay"]
 transport-quic = ["dep:quinn", "dep:rcgen"]
 transport-webrtc = ["dep:webrtc"]
 transport-relay = []
+transport-ble = ["dep:tauri-plugin-ble"]
 signaling-server = ["dep:axum"]
 
 [dependencies]
@@ -45,6 +46,7 @@ mdns-sd = { version = "0.11", features = ["async"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
 url = "2.5"
 humantime = "2.1"
+tauri-plugin-ble = { path = "../tauri-plugin-ble", optional = true }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "reusable_secrets", "zeroize", "serde"] }
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 

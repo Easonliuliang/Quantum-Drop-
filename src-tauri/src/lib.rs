@@ -51,8 +51,16 @@ fn health_check() -> HealthCheck {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init());
+
+    #[cfg(feature = "transport-ble")]
+    {
+        builder = builder.plugin(tauri_plugin_ble::init());
+    }
+
+    builder
         .setup(|app| {
             // Run legacy data migration (identifier/product rename) before stores initialise
             services::migration::run_legacy_migration(&app.handle());
@@ -74,7 +82,7 @@ pub fn run() {
             app.manage(license_manager);
             app.manage(audit_logger);
             let mdns = MdnsRegistry::new().expect("failed to initialise mDNS registry");
-            app.manage(DiscoveryService::new(mdns));
+            app.manage(DiscoveryService::new(mdns, app.handle().clone()));
             app.manage(RouteMetricsRegistry::default());
             Ok(())
         })

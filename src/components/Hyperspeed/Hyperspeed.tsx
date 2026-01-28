@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { BloomEffect, EffectComposer, EffectPass, RenderPass, SMAAEffect, SMAAPreset } from 'postprocessing';
 
@@ -46,63 +46,62 @@ interface HyperspeedProps {
   effectOptions?: EffectOptions;
 }
 
+const DEFAULT_EFFECT_OPTIONS: EffectOptions = {
+  onSpeedUp: () => {},
+  onSlowDown: () => {},
+  distortion: 'turbulentDistortion',
+  length: 400,
+  roadWidth: 10,
+  islandWidth: 2,
+  lanesPerRoad: 4,
+  fov: 90,
+  fovSpeedUp: 150,
+  speedUp: 2,
+  carLightsFade: 0.4,
+  totalSideLightSticks: 20,
+  lightPairsPerRoadWay: 40,
+  shoulderLinesWidthPercentage: 0.05,
+  brokenLinesWidthPercentage: 0.1,
+  brokenLinesLengthPercentage: 0.5,
+  lightStickWidth: [0.12, 0.5],
+  lightStickHeight: [1.3, 1.7],
+  movingAwaySpeed: [60, 80],
+  movingCloserSpeed: [-120, -160],
+  carLightsLength: [400 * 0.03, 400 * 0.2],
+  carLightsRadius: [0.05, 0.14],
+  carWidthPercentage: [0.3, 0.5],
+  carShiftX: [-0.8, 0.8],
+  carFloorSeparation: [0, 5],
+  colors: {
+    roadColor: 0x080808,
+    islandColor: 0x0a0a0a,
+    background: 0x000000,
+    shoulderLines: 0xffffff,
+    brokenLines: 0xffffff,
+    leftCars: [0xd856bf, 0x6750a2, 0xc247ac],
+    rightCars: [0x03b3c3, 0x0e5ea5, 0x324555],
+    sticks: 0x03b3c3
+  }
+};
+
 const Hyperspeed = ({
   effectOptions = {}
 }: HyperspeedProps) => {
   const hyperspeed = useRef<HTMLDivElement>(null);
-  const appRef = useRef<App | null>(null);
 
-  const defaultOptions: EffectOptions = {
-    onSpeedUp: () => {},
-    onSlowDown: () => {},
-    distortion: 'turbulentDistortion',
-    length: 400,
-    roadWidth: 10,
-    islandWidth: 2,
-    lanesPerRoad: 4,
-    fov: 90,
-    fovSpeedUp: 150,
-    speedUp: 2,
-    carLightsFade: 0.4,
-    totalSideLightSticks: 20,
-    lightPairsPerRoadWay: 40,
-    shoulderLinesWidthPercentage: 0.05,
-    brokenLinesWidthPercentage: 0.1,
-    brokenLinesLengthPercentage: 0.5,
-    lightStickWidth: [0.12, 0.5],
-    lightStickHeight: [1.3, 1.7],
-    movingAwaySpeed: [60, 80],
-    movingCloserSpeed: [-120, -160],
-    carLightsLength: [400 * 0.03, 400 * 0.2],
-    carLightsRadius: [0.05, 0.14],
-    carWidthPercentage: [0.3, 0.5],
-    carShiftX: [-0.8, 0.8],
-    carFloorSeparation: [0, 5],
-    colors: {
-      roadColor: 0x080808,
-      islandColor: 0x0a0a0a,
-      background: 0x000000,
-      shoulderLines: 0xffffff,
-      brokenLines: 0xffffff,
-      leftCars: [0xd856bf, 0x6750a2, 0xc247ac],
-      rightCars: [0x03b3c3, 0x0e5ea5, 0x324555],
-      sticks: 0x03b3c3
-    }
-  };
-
-  const mergedOptions = { ...defaultOptions, ...effectOptions, colors: { ...defaultOptions.colors, ...effectOptions.colors } };
+  const mergedOptions = useMemo(
+    () => ({
+      ...DEFAULT_EFFECT_OPTIONS,
+      ...effectOptions,
+      colors: {
+        ...DEFAULT_EFFECT_OPTIONS.colors,
+        ...effectOptions.colors
+      }
+    }),
+    [effectOptions]
+  );
 
   useEffect(() => {
-    if (appRef.current) {
-      appRef.current.dispose();
-      const container = document.getElementById('lights');
-      if (container) {
-        while (container.firstChild) {
-          container.removeChild(container.firstChild);
-        }
-      }
-    }
-
     const mountainUniforms = {
       uFreq: { value: new THREE.Vector3(3, 6, 10) },
       uAmp: { value: new THREE.Vector3(30, 30, 20) }
@@ -334,7 +333,7 @@ const Hyperspeed = ({
       getJS?: (progress: number, time: number) => THREE.Vector3;
     }
 
-    interface AppOptions extends EffectOptions {
+    interface AppOptions extends Omit<EffectOptions, 'distortion'> {
       distortion: Distortion;
       colors: Required<NonNullable<EffectOptions['colors']>>;
     }
@@ -1082,7 +1081,7 @@ const Hyperspeed = ({
     `;
 
     function resizeRendererToDisplaySize(renderer: THREE.WebGLRenderer, setSize: (w: number, h: number, u?: boolean) => void) {
-      const canvas = renderer.domElement;
+      const canvas = renderer.domElement as HTMLCanvasElement;
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
       const needResize = canvas.width !== width || canvas.height !== height;
@@ -1095,6 +1094,9 @@ const Hyperspeed = ({
     // Initialize
     const container = document.getElementById('lights');
     if (container) {
+      while (container.firstChild) {
+        container.removeChild(container.firstChild);
+      }
       const distortionKey = mergedOptions.distortion || 'turbulentDistortion';
       const options: AppOptions = {
         ...mergedOptions,
@@ -1103,16 +1105,22 @@ const Hyperspeed = ({
       };
 
       const myApp = new App(container, options);
-      appRef.current = myApp;
-      myApp.loadAssets().then(myApp.init);
+      const run = async () => {
+        await myApp.loadAssets();
+        myApp.init();
+      };
+      void run();
+
+      return () => {
+        myApp.dispose();
+        while (container.firstChild) {
+          container.removeChild(container.firstChild);
+        }
+      };
     }
 
-    return () => {
-      if (appRef.current) {
-        appRef.current.dispose();
-      }
-    };
-  }, []);
+    return undefined;
+  }, [mergedOptions]);
 
   return <div id="lights" ref={hyperspeed}></div>;
 };

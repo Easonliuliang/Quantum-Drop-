@@ -14,13 +14,7 @@ import {
 import { UpgradePrompt } from "./components/UpgradePrompt";
 import { PanelBoundary } from "./components/ErrorBoundary/PanelBoundary";
 import "./components/Layout/layout.css";
-import { MainLayout } from "./components/Layout/MainLayout";
 import type { Page } from "./components/Layout/types";
-import { SendPage } from "./components/Pages/SendPage";
-import { IdentityPage } from "./components/Pages/IdentityPage";
-import { TransferStatusPage } from "./components/Pages/TransferStatusPage";
-import { WebRTCPage } from "./components/Pages/WebRTCPage";
-import { LogsPage } from "./components/Pages/LogsPage";
 import {
   FRIENDLY_ERROR_MESSAGES,
   LICENSE_REASON_MAP,
@@ -29,7 +23,7 @@ import {
   UPGRADE_URL,
   type UpgradeReason,
 } from "./lib/upgrade";
-import { useI18n, SUPPORTED_LOCALES } from "./lib/i18n";
+import { useI18n } from "./lib/i18n";
 import {
   formatAbsoluteTime,
   formatBytes,
@@ -43,6 +37,7 @@ import { ReceiptView } from "./components/ReceiptView";
 import { TransitionReceipt, VerifyPotResponse } from "./lib/types";
 import { MinimalUI } from "./components/MinimalUI";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ReceivePanel, type BleDevice } from "./components/ReceivePanel";
 import { generateFriendCode, isValidFriendCode, generateDeviceCode, formatDeviceCode } from "./lib/wordlist";
 import { QRCode } from "./components/QRCode";
 import { QRScanner } from "./components/QRScanner";
@@ -547,8 +542,8 @@ export default function App(): JSX.Element {
   const [pendingPaths, setPendingPaths] = useState<string[]>([]);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [taskCode, setTaskCode] = useState<string | null>(null);
-  const [senderPublicKey, setSenderPublicKey] = useState<string | null>(null);
-  const [routeAttempts, setRouteAttempts] = useState<string[] | null>(null);
+  const [_senderPublicKey, setSenderPublicKey] = useState<string | null>(null);
+  const [_routeAttempts, setRouteAttempts] = useState<string[] | null>(null);
   const [routeMetrics, setRouteMetrics] = useState<RouteMetricsDto[] | null>(null);
   const [isRouteMetricsLoading, setIsRouteMetricsLoading] = useState(false);
   const [transferStats, setTransferStats] = useState<TransferStatsDto | null>(null);
@@ -580,6 +575,10 @@ export default function App(): JSX.Element {
   }, []);
   const [currentPage, setCurrentPage] = useState<Page>("send");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [receiveOpen, setReceiveOpen] = useState(false);
+  const [bleDevices, setBleDevices] = useState<BleDevice[]>([]);
+  const [receiveConnecting, setReceiveConnecting] = useState(false);
+  const [receiveStatus, setReceiveStatus] = useState<{ type: 'connecting' | 'error' | 'success'; message: string } | null>(null);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [friendCodeInput, setFriendCodeInput] = useState('');
   const [friends, setFriends] = useState<Friend[]>([]);
@@ -592,13 +591,13 @@ export default function App(): JSX.Element {
   const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
   const [editDeviceName, setEditDeviceName] = useState("");
   const [editDeviceStatus, setEditDeviceStatus] = useState("active");
-  const [isUpdatingDevice, setIsUpdatingDevice] = useState(false);
-  const [isForgettingIdentity, setIsForgettingIdentity] = useState(false);
+  const [_isUpdatingDevice, setIsUpdatingDevice] = useState(false);
+  const [_isForgettingIdentity, setIsForgettingIdentity] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  const [isRegisteringIdentity, setIsRegisteringIdentity] = useState(false);
-  const [isRegisteringDevice, setIsRegisteringDevice] = useState(false);
-  const [isUpdatingEntitlement, setIsUpdatingEntitlement] = useState(false);
-  const [isImportingIdentity, setIsImportingIdentity] = useState(false);
+  const [_isRegisteringIdentity, setIsRegisteringIdentity] = useState(false);
+  const [_isRegisteringDevice, setIsRegisteringDevice] = useState(false);
+  const [_isUpdatingEntitlement, setIsUpdatingEntitlement] = useState(false);
+  const [_isImportingIdentity, setIsImportingIdentity] = useState(false);
   const [importIdentityId, setImportIdentityId] = useState("");
   const [importPrivateKey, setImportPrivateKey] = useState("");
   const [error, setErrorState] = useState<string | null>(null);
@@ -606,7 +605,7 @@ export default function App(): JSX.Element {
   const [info, setInfo] = useState<string | null>(null);
   const lastErrorRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [absorbing, setAbsorbing] = useState(false);
+  const [_absorbing, setAbsorbing] = useState(false);
   const beginTransferRef = useRef<(pathsOverride?: string[]) => Promise<void> | void>();
   const chunkMinMb = chunkPolicyDraft ? Math.round(chunkPolicyDraft.minBytes / ONE_MB) : 2;
   const chunkMaxMb = chunkPolicyDraft ? Math.round(chunkPolicyDraft.maxBytes / ONE_MB) : 2;
@@ -614,7 +613,7 @@ export default function App(): JSX.Element {
   const chunkSettingsDisabled = !chunkPolicyDraft || isSettingsLoading || isSavingSettings;
   const heartbeatTimerRef = useRef<number | null>(null);
   const heartbeatCapabilities = useMemo(() => ["ui:minimal-panel"], []);
-  const deviceStatusOptions = useMemo(() => ["active", "standby", "inactive"], []);
+  const _deviceStatusOptions = useMemo(() => ["active", "standby", "inactive"], []);
   const selectedDevice = useMemo(() => {
     if (!activeDeviceId) {
       return null;
@@ -923,7 +922,7 @@ export default function App(): JSX.Element {
     setInfo(`Linking device with code: ${formatDeviceCode(trimmedCode)}`);
     appendLog(`🔗 Attempting to link device: ${formatDeviceCode(trimmedCode)}`);
     setDeviceCodeInput('');
-  }, [appendLog]);
+  }, [appendLog, showError]);
 
   const refreshRouteMetrics = useCallback(async (notify = false) => {
     if (!detectTauri()) {
@@ -1435,7 +1434,7 @@ export default function App(): JSX.Element {
     [identity, showError]
   );
 
-  const registerIdentity = useCallback(async () => {
+  const _registerIdentity = useCallback(async () => {
     let invoke: TauriInvokeFn;
     try {
       invoke = resolveTauriInvoke();
@@ -1489,7 +1488,7 @@ export default function App(): JSX.Element {
     }
   }, [appendLog, refreshEntitlement, clearError, showError, t]);
 
-  const registerDevice = useCallback(async () => {
+  const _registerDevice = useCallback(async () => {
     let invoke: TauriInvokeFn;
     try {
       invoke = resolveTauriInvoke();
@@ -1598,7 +1597,7 @@ export default function App(): JSX.Element {
     [appendLog, identity, clearError, showError, t]
   );
 
-  const exportPrivateKey = useCallback(async () => {
+  const _exportPrivateKey = useCallback(async () => {
     if (!(identity && identityPrivateKey)) {
       setInfo(t("info.noPrivateKey", "No private key available to export."));
       return;
@@ -1622,7 +1621,7 @@ export default function App(): JSX.Element {
     }
   }, [identity, identityPrivateKey, showError, t]);
 
-  const importIdentity = useCallback(
+  const _importIdentity = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       const identityId = importIdentityId.trim();
@@ -1698,7 +1697,7 @@ export default function App(): JSX.Element {
           try {
             ensureEd25519Hash();
             const privateKey = ed25519Utils.randomPrivateKey();
-            const publicKey = await getPublicKey(privateKey);
+            const publicKey = getPublicKey(privateKey);
             const privateHex = bytesToHex(privateKey);
             const publicHex = bytesToHex(publicKey);
             // Generate a local identity ID from public key
@@ -1929,7 +1928,61 @@ export default function App(): JSX.Element {
     rememberLastIdentityId(identity.identityId).catch((err) => console.warn("rememberLastIdentityId", err));
   }, [identity]);
 
-  const handleDrop = useCallback(
+  // BLE device-found event listener
+  useEffect(() => {
+    if (!receiveOpen) {
+      setBleDevices([]);
+      return;
+    }
+    let cancelled = false;
+    const setup = async () => {
+      try {
+        const unlisten = await listenTauri<BleDevice>("device-found", (event) => {
+          if (cancelled) return;
+          setBleDevices((prev) => {
+            const existing = prev.findIndex((d) => d.deviceId === event.payload.deviceId);
+            if (existing >= 0) {
+              const updated = [...prev];
+              updated[existing] = event.payload;
+              return updated;
+            }
+            return [...prev, event.payload];
+          });
+        });
+        if (cancelled) {
+          unlisten();
+        } else {
+          return unlisten;
+        }
+      } catch (err) {
+        console.warn("BLE device-found listener failed:", err);
+      }
+    };
+    let unlistenFn: (() => void) | undefined;
+    setup().then((fn) => { unlistenFn = fn; });
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
+  }, [receiveOpen]);
+
+  // Handle receive connection by pairing code
+  const handleReceiveConnect = useCallback(async (codeOrBleId: string) => {
+    setReceiveConnecting(true);
+    setReceiveStatus({ type: 'connecting', message: t('receive.panel.connecting', '连接中…') });
+    try {
+      const invoke = resolveTauriInvoke();
+      await invoke('courier_connect_by_code', { code: codeOrBleId });
+      setReceiveStatus({ type: 'success', message: t('receive.panel.connectSuccess', '已连接，准备接收…') });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setReceiveStatus({ type: 'error', message: t('receive.panel.connectError', `连接失败：${msg}`, { error: msg }) });
+    } finally {
+      setReceiveConnecting(false);
+    }
+  }, [t]);
+
+  const _handleDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
       // 在 Tauri 环境下，不拦截 DOM drop，让系统级 file-drop 事件拿到绝对路径
       if (detectTauri()) {
@@ -1953,7 +2006,7 @@ export default function App(): JSX.Element {
     [captureFiles, resetLogs]
   );
 
-  const handleDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+  const _handleDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     if (detectTauri()) return;
     event.preventDefault();
     if (!hovered) {
@@ -1961,7 +2014,7 @@ export default function App(): JSX.Element {
     }
   }, [hovered]);
 
-  const handleDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+  const _handleDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     if (detectTauri()) return;
     event.preventDefault();
     setHovered(false);
@@ -2018,7 +2071,7 @@ export default function App(): JSX.Element {
     } else {
       fileInputRef.current?.click();
     }
-  }, [activeDeviceId, clearError, devices, identity, identityPrivateKey, isSending, resetLogs, t]);
+  }, [clearError, isSending, resetLogs]);
 
   const handleFileInput = (event: React.ChangeEvent<HTMLInputElement>) => {
     captureFiles(event.target.files);
@@ -2036,11 +2089,11 @@ export default function App(): JSX.Element {
     window.setTimeout(() => setAbsorbing(false), 900);
   };
 
-  const showInlineStartButton = isTauri && !(identity && identityPrivateKey && (activeDeviceId || devices[0]));
-  const canStartTransfer = pendingPaths.length > 0;
+  const _showInlineStartButton = isTauri && !(identity && identityPrivateKey && (activeDeviceId || devices[0]));
+  const _canStartTransfer = pendingPaths.length > 0;
   const hasActiveTransfer = Boolean(taskId || taskCode || progress);
 
-  const monitorExtra = (
+  const _monitorExtra = (
     <>
       <div className="route-metrics-actions">
         <button type="button" className="secondary" onClick={() => void refreshRouteMetrics(true)} disabled={isRouteMetricsLoading}>
@@ -2080,7 +2133,7 @@ export default function App(): JSX.Element {
     </>
   );
 
-  const statsContent = identity ? (
+  const _statsContent = identity ? (
     <PanelBoundary
       fallbackKey="panel.statsError"
       fallbackDefault="无法加载传输统计，请刷新重试。"
@@ -2212,7 +2265,7 @@ export default function App(): JSX.Element {
     <p className="stats-empty">注册身份后可查看传输统计。</p>
   );
 
-  const auditContent = identity ? (
+  const _auditContent = identity ? (
     <PanelBoundary
       fallbackKey="panel.auditError"
       fallbackDefault="无法加载审计日志，请刷新重试。"
@@ -2255,7 +2308,7 @@ export default function App(): JSX.Element {
     <p className="stats-empty">{t("audit.empty", "暂无审计记录。")}</p>
   );
 
-  const securityContent = identity ? (
+  const _securityContent = identity ? (
     <>
       <PanelBoundary
         fallbackKey="panel.securityError"
@@ -2304,7 +2357,7 @@ export default function App(): JSX.Element {
     </>
   ) : null;
 
-  const trustedPeersContent = identity ? (
+  const _trustedPeersContent = identity ? (
     <>
       <PanelBoundary fallbackKey="panel.trustedError" fallbackDefault="无法读取信任列表，请刷新。" onRetry={() => void refreshDevices()}>
         {Object.keys(trustedPeers).length > 0 ? (
@@ -2339,7 +2392,7 @@ export default function App(): JSX.Element {
     <p className="stats-empty">{t("panel.security", "安全策略")}将在注册身份后显示。</p>
   );
 
-  const settingsContent = identity ? (
+  const _settingsContent = identity ? (
     <PanelBoundary
       fallbackKey="panel.settingsError"
       fallbackDefault="无法加载传输设置，请刷新重试。"
@@ -2547,7 +2600,7 @@ export default function App(): JSX.Element {
 
 
 
-  const handleWebRtcSenderTest = useCallback(async () => {
+  const _handleWebRtcSenderTest = useCallback(async () => {
     if (!detectTauri()) {
       setInfo(t("info.webrtcTauriOnly", "WebRTC tests require the desktop app."));
       return;
@@ -2626,7 +2679,7 @@ export default function App(): JSX.Element {
   ]);
 
 
-  const handleCopy = useCallback(
+  const _handleCopy = useCallback(
     async (field: string, value: string) => {
       try {
         await copyPlainText(value);
@@ -2718,19 +2771,19 @@ export default function App(): JSX.Element {
     ]
   );
 
-  const markDeviceInactive = useCallback(() => {
+  const _markDeviceInactive = useCallback(() => {
     void submitDeviceUpdate("inactive");
   }, [submitDeviceUpdate]);
 
-  const handleSetDeviceStandby = useCallback(() => {
+  const _handleSetDeviceStandby = useCallback(() => {
     void submitDeviceUpdate("standby");
   }, [submitDeviceUpdate]);
 
-  const handleToggleEntitlement = useCallback(() => {
+  const _handleToggleEntitlement = useCallback(() => {
     void upgradeEntitlement(entitlement?.plan === "pro" ? "free" : "pro");
   }, [entitlement?.plan, upgradeEntitlement]);
 
-  const handleSyncIdentity = useCallback(() => {
+  const _handleSyncIdentity = useCallback(() => {
     if (!detectTauri()) {
       setInfo(t("info.syncTauriOnly", "Resync requires the desktop app."));
       return;
@@ -2739,7 +2792,7 @@ export default function App(): JSX.Element {
     void refreshEntitlement();
   }, [refreshDevices, refreshEntitlement, setInfo, t]);
 
-  const forgetCurrentIdentity = useCallback(async () => {
+  const _forgetCurrentIdentity = useCallback(async () => {
     if (!identity) {
       setInfo(t("info.noIdentityToRemove", "No identity to remove."));
       return;
@@ -2787,64 +2840,66 @@ export default function App(): JSX.Element {
       if (!listen) {
         return;
       }
-      const progressListener = await listen<TransferProgressPayload>("transfer_progress", async (event) => {
-        if (!active) {
-          return;
-        }
-        setProgress(event.payload);
-        if (Array.isArray(event.payload.routeAttempts)) {
-          setRouteAttempts(event.payload.routeAttempts);
-        }
+      const progressListener = await listen<TransferProgressPayload>("transfer_progress", (event) => {
+        void (async () => {
+          if (!active) {
+            return;
+          }
+          setProgress(event.payload);
+          if (Array.isArray(event.payload.routeAttempts)) {
+            setRouteAttempts(event.payload.routeAttempts);
+          }
 
-        if (event.payload.phase === "done" && event.payload.message) {
-          const potPath = event.payload.message;
-          try {
-            const invoke = resolveTauriInvoke();
-            const response = await invoke("verify_pot", { potPath }) as VerifyPotResponse;
+          if (event.payload.phase === "done" && event.payload.message) {
+            const potPath = event.payload.message;
+            try {
+              const invoke = resolveTauriInvoke();
+              const response = await invoke("verify_pot", { potPath }) as VerifyPotResponse;
 
-            if (response.receipt && identity?.identityId) {
-              const stored = await loadIdentity(identity.identityId);
-              if (stored) {
-                const myPublicKey = stored.publicKeyHex;
-                let isSender = false;
-                let needsSigning = false;
+              if (response.receipt && identity?.identityId) {
+                const stored = await loadIdentity(identity.identityId);
+                if (stored) {
+                  const myPublicKey = stored.publicKeyHex;
+                  let isSender = false;
+                  let needsSigning = false;
 
-                if (response.receipt.sender_identity === myPublicKey && !response.receipt.sender_signature) {
-                  isSender = true;
-                  needsSigning = true;
-                } else if (response.receipt.receiver_identity === myPublicKey && !response.receipt.receiver_signature) {
-                  isSender = false;
-                  needsSigning = true;
-                }
+                  if (response.receipt.sender_identity === myPublicKey && !response.receipt.sender_signature) {
+                    isSender = true;
+                    needsSigning = true;
+                  } else if (response.receipt.receiver_identity === myPublicKey && !response.receipt.receiver_signature) {
+                    isSender = false;
+                    needsSigning = true;
+                  }
 
-                if (needsSigning) {
-                  try {
-                    const commitmentHex = await invoke("get_pot_commitment", { potPath, isSender }) as string;
-                    const commitment = hexToBytes(commitmentHex);
-                    const signatureBytes = await signEd25519(commitment, stored.privateKeyHex);
-                    const signature = bytesToHex(signatureBytes);
+                  if (needsSigning) {
+                    try {
+                      const commitmentHex = await invoke("get_pot_commitment", { potPath, isSender }) as string;
+                      const commitment = hexToBytes(commitmentHex);
+                      const signatureBytes = await Promise.resolve(signEd25519(commitment, stored.privateKeyHex));
+                      const signature = bytesToHex(signatureBytes);
 
-                    const signedResponse = await invoke("sign_pot", { potPath, signature, isSender }) as VerifyPotResponse;
-                    if (signedResponse.receipt) {
-                      setReceipt(signedResponse.receipt);
-                    } else {
+                      const signedResponse = await invoke("sign_pot", { potPath, signature, isSender }) as VerifyPotResponse;
+                      if (signedResponse.receipt) {
+                        setReceipt(signedResponse.receipt);
+                      } else {
+                        setReceipt(response.receipt);
+                      }
+                    } catch (signErr) {
+                      console.error("Failed to sign receipt:", signErr);
                       setReceipt(response.receipt);
                     }
-                  } catch (signErr) {
-                    console.error("Failed to sign receipt:", signErr);
+                  } else {
                     setReceipt(response.receipt);
                   }
                 } else {
                   setReceipt(response.receipt);
                 }
-              } else {
-                setReceipt(response.receipt);
               }
+            } catch (err) {
+              console.error("Failed to load PoT:", err);
             }
-          } catch (err) {
-            console.error("Failed to load PoT:", err);
           }
-        }
+        })();
       });
       const devicesListener = await listen<IdentityDevicesEventPayload>(
         "identity_devices_updated",
@@ -3034,6 +3089,7 @@ export default function App(): JSX.Element {
         isTransferring={isSending}
         progress={progress?.progress ?? 0}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenReceive={() => setReceiveOpen(true)}
       />
 
       {/* Debug Button */}
@@ -3075,7 +3131,7 @@ export default function App(): JSX.Element {
               <div
                 onClick={() => {
                   const code = generateFriendCode(hexToBytes(identity.publicKey));
-                  navigator.clipboard.writeText(code);
+                  void navigator.clipboard.writeText(code);
                   setInfo(t('settings.copied', '已复制！'));
                 }}
                 style={{
@@ -3251,7 +3307,7 @@ export default function App(): JSX.Element {
                 </div>
                 <div
                   onClick={() => {
-                    navigator.clipboard.writeText(devicePairingCode);
+                  void navigator.clipboard.writeText(devicePairingCode);
                     setInfo(t('settings.codeCopied', '码已复制！'));
                   }}
                   style={{
@@ -3419,6 +3475,19 @@ export default function App(): JSX.Element {
           </div>
         </div>
       </SettingsPanel>
+
+      {/* Receive Panel */}
+      <ReceivePanel
+        isOpen={receiveOpen}
+        onClose={() => {
+          setReceiveOpen(false);
+          setReceiveStatus(null);
+        }}
+        onConnectByCode={handleReceiveConnect}
+        bleDevices={bleDevices}
+        isConnecting={receiveConnecting}
+        status={receiveStatus}
+      />
 
       {/* QR Scanner Modal */}
       {scannerOpen && (

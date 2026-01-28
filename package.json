@@ -12,7 +12,7 @@
     "test": "vitest run",
     "test:license": "cargo test --manifest-path src-tauri/Cargo.toml license_activation_flow_enforces_limits",
     "dev": "npm run dev:ui",
-    "check": "npm run lint && npm run test && npm run test:license && cargo fmt -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
+    "check": "npm run lint && npm run test && npm run test:license && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

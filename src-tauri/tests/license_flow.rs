@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use courier_agent::{
+use quantum_drop::{
     license::{LicenseLimits, LicenseManager, LicenseTier},
     store::IdentityStore,
 };

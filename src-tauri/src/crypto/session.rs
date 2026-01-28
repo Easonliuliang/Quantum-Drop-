@@ -33,6 +33,7 @@ pub struct SessionCipher {
 
 impl SessionCipher {
     pub fn new(shared_secret: [u8; 32]) -> Self {
+        #[allow(deprecated)] // generic-array 0.x → 1.x transition
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&shared_secret));
         Self {
             cipher,
@@ -65,6 +66,7 @@ impl SessionCipher {
         let mut bytes = [0u8; 12];
         bytes[4..].copy_from_slice(&self.send_nonce.to_be_bytes());
         self.send_nonce = self.send_nonce.wrapping_add(1);
+        #[allow(deprecated)]
         Nonce::from_slice(&bytes).clone()
     }
 
@@ -72,11 +74,13 @@ impl SessionCipher {
         let mut bytes = [0u8; 12];
         bytes[4..].copy_from_slice(&self.recv_nonce.to_be_bytes());
         self.recv_nonce = self.recv_nonce.wrapping_add(1);
+        #[allow(deprecated)]
         Nonce::from_slice(&bytes).clone()
     }
 }
 
 pub fn generate_ephemeral_keypair() -> (EphemeralSecret, SessionPublicKey) {
+    #[allow(deprecated)] // renamed to random_from_rng in 2.1
     let secret = EphemeralSecret::new(OsRng);
     let public = SessionPublicKey {
         bytes: X25519PublicKey::from(&secret).to_bytes(),

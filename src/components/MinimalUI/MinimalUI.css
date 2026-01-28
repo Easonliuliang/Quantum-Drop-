@@ -17,6 +17,34 @@
   background: rgba(10, 10, 16, 0.3);
 }
 
+/* Receive Trigger */
+.receive-trigger {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.15);
+  transition: color 0.2s ease;
+  z-index: 100;
+  padding: 0;
+}
+
+.receive-trigger:hover {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.receive-trigger svg {
+  width: 18px;
+  height: 18px;
+}
+
 /* Settings Gear */
 .settings-gear {
   position: fixed;

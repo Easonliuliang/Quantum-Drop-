@@ -92,7 +92,7 @@ export const QRScanner = ({ onScan, onClose }: QRScannerProps) => {
           <div id="qr-scanner-container" className="qr-scanner-view" />
 
           <div className="qr-scanner-hint">
-            Point camera at a friend's QR code
+            Point camera at a friend&apos;s QR code
           </div>
         </div>
       </div>

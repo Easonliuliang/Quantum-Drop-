@@ -598,6 +598,7 @@ export const GridScan = ({
       renderer.dispose();
       container.removeChild(renderer.domElement);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only; prop updates handled by second useEffect
   }, []);
 
   useEffect(() => {
