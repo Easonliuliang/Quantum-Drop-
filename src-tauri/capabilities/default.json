@@ -1,12 +1,28 @@
 {
   "$schema": "../../schemas/capability.json",
   "identifier": "default",
-  "description": "Default capability: window + event listen + file-drop",
+  "description": "Default capability: window + event + dialog + fs",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",
     "core:event:allow-listen",
-    "core:window:default"
+    "core:event:allow-emit",
+    "core:event:allow-emit-to",
+    "core:window:default",
+    "dialog:default",
+    "fs:default",
+    "fs:allow-app-read-recursive",
+    "fs:allow-app-write-recursive",
+    "fs:allow-app-meta-recursive",
+    "fs:allow-exists",
+    "fs:allow-mkdir",
+    "fs:allow-read",
+    "fs:allow-read-text-file",
+    "fs:allow-write",
+    "fs:allow-write-text-file",
+    "fs:allow-remove",
+    "fs:allow-download-read-recursive",
+    "fs:allow-download-write-recursive"
   ]
 }

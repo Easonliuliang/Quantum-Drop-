@@ -3518,6 +3518,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-ble",
  "tauri-plugin-dialog",
+ "tauri-plugin-fs",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

@@ -1,29 +1,28 @@
+/**
+ * Identity Vault - Tauri v2 兼容版本
+ *
+ * 使用 @tauri-apps/api 和 @tauri-apps/plugin-fs
+ */
+
+import { appDataDir, join } from "@tauri-apps/api/path";
+import {
+  exists,
+  mkdir,
+  readTextFile,
+  writeTextFile,
+  remove,
+  BaseDirectory,
+} from "@tauri-apps/plugin-fs";
+
 const STORAGE_PREFIX = "courier.identity";
 const KEY_PRIVATE = (identityId: string) => `${STORAGE_PREFIX}.${identityId}.private`;
 const KEY_PUBLIC = (identityId: string) => `${STORAGE_PREFIX}.${identityId}.public`;
 const KEY_LAST_ID = `${STORAGE_PREFIX}.last`;
 
-const isTauri =
-  typeof window !== "undefined" && typeof window === "object" && "__TAURI__" in (window as object);
-
-const getTauri = () => {
-  if (typeof window === "undefined") {
-    return undefined;
-  }
-  return (window as unknown as { __TAURI__?: Record<string, unknown> }).__TAURI__ as
-    | {
-        fs?: {
-          createDir?: (path: string, options: { recursive: boolean }) => Promise<void>;
-          writeTextFile?: (path: string, contents: string) => Promise<void>;
-          readTextFile?: (path: string) => Promise<string>;
-          removeFile?: (path: string) => Promise<void>;
-        };
-        path?: {
-          appDataDir?: () => Promise<string>;
-          join?: (...parts: string[]) => Promise<string>;
-        };
-      }
-    | undefined;
+// 检测是否在 Tauri 环境中
+const isTauri = (): boolean => {
+  if (typeof window === "undefined") return false;
+  return "__TAURI_INTERNALS__" in window || "__TAURI__" in window;
 };
 
 const writeLocal = (key: string, value: string | null) => {
@@ -46,48 +45,23 @@ const readLocal = (key: string): string | null => {
   }
 };
 
-const ensureDir = async () => {
-  const tauri = getTauri();
-  if (!tauri?.fs?.createDir || !tauri?.path?.appDataDir || !tauri?.path?.join) {
-    throw new Error("tauri fs/path module unavailable");
+// 确保 identity 目录存在
+const ensureIdentityDir = async (): Promise<string> => {
+  const base = await appDataDir();
+  const target = await join(base, "identity");
+
+  const dirExists = await exists(target);
+  if (!dirExists) {
+    await mkdir(target, { recursive: true });
   }
-  const base = await tauri.path.appDataDir();
-  const target = await tauri.path.join(base, "identity");
-  try {
-    await tauri.fs.createDir(target, { recursive: true });
-  } catch {
-    // directory may already exist
-  }
+
   return target;
 };
 
-const writeFile = async (path: string, contents: string) => {
-  const tauri = getTauri();
-  if (!tauri?.fs?.writeTextFile) {
-    throw new Error("tauri fs module unavailable");
-  }
-  await tauri.fs.writeTextFile(path, contents);
-};
-
-const readFile = async (path: string): Promise<string | null> => {
-  const tauri = getTauri();
-  if (!tauri?.fs?.readTextFile) {
-    throw new Error("tauri fs module unavailable");
-  }
-  try {
-    return await tauri.fs.readTextFile(path);
-  } catch {
-    return null;
-  }
-};
-
-const pathFor = async (filename: string) => {
-  const tauri = getTauri();
-  if (!tauri?.path?.join) {
-    throw new Error("tauri path module unavailable");
-  }
-  const dir = await ensureDir();
-  return await tauri.path.join(dir, filename);
+// 获取文件路径
+const pathFor = async (filename: string): Promise<string> => {
+  const dir = await ensureIdentityDir();
+  return await join(dir, filename);
 };
 
 export type StoredIdentity = {
@@ -97,16 +71,23 @@ export type StoredIdentity = {
 };
 
 export const rememberIdentity = async (record: StoredIdentity) => {
-  if (isTauri) {
+  if (isTauri()) {
     try {
       const privatePath = await pathFor(`${record.identityId}.priv`);
       const publicPath = await pathFor(`${record.identityId}.pub`);
-      await writeFile(privatePath, record.privateKeyHex);
-      await writeFile(publicPath, record.publicKeyHex);
       const lastPath = await pathFor("last");
-      await writeFile(lastPath, record.identityId);
+
+      await writeTextFile(privatePath, record.privateKeyHex);
+      await writeTextFile(publicPath, record.publicKeyHex);
+      await writeTextFile(lastPath, record.identityId);
     } catch (err) {
       console.warn("persist identity to tauri storage failed", err);
+      // Fallback to localStorage
+      if (typeof window !== "undefined") {
+        writeLocal(KEY_PRIVATE(record.identityId), record.privateKeyHex);
+        writeLocal(KEY_PUBLIC(record.identityId), record.publicKeyHex);
+        writeLocal(KEY_LAST_ID, record.identityId);
+      }
     }
   } else if (typeof window !== "undefined") {
     writeLocal(KEY_PRIVATE(record.identityId), record.privateKeyHex);
@@ -119,23 +100,44 @@ export const loadIdentity = async (identityId: string): Promise<StoredIdentity |
   if (identityId.trim().length === 0) {
     return null;
   }
-  if (isTauri) {
+
+  if (isTauri()) {
     try {
       const privatePath = await pathFor(`${identityId}.priv`);
       const publicPath = await pathFor(`${identityId}.pub`);
-      const privateKeyHex = await readFile(privatePath);
-      const publicKeyHex = await readFile(publicPath);
+
+      const privateExists = await exists(privatePath);
+      const publicExists = await exists(publicPath);
+
+      if (!privateExists || !publicExists) {
+        return null;
+      }
+
+      const privateKeyHex = await readTextFile(privatePath);
+      const publicKeyHex = await readTextFile(publicPath);
+
       if (!privateKeyHex || !publicKeyHex) {
         return null;
       }
+
       return { identityId, privateKeyHex, publicKeyHex };
     } catch {
+      // Fallback to localStorage
+      if (typeof window !== "undefined") {
+        const privateKeyHex = readLocal(KEY_PRIVATE(identityId));
+        const publicKeyHex = readLocal(KEY_PUBLIC(identityId));
+        if (privateKeyHex && publicKeyHex) {
+          return { identityId, privateKeyHex, publicKeyHex };
+        }
+      }
       return null;
     }
   }
+
   if (typeof window === "undefined") {
     return null;
   }
+
   const privateKeyHex = readLocal(KEY_PRIVATE(identityId));
   const publicKeyHex = readLocal(KEY_PUBLIC(identityId));
   if (!privateKeyHex || !publicKeyHex) {
@@ -145,38 +147,50 @@ export const loadIdentity = async (identityId: string): Promise<StoredIdentity |
 };
 
 export const forgetIdentity = async (identityId: string) => {
-  if (isTauri) {
-    const tauri = getTauri();
-    if (!tauri?.fs?.removeFile) {
-      return;
-    }
+  if (isTauri()) {
     try {
-      const priv = await pathFor(`${identityId}.priv`);
-      await tauri.fs.removeFile(priv);
+      const privatePath = await pathFor(`${identityId}.priv`);
+      const publicPath = await pathFor(`${identityId}.pub`);
+
+      const privExists = await exists(privatePath);
+      if (privExists) {
+        await remove(privatePath);
+      }
+
+      const pubExists = await exists(publicPath);
+      if (pubExists) {
+        await remove(publicPath);
+      }
     } catch (error) {
-      console.warn("forgetIdentity: remove private file failed", error);
+      console.warn("forgetIdentity: remove files failed", error);
     }
-    try {
-      const pub = await pathFor(`${identityId}.pub`);
-      await tauri.fs.removeFile(pub);
-    } catch (error) {
-      console.warn("forgetIdentity: remove public file failed", error);
-    }
-  } else if (typeof window !== "undefined") {
+  }
+
+  if (typeof window !== "undefined") {
     writeLocal(KEY_PRIVATE(identityId), null);
     writeLocal(KEY_PUBLIC(identityId), null);
   }
 };
 
 export const loadLastIdentityId = async (): Promise<string | null> => {
-  if (isTauri) {
+  if (isTauri()) {
     try {
       const lastPath = await pathFor("last");
-      return await readFile(lastPath);
+      const fileExists = await exists(lastPath);
+      if (!fileExists) {
+        return null;
+      }
+      const content = await readTextFile(lastPath);
+      return content?.trim() || null;
     } catch {
+      // Fallback to localStorage
+      if (typeof window !== "undefined") {
+        return readLocal(KEY_LAST_ID);
+      }
       return null;
     }
   }
+
   if (typeof window === "undefined") {
     return null;
   }
@@ -184,12 +198,16 @@ export const loadLastIdentityId = async (): Promise<string | null> => {
 };
 
 export const rememberLastIdentityId = async (identityId: string) => {
-  if (isTauri) {
+  if (isTauri()) {
     try {
       const lastPath = await pathFor("last");
-      await writeFile(lastPath, identityId);
+      await writeTextFile(lastPath, identityId);
     } catch (err) {
       console.warn("rememberLastIdentityId", err);
+      // Fallback to localStorage
+      if (typeof window !== "undefined") {
+        writeLocal(KEY_LAST_ID, identityId);
+      }
     }
   } else if (typeof window !== "undefined") {
     writeLocal(KEY_LAST_ID, identityId);
@@ -197,19 +215,19 @@ export const rememberLastIdentityId = async (identityId: string) => {
 };
 
 export const clearLastIdentityId = async () => {
-  if (isTauri) {
+  if (isTauri()) {
     try {
       const lastPath = await pathFor("last");
-      const tauri = getTauri();
-      if (tauri?.fs?.removeFile) {
-        await tauri.fs.removeFile(lastPath);
-      } else {
-        await writeFile(lastPath, "");
+      const fileExists = await exists(lastPath);
+      if (fileExists) {
+        await remove(lastPath);
       }
     } catch {
       // ignore missing records
     }
-  } else if (typeof window !== "undefined") {
+  }
+
+  if (typeof window !== "undefined") {
     writeLocal(KEY_LAST_ID, null);
   }
 };
