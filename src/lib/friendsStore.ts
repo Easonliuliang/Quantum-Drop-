@@ -1,61 +1,76 @@
-// Friends storage using localStorage
+// Friends storage using Tauri fs for persistence
+
+import { BaseDirectory, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 
 export interface Friend {
-  code: string;
-  addedAt: number;
-  nickname?: string;
+  id: string;           // 唯一标识（公钥哈希）
+  publicKey: string;    // 对方公钥
+  deviceName: string;   // 设备名称
+  nickname?: string;    // 用户设置的昵称
+  addedAt: number;      // 添加时间
+  lastSeen?: number;    // 最后在线时间
 }
 
-const FRIENDS_STORAGE_KEY = 'quantum_drop_friends';
+const FRIENDS_FILE = "friends.json";
 
-export function loadFriends(): Friend[] {
+let friendsCache: Friend[] | null = null;
+
+export async function loadFriends(): Promise<Friend[]> {
+  if (friendsCache !== null) return friendsCache;
+
   try {
-    const stored = localStorage.getItem(FRIENDS_STORAGE_KEY);
-    if (!stored) return [];
-    return JSON.parse(stored) as Friend[];
+    const content = await readTextFile(FRIENDS_FILE, { baseDir: BaseDirectory.AppData });
+    friendsCache = JSON.parse(content) as Friend[];
+    return friendsCache;
   } catch {
+    friendsCache = [];
     return [];
   }
 }
 
-export function saveFriends(friends: Friend[]): void {
+export async function saveFriends(friends: Friend[]): Promise<void> {
+  friendsCache = friends;
   try {
-    localStorage.setItem(FRIENDS_STORAGE_KEY, JSON.stringify(friends));
-  } catch {
-    // Storage full or unavailable
+    await writeTextFile(FRIENDS_FILE, JSON.stringify(friends, null, 2), { baseDir: BaseDirectory.AppData });
+  } catch (err) {
+    console.error("保存好友列表失败:", err);
   }
 }
 
-export function addFriend(code: string, nickname?: string): Friend | null {
-  const friends = loadFriends();
-  // Check for duplicate
-  if (friends.some(f => f.code === code)) {
+export async function addFriend(friend: Omit<Friend, "addedAt">): Promise<Friend | null> {
+  const friends = await loadFriends();
+  // 检查重复（通过公钥）
+  if (friends.some(f => f.publicKey === friend.publicKey)) {
     return null;
   }
   const newFriend: Friend = {
-    code,
+    ...friend,
     addedAt: Date.now(),
-    nickname,
   };
   friends.push(newFriend);
-  saveFriends(friends);
+  await saveFriends(friends);
   return newFriend;
 }
 
-export function removeFriend(code: string): boolean {
-  const friends = loadFriends();
-  const index = friends.findIndex(f => f.code === code);
+export async function removeFriend(id: string): Promise<boolean> {
+  const friends = await loadFriends();
+  const index = friends.findIndex(f => f.id === id);
   if (index === -1) return false;
   friends.splice(index, 1);
-  saveFriends(friends);
+  await saveFriends(friends);
   return true;
 }
 
-export function updateFriendNickname(code: string, nickname: string): boolean {
-  const friends = loadFriends();
-  const friend = friends.find(f => f.code === code);
+export async function updateFriend(id: string, updates: Partial<Friend>): Promise<boolean> {
+  const friends = await loadFriends();
+  const friend = friends.find(f => f.id === id);
   if (!friend) return false;
-  friend.nickname = nickname;
-  saveFriends(friends);
+  Object.assign(friend, updates);
+  await saveFriends(friends);
   return true;
+}
+
+export async function isFriend(publicKey: string): Promise<boolean> {
+  const friends = await loadFriends();
+  return friends.some(f => f.publicKey === publicKey);
 }

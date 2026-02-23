@@ -45,7 +45,6 @@ pub struct SelectedRoute {
 
 type AdapterHandle = Arc<dyn TransportAdapter>;
 
-#[derive(Default)]
 struct TransportPreferences {
     routes: Vec<RouteKind>,
     stun: Vec<String>,
@@ -56,6 +55,31 @@ struct TransportPreferences {
     relay: Option<String>,
     #[cfg(feature = "transport-webrtc")]
     app_handle: Option<AppHandle>,
+}
+
+impl Default for TransportPreferences {
+    fn default() -> Self {
+        Self {
+            routes: vec![RouteKind::Lan, RouteKind::P2p, RouteKind::Relay],
+            // 内置 STUN 服务器（国内可用优先）
+            stun: vec![
+                "stun:stun.miwifi.com:3478".to_string(),      // 小米（国内）
+                "stun:stun.qq.com:3478".to_string(),          // 腾讯（国内）
+                "stun:stun.ekiga.net:3478".to_string(),       // 全球
+                "stun:stun.voipstunt.com:3478".to_string(),   // 全球
+                "stun:openrelay.metered.ca:80".to_string(),   // Metered（全球）
+                "stun:stun.l.google.com:19302".to_string(),   // Google（备用）
+            ],
+            turn: Vec::new(), // TURN 需要凭证，用户可通过 app.yaml 配置
+            // 内置 Cloudflare Workers 信令服务器
+            signaling: Some("wss://quantumdrop-signaling.eason1319.workers.dev/ws".to_string()),
+            timeouts: RouteTimeouts::default(),
+            #[cfg(feature = "transport-relay")]
+            relay: None,
+            #[cfg(feature = "transport-webrtc")]
+            app_handle: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -115,6 +139,13 @@ impl Router {
 
     pub fn p2p_only(app: &AppHandle) -> Self {
         Self::from_app_with_routes(app, vec![RouteKind::P2p])
+    }
+
+    pub fn resolve_signaling_url(app: &AppHandle) -> Option<String> {
+        if let Some(prefs) = read_transport_from_app_yaml(app) {
+            return prefs.signaling;
+        }
+        TransportPreferences::default().signaling
     }
 
     fn from_app_with_override(app: &AppHandle, routes: Option<Vec<RouteKind>>) -> Self {
@@ -690,17 +721,26 @@ struct RouteTimeoutYaml {
 
 impl From<TransportYaml> for TransportPreferences {
     fn from(value: TransportYaml) -> Self {
-        let routes = value
+        let defaults = TransportPreferences::default();
+
+        // 用户配置的路由，如果为空则用默认值
+        let routes: Vec<RouteKind> = value
             .preferred_routes
             .into_iter()
             .filter_map(|route| parse_route(&route))
             .collect();
-        let stun = value
+        let routes = if routes.is_empty() { defaults.routes } else { routes };
+
+        // 用户配置的 STUN，如果为空则用默认值
+        let stun: Vec<String> = value
             .stun
             .into_iter()
             .map(|entry| entry.trim().to_string())
             .filter(|entry| !entry.is_empty())
             .collect();
+        let stun = if stun.is_empty() { defaults.stun } else { stun };
+
+        // 信令服务器：用户配置优先，否则用内置默认值
         let signaling = value.signaling_url.and_then(|url| {
             let trimmed = url.trim();
             if trimmed.is_empty() {
@@ -708,7 +748,7 @@ impl From<TransportYaml> for TransportPreferences {
             } else {
                 Some(trimmed.to_string())
             }
-        });
+        }).or(defaults.signaling);
         let mut turn = Vec::new();
         if let Some(section) = value.turn {
             let urls = section

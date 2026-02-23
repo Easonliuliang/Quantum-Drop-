@@ -68,6 +68,7 @@ struct PeerDiscoveredEvent {
     session_id: String,
     device_id: String,
     device_name: Option<String>,
+    public_key: Option<String>,
     fingerprint: Option<String>,
     verified: bool,
 }
@@ -1021,6 +1022,7 @@ fn emit_peer_event(app: &AppHandle, desc: &SignalSessionDesc) {
             session_id: desc.session_id.clone(),
             device_id: device_id.clone(),
             device_name: desc.signer_device_name.clone(),
+            public_key: desc.signer_public_key.clone(),
             fingerprint,
             verified: desc.signature.is_some(),
         };

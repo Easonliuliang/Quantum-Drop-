@@ -10,9 +10,13 @@ use async_trait::async_trait;
 use quinn::{
     ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
 };
+use quinn::crypto::rustls::QuicClientConfig;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::RootCertStore;
+use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
+use rustls::version::TLS13;
 use sha2::{Digest, Sha256};
 use tokio::{sync::mpsc, task::JoinHandle, try_join};
 
@@ -127,9 +131,79 @@ impl QuicCredentials {
         Ok(client_config)
     }
 
+    fn build_insecure_client_config(&self) -> Result<ClientConfig, TransportError> {
+        let verifier = Arc::new(InsecureServerCertVerifier);
+        let mut rustls_config = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_protocol_versions(&[&TLS13])
+        .map_err(|err| TransportError::Setup(format!("tls config init failed: {err}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+        rustls_config.enable_early_data = true;
+        let quic_crypto = QuicClientConfig::try_from(rustls_config)
+            .map_err(|err| TransportError::Setup(format!("quic config init failed: {err}")))?;
+        let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
+
+        let mut transport = TransportConfig::default();
+        transport.keep_alive_interval(Some(Duration::from_secs(5)));
+        client_config.transport_config(Arc::new(transport));
+
+        Ok(client_config)
+    }
+
     fn fingerprint_hex(&self) -> String {
         let digest = Sha256::digest(self.cert_der.as_ref());
         hex::encode(digest)
+    }
+}
+
+#[derive(Debug)]
+struct InsecureServerCertVerifier;
+
+impl ServerCertVerifier for InsecureServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+        ]
     }
 }
 
@@ -329,7 +403,8 @@ impl LanQuic {
             Endpoint::client(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).map_err(|err| {
                 TransportError::Setup(format!("failed to create client endpoint: {err}"))
             })?;
-        endpoint.set_default_client_config(self.creds.build_client_config()?);
+        // LAN peers use self-signed certs; accept any cert and rely on app-level handshake.
+        endpoint.set_default_client_config(self.creds.build_insecure_client_config()?);
         let connecting = endpoint
             .connect(remote, self.creds.server_name.as_str())
             .map_err(|err| TransportError::Setup(format!("connect initiation failed: {err}")))?;

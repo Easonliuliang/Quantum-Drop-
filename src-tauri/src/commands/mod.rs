@@ -11,8 +11,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use ed25519_dalek::{Signature as EdSignature, Verifier, VerifyingKey};
-use futures::{stream::FuturesUnordered, StreamExt};
+use log::{info, warn};
+use ed25519_dalek::{Signature as EdSignature, Signer, Verifier, VerifyingKey};
+use futures::{stream::FuturesUnordered, SinkExt, StreamExt};
 use if_addrs::{get_if_addrs, IfAddr};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -54,18 +55,24 @@ use crate::{
 use crate::transport::adapter::{WebRtcHint, WebRtcRole};
 #[cfg(feature = "transport-quic")]
 use crate::transport::LanQuic;
+#[cfg(feature = "transport-webrtc")]
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+#[cfg(feature = "transport-webrtc")]
+use url::Url;
+#[cfg(feature = "transport-webrtc")]
+use ed25519_dalek::SigningKey;
 
 use state::{LanMode, TrackedFile, TransferTask};
 use types::{
-    AuditLogDto, AuthenticatedPayload, ChunkPolicyPayload, CommandError, ConnectByCodePayload,
-    DeviceRegistrationPayload, DeviceResponse, DeviceUpdatePayload, DevicesQueryPayload,
-    DevicesResponse, EntitlementDto, EntitlementUpdatePayload, ErrorCode, ExportPotResponse,
-    GenerateCodeResponse, HeartbeatPayload, IdentityRefPayload, IdentityRegistrationPayload,
-    IdentityResponse, LicenseActivatePayload, LicenseStatusDto, P2pSmokeTestResponse,
-    ResumeProgressDto, RouteMetricsDto, SenderInfoDto, SettingsPayload, SignedPathsPayload,
-    SignedReceivePayload, TaskResponse, TransferDirection, TransferLifecycleEvent, TransferPhase,
-    TransferProgressEvent, TransferRoute, TransferStatsDto, TransferStatus, TransferSummary,
-    VerifyPotResponse, WebRtcReceiverPayload, WebRtcSenderPayload,
+    AdvertiseReceiverPayload, AdvertiseReceiverResponse, AuditLogDto, AuthenticatedPayload,
+    ChunkPolicyPayload, CommandError, ConnectByCodePayload, DeviceRegistrationPayload,
+    DeviceResponse, DeviceUpdatePayload, DevicesQueryPayload, DevicesResponse, EntitlementDto,
+    EntitlementUpdatePayload, ErrorCode, ExportPotResponse, GenerateCodeResponse, HeartbeatPayload,
+    IdentityRefPayload, IdentityRegistrationPayload, IdentityResponse, LicenseActivatePayload,
+    LicenseStatusDto, P2pSmokeTestResponse, ResumeProgressDto, RouteMetricsDto, SenderInfoDto,
+    SettingsPayload, SignedPathsPayload, SignedReceivePayload, SignalingPresencePayload, TaskResponse, TransferDirection,
+    TransferLifecycleEvent, TransferPhase, TransferProgressEvent, TransferRoute, TransferStatsDto,
+    TransferStatus, TransferSummary, VerifyPotResponse, WebRtcReceiverPayload, WebRtcSenderPayload,
 };
 
 const MOCK_RECEIVE_FILE_SIZE: u64 = 2 * 1024 * 1024;
@@ -73,6 +80,8 @@ const MULTI_STREAM_THRESHOLD: u64 = 64 * 1024 * 1024;
 const MID_STREAM_THRESHOLD: u64 = 8 * 1024 * 1024;
 const DEFAULT_PARALLEL_CHUNKS: usize = 2;
 const MAX_PARALLEL_CHUNKS: usize = 4;
+#[cfg(feature = "transport-webrtc")]
+const SIGNALING_DOMAIN: &str = "quantumdrop.signaling.v1";
 
 pub use state::AppState as SharedState;
 
@@ -474,6 +483,98 @@ pub async fn courier_send(
     })
 }
 
+/// Send files directly to an advertised receiver (sender connects as client)
+#[cfg(feature = "transport-quic")]
+#[tauri::command]
+pub async fn courier_send_to_receiver(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    store: State<'_, IdentityStore>,
+    license: State<'_, LicenseManager>,
+    auth: AuthenticatedPayload<types::SendToReceiverPayload>,
+) -> Result<TaskResponse, CommandError> {
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "send",
+    )?;
+    if auth.payload.paths.is_empty() {
+        return Err(CommandError::invalid("At least one file is required"));
+    }
+    let files = collect_files(&auth.payload.paths).map_err(CommandError::from)?;
+    let total_size: u64 = files.iter().map(|file| file.size).sum();
+    let license_snapshot = license
+        .active_license(auth.identity_id.trim())
+        .map_err(CommandError::from)?;
+    license
+        .enforce_file_size(&license_snapshot, total_size)
+        .map_err(CommandError::license_violation)?;
+    let identity_record = store
+        .get_identity(auth.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let device_record = store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+
+    // Validate receiver info
+    let receiver_key = decode_public_key(&auth.payload.receiver_public_key)
+        .map_err(|err| CommandError::invalid(format!("invalid receiver public key: {err}")))?;
+    let cert_fp = if auth.payload.receiver_cert_fingerprint.len() == 64 {
+        Some(auth.payload.receiver_cert_fingerprint.clone())
+    } else {
+        None
+    };
+
+    let (session_secret, session_public) = SessionSecretBytes::generate();
+    let session_key = crypto::derive_mock_session_key();
+    let mut task = TransferTask::new(
+        TransferDirection::Send,
+        None, // No code needed for direct send
+        files,
+        session_key,
+    );
+    task.session_secret = Some(session_secret);
+    task.public_key = Some(session_public);
+    task.identity_id = Some(auth.identity_id.clone());
+    task.identity_public_key = Some(identity_record.public_key.clone());
+    task.device_id = Some(auth.device_id.clone());
+    task.device_name = device_record.name.clone();
+    task.peer_public_key = Some(receiver_key);
+    task.cert_fingerprint = cert_fp;
+
+    // Set as LAN sender that connects to receiver (client mode)
+    task.lan_mode = Some(LanMode::Receiver {
+        host: auth.payload.host.clone(),
+        port: auth.payload.port,
+    });
+    // Mark as sender direction
+    task.direction = TransferDirection::Send;
+
+    let task = state.insert_task(task).await;
+
+    spawn_transfer_runner(&app, state.inner().clone(), task.task_id.clone());
+    log_simple_event(
+        &app,
+        "transfer.send_direct.requested",
+        Some(auth.identity_id.trim()),
+        Some(auth.device_id.trim()),
+        Some(task.task_id.as_str()),
+        json!({
+            "host": auth.payload.host,
+            "port": auth.payload.port,
+            "files": auth.payload.paths.len(),
+        }),
+    );
+
+    Ok(TaskResponse {
+        task_id: task.task_id,
+    })
+}
+
 #[tauri::command]
 pub async fn courier_receive(
     app: AppHandle,
@@ -629,6 +730,88 @@ pub async fn courier_connect_by_code(
     );
     Ok(TaskResponse {
         task_id: updated_task.task_id,
+    })
+}
+
+/// Advertise this device with a pairing code to mDNS.
+/// Other devices can discover this code via courier_list_senders.
+#[cfg(feature = "transport-quic")]
+#[tauri::command]
+pub async fn courier_advertise_receiver(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    store: State<'_, IdentityStore>,
+    auth: AuthenticatedPayload<AdvertiseReceiverPayload>,
+) -> Result<AdvertiseReceiverResponse, CommandError> {
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "advertise",
+    )?;
+
+    let save_dir_path = prepare_save_dir(&auth.payload.save_dir)?;
+    let identity_record = store
+        .get_identity(auth.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let device_record = store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+
+    // Generate pairing code and session keys
+    let code = crypto::generate_task_code(6);
+    let (session_secret, session_public_key) = SessionSecretBytes::generate();
+    let session_key = crypto::derive_mock_session_key();
+    let mut task = TransferTask::new(
+        TransferDirection::Receive,
+        Some(code.clone()),
+        Vec::new(),
+        session_key,
+    );
+    task.session_secret = Some(session_secret);
+    task.public_key = Some(session_public_key);
+    task.identity_id = Some(auth.identity_id.clone());
+    task.identity_public_key = Some(identity_record.public_key.clone());
+    task.device_id = Some(auth.device_id.clone());
+    task.device_name = device_record.name.clone();
+    task.save_dir = Some(save_dir_path);
+    task.lan_mode = Some(LanMode::Sender {
+        device_name: device_record.name.clone(),
+    });
+
+    let task = state.insert_task(task).await;
+    state.track_code(&code, &task.task_id).await;
+
+    spawn_transfer_runner(&app, state.inner().clone(), task.task_id.clone());
+
+    // Spawn background task to cleanup advertisement after timeout
+    let app_clone = app.clone();
+    let code_clone = code.clone();
+    let task_id_clone = task.task_id.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(180)).await;
+        let discovery = app_clone.state::<DiscoveryService>();
+        let _ = discovery.mdns().unregister(&code_clone).await;
+        emit_log(&app_clone, &task_id_clone, "Advertisement expired".into());
+    });
+
+    log_simple_event(
+        &app,
+        "receiver.advertised",
+        Some(auth.identity_id.trim()),
+        Some(auth.device_id.trim()),
+        Some(&task.task_id),
+        json!({
+            "code": code,
+        }),
+    );
+
+    Ok(AdvertiseReceiverResponse {
+        code,
+        task_id: task.task_id,
     })
 }
 
@@ -813,6 +996,103 @@ pub async fn courier_start_webrtc_receiver(
     })
 }
 
+#[cfg(feature = "transport-webrtc")]
+#[tauri::command]
+pub async fn courier_signaling_presence(
+    app: AppHandle,
+    store: State<'_, IdentityStore>,
+    security: State<'_, SecurityConfig>,
+    auth: AuthenticatedPayload<SignalingPresencePayload>,
+) -> Result<(), CommandError> {
+    verify_request(
+        &store,
+        auth.identity_id.as_str(),
+        auth.device_id.as_str(),
+        &auth.signature,
+        "signal",
+    )?;
+    let code = auth.payload.code.trim().to_ascii_uppercase();
+    if code.is_empty() {
+        return Err(CommandError::invalid("code is required"));
+    }
+    let identity_record = store
+        .get_identity(auth.identity_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(CommandError::not_found)?;
+    let device_record = store
+        .get_device(auth.identity_id.trim(), auth.device_id.trim())
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::invalid("device not registered"))?;
+
+    let signaling_url = Router::resolve_signaling_url(&app)
+        .ok_or_else(|| CommandError::route_unreachable("signaling url missing"))?;
+    let url = build_presence_signaling_url(
+        &signaling_url,
+        &code,
+        auth.device_id.trim(),
+        device_record.name.clone(),
+        &identity_record.public_key,
+    )?;
+
+    let signing_key = load_identity_signing_key(&app, auth.identity_id.trim());
+    if signing_key.is_none() && security.enforce_signature_verification {
+        return Err(CommandError::invalid("signing key missing for signaling"));
+    }
+    let signature = signing_key
+        .as_ref()
+        .map(|key| sign_presence_payload(&code, auth.device_id.trim(), key));
+
+    let (ws_stream, _) = connect_async(url)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("signaling connect failed: {err}")))?;
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+
+    let update = crate::signaling::SessionDesc {
+        session_id: code.clone(),
+        offer: None,
+        answer: None,
+        candidates: Vec::new(),
+        signer_device_id: None,
+        signer_device_name: None,
+        signer_public_key: None,
+        signature,
+    };
+    let text = serde_json::to_string(&update)
+        .map_err(|err| CommandError::route_unreachable(format!("signaling encode failed: {err}")))?;
+    ws_write
+        .send(Message::Text(text))
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("signaling send failed: {err}")))?;
+
+    let duration = auth.payload.duration_sec.unwrap_or(30).max(5);
+    let deadline = Instant::now() + Duration::from_secs(duration);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match timeout(remaining, ws_read.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if let Ok(desc) = serde_json::from_str::<crate::signaling::SessionDesc>(&text) {
+                    emit_peer_discovered(&app, &desc);
+                }
+            }
+            Ok(Some(Ok(Message::Close(_)))) => break,
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(err))) => {
+                return Err(CommandError::route_unreachable(format!(
+                    "signaling stream error: {err}"
+                )));
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    let _ = ws_write.send(Message::Close(None)).await;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn courier_list_senders(
     discovery: State<'_, DiscoveryService>,
@@ -933,6 +1213,36 @@ pub async fn security_get_config(
     security: State<'_, SecurityConfig>,
 ) -> Result<SecurityConfig, CommandError> {
     Ok(security.inner().clone())
+}
+
+#[tauri::command]
+pub async fn courier_recent_logs(
+    app: AppHandle,
+    limit: Option<usize>,
+) -> Result<Vec<String>, CommandError> {
+    let capped = limit.unwrap_or(200).min(1000);
+    let Some(log_path) = runtime_log_path(&app) else {
+        return Ok(Vec::new());
+    };
+    if !log_path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&log_path).map_err(CommandError::from)?;
+    let mut lines: Vec<String> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.to_string())
+        .collect();
+    if lines.len() > capped {
+        let start = lines.len() - capped;
+        lines = lines.split_off(start);
+    }
+    Ok(lines)
+}
+
+#[tauri::command]
+pub async fn courier_log_file_path(app: AppHandle) -> Result<Option<String>, CommandError> {
+    Ok(runtime_log_path(&app).map(|path| path.display().to_string()))
 }
 
 #[tauri::command]
@@ -2326,9 +2636,21 @@ async fn run_lan_transfer(
         .set_status(&task.task_id, TransferStatus::InProgress)
         .await;
 
-    match mode {
-        LanMode::Sender { .. } => run_lan_sender(app, state, task).await,
-        LanMode::Receiver { host, port } => run_lan_receiver(app, state, task, host, port).await,
+    match (&mode, &task.direction) {
+        // Original: server listens and sends files to connecting receiver
+        (LanMode::Sender { .. }, TransferDirection::Send) => run_lan_sender(app, state, task).await,
+        // Original: client connects and receives files from server
+        (LanMode::Receiver { host, port }, TransferDirection::Receive) => {
+            run_lan_receiver(app, state, task, host.clone(), *port).await
+        }
+        // NEW: server listens and receives files from connecting sender
+        (LanMode::Sender { .. }, TransferDirection::Receive) => {
+            run_lan_server_receiver(app, state, task).await
+        }
+        // NEW: client connects and sends files to server receiver
+        (LanMode::Receiver { host, port }, TransferDirection::Send) => {
+            run_lan_client_sender(app, state, task, host.clone(), *port).await
+        }
     }
 }
 
@@ -2911,6 +3233,546 @@ async fn run_lan_receiver(
     finalize_lan_success(&app, &state, &task_id, TransferRoute::Lan, bytes_received).await
 }
 
+/// Server that listens and receives files from a connecting sender client.
+/// Used by courier_advertise_receiver when a sender connects to send files.
+#[cfg(feature = "transport-quic")]
+async fn run_lan_server_receiver(
+    app: AppHandle,
+    state: SharedState,
+    task: TransferTask,
+) -> Result<(), CommandError> {
+    use crate::transport::quic::LanQuic;
+
+    let save_dir = task
+        .save_dir
+        .clone()
+        .ok_or_else(|| CommandError::invalid("save_dir missing for receive task"))?;
+    let task_id = task.task_id.clone();
+    let session_secret = task
+        .session_secret
+        .clone()
+        .ok_or_else(|| CommandError::invalid("receiver session secret missing"))?;
+    let receiver_public_key = task
+        .public_key
+        .clone()
+        .ok_or_else(|| CommandError::invalid("receiver public key missing"))?;
+    let settings = app.state::<ConfigStore>().get();
+    let historical_success = app
+        .try_state::<RouteMetricsRegistry>()
+        .and_then(|registry| registry.success_rate(&RouteKind::Lan));
+    let lan_streams = recommended_lan_streams(0, &settings.chunk_policy, historical_success);
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Pairing,
+            progress: Some(0.1),
+            bytes_sent: None,
+            bytes_total: None,
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            route_attempts: None,
+            message: Some("Waiting for sender to connect".into()),
+            resume: None,
+        },
+    );
+
+    let quic = LanQuic::with_streams(lan_streams)
+        .map_err(|err| CommandError::route_unreachable(err.to_string()))?;
+    let listener = quic
+        .bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan bind failed: {err}")))?;
+    let cert_fingerprint = quic.certificate_fingerprint();
+    state
+        .update_task(&task_id, |pending| {
+            pending.cert_fingerprint = Some(cert_fingerprint.clone());
+        })
+        .await;
+    let listen_addr = listener
+        .local_addr()
+        .map_err(|err| CommandError::route_unreachable(format!("lan addr failed: {err}")))?;
+    let interfaces = collect_lan_interfaces();
+    emit_log(
+        &app,
+        &task_id,
+        format!(
+            "LAN receiver listening on {} · IPs: {:?}",
+            listen_addr, interfaces
+        ),
+    );
+
+    // Register with mDNS so sender can discover us
+    if let Some(code) = task.code.clone() {
+        let device_label = task.device_name.clone();
+        let pub_hex = encode_public_key_hex(&receiver_public_key);
+        if let Some(discovery) = app.try_state::<DiscoveryService>() {
+            if let Err(err) = discovery.mdns().register_sender(
+                &code,
+                &task_id,
+                listen_addr.port(),
+                &interfaces,
+                device_label,
+                &pub_hex,
+                Some(&cert_fingerprint),
+            ).await {
+                emit_log(&app, &task_id, format!("mDNS registration failed: {}", err));
+            }
+        }
+    }
+
+    // Wait for sender to connect
+    let mut raw_stream = timeout(Duration::from_secs(120), listener.accept())
+        .await
+        .map_err(|_| CommandError::route_unreachable("sender did not connect in time"))?
+        .map_err(|err| CommandError::route_unreachable(format!("lan accept failed: {err}")))?;
+
+    // Sender sends SenderReady first (reversed handshake)
+    let hello = raw_stream.recv().await.map_err(|err| {
+        CommandError::route_unreachable(format!("lan handshake read failed: {err}"))
+    })?;
+    let sender_public = match hello {
+        Frame::Control(text) => match decode_control_message(&text)? {
+            LanControlMessage::SenderReady {
+                addresses,
+                port,
+                public_key,
+                cert_fingerprint: sender_cert_fp,
+            } => {
+                emit_log(
+                    &app,
+                    &task_id,
+                    format!("Sender connected from {:?}:{}", addresses, port),
+                );
+                // Verify sender cert fingerprint if expected
+                if let Some(expected_fp) = task.expected_cert_fingerprint.as_ref() {
+                    if expected_fp != &sender_cert_fp {
+                        return Err(CommandError::invalid("sender certificate fingerprint mismatch"));
+                    }
+                }
+                decode_public_key(&public_key).map_err(|err| {
+                    CommandError::invalid(format!("invalid sender public key: {err}"))
+                })?
+            }
+            other => {
+                return Err(CommandError::route_unreachable(format!(
+                    "unexpected control {:?} during handshake, expected SenderReady",
+                    other
+                )));
+            }
+        },
+        _ => {
+            return Err(CommandError::route_unreachable(
+                "sender did not initiate handshake",
+            ));
+        }
+    };
+
+    state
+        .update_task(&task_id, |pending| {
+            pending.peer_public_key = Some(sender_public.clone());
+        })
+        .await;
+
+    // Respond with ReceiverReady
+    raw_stream
+        .send(encode_control_message(&LanControlMessage::ReceiverReady {
+            public_key: encode_public_key_hex(&receiver_public_key),
+        })?)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan handshake failed: {err}")))?;
+
+    let shared = session_secret.derive_shared(&sender_public);
+    let mut stream = SecureStream::new(Box::new(raw_stream), SessionCipher::new(shared));
+
+    // Receive manifest from sender
+    let manifest_msg = stream.recv().await.map_err(|err| {
+        CommandError::route_unreachable(format!("failed to read manifest: {err}"))
+    })?;
+    let manifest = match manifest_msg {
+        Frame::Control(text) => match decode_control_message(&text)? {
+            LanControlMessage::Manifest { files } => files,
+            other => {
+                return Err(CommandError::route_unreachable(format!(
+                    "unexpected control {:?} when expecting manifest",
+                    other
+                )));
+            }
+        },
+        _ => {
+            return Err(CommandError::route_unreachable("sender did not provide manifest"));
+        }
+    };
+
+    let bytes_total: u64 = manifest.iter().map(|entry| entry.size).sum();
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Connecting,
+            progress: Some(0.2),
+            bytes_sent: Some(0),
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            route_attempts: None,
+            message: Some(format!("Receiving {} files", manifest.len())),
+            resume: None,
+        },
+    );
+
+    let mut bytes_received = 0u64;
+    let mut last_emit = Instant::now();
+    let start = Instant::now();
+    let mut manifest_iter = manifest.into_iter();
+    let mut active_file: Option<(String, File, u64, u64, PathBuf)> = None;
+    let mut received_files: Vec<TrackedFile> = Vec::new();
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Transferring,
+            progress: Some(0.3),
+            bytes_sent: Some(0),
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            route_attempts: None,
+            message: Some("Receiving data".into()),
+            resume: None,
+        },
+    );
+
+    loop {
+        let frame = stream
+            .recv()
+            .await
+            .map_err(|err| CommandError::route_unreachable(format!("lan receive failed: {err}")))?;
+        match frame {
+            Frame::Control(text) => match decode_control_message(&text)? {
+                LanControlMessage::FileStart { name, size } => {
+                    let entry = manifest_iter.next().unwrap_or(LanFileManifestEntry {
+                        name: name.clone(),
+                        size,
+                    });
+                    let dest = unique_destination_path(&save_dir, &entry.name);
+                    let file = File::create(&dest).await.map_err(|err| {
+                        CommandError::from_io(&err, format!("failed to create {}", dest.display()))
+                    })?;
+                    emit_log(&app, &task_id, format!("Receiving {} ({} bytes)", entry.name, entry.size));
+                    active_file = Some((entry.name, file, 0, entry.size, dest));
+                }
+                LanControlMessage::FileEnd { name } => {
+                    if let Some((current_name, mut file, written, _target, dest)) = active_file.take() {
+                        file.flush().await.map_err(|err| {
+                            CommandError::from_io(&err, format!("failed to flush {}", current_name))
+                        })?;
+                        emit_log(&app, &task_id, format!("Saved {} ({} bytes) to {}", current_name, written, dest.display()));
+                        received_files.push(TrackedFile {
+                            name: current_name,
+                            size: written,
+                            path: dest,
+                        });
+                    } else {
+                        emit_log(&app, &task_id, format!("FileEnd for {} without active file", name));
+                    }
+                }
+                LanControlMessage::Done => {
+                    emit_log(&app, &task_id, "Transfer completed".into());
+                    break;
+                }
+                other => {
+                    emit_log(&app, &task_id, format!("Unexpected control message: {:?}", other));
+                }
+            },
+            Frame::Data(data) => {
+                if let Some((ref _name, ref mut file, ref mut written, target, ref _dest)) = active_file {
+                    file.write_all(&data).await.map_err(|err| {
+                        CommandError::from_io(&err, "failed to write chunk")
+                    })?;
+                    *written += data.len() as u64;
+                    bytes_received += data.len() as u64;
+                    if last_emit.elapsed() > Duration::from_millis(350) {
+                        let elapsed = start.elapsed().as_secs_f32().max(0.001);
+                        let speed = (bytes_received as f32 / elapsed) as u64;
+                        let progress = 0.3 + 0.55 * ((bytes_received as f32 / bytes_total as f32).min(1.0));
+                        emit_progress(
+                            &app,
+                            TransferProgressEvent {
+                                task_id: task_id.clone(),
+                                phase: TransferPhase::Transferring,
+                                progress: Some(progress),
+                                bytes_sent: Some(bytes_received),
+                                bytes_total: Some(bytes_total),
+                                speed_bps: Some(speed),
+                                route: Some(TransferRoute::Lan),
+                                route_attempts: None,
+                                message: Some(format!("Receiving... {}/{} bytes", *written, target)),
+                                resume: None,
+                            },
+                        );
+                        last_emit = Instant::now();
+                    }
+                }
+            }
+        }
+    }
+
+    stream.close().await.ok();
+
+    // Unregister from mDNS
+    if let Some(code) = task.code.as_ref() {
+        if let Some(discovery) = app.try_state::<DiscoveryService>() {
+            let _ = discovery.mdns().unregister(code).await;
+        }
+    }
+
+    let received_clone = received_files.clone();
+    state
+        .update_task(&task_id, |pending| {
+            pending.files = received_clone;
+        })
+        .await;
+
+    emit_log(&app, &task_id, format!("Received {} bytes via LAN", bytes_received));
+    finalize_lan_success(&app, &state, &task_id, TransferRoute::Lan, bytes_received).await
+}
+
+/// Client that connects to a server receiver and sends files.
+/// Used by courier_send_to_receiver to send files to an advertised receiver.
+#[cfg(feature = "transport-quic")]
+async fn run_lan_client_sender(
+    app: AppHandle,
+    state: SharedState,
+    task: TransferTask,
+    host: String,
+    port: u16,
+) -> Result<(), CommandError> {
+    use crate::transport::quic::LanQuic;
+
+    if task.files.is_empty() {
+        return Err(CommandError::invalid("no files to send"));
+    }
+    let task_id = task.task_id.clone();
+    let session_secret = task
+        .session_secret
+        .clone()
+        .ok_or_else(|| CommandError::invalid("sender session secret missing"))?;
+    let sender_public_key = task
+        .public_key
+        .clone()
+        .ok_or_else(|| CommandError::invalid("sender public key missing"))?;
+    let expected_receiver_key = task
+        .peer_public_key
+        .clone()
+        .ok_or_else(|| CommandError::invalid("receiver public key missing"))?;
+    let files = task.files.clone();
+    let bytes_total: u64 = files.iter().map(|f| f.size).sum();
+
+    let ip: IpAddr = host
+        .parse()
+        .map_err(|_| CommandError::invalid("invalid host address"))?;
+    let remote_addr = SocketAddr::new(ip, port);
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Preparing,
+            progress: Some(0.05),
+            bytes_sent: None,
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            route_attempts: None,
+            message: Some(format!("Connecting to receiver {}", remote_addr)),
+            resume: None,
+        },
+    );
+
+    let settings = app.state::<ConfigStore>().get();
+    let historical_success = app
+        .try_state::<RouteMetricsRegistry>()
+        .and_then(|registry| registry.success_rate(&RouteKind::Lan));
+    let lan_streams = recommended_lan_streams(bytes_total, &settings.chunk_policy, historical_success);
+
+    let quic = LanQuic::with_streams(lan_streams)
+        .map_err(|err| CommandError::route_unreachable(err.to_string()))?;
+    let cert_fingerprint = quic.certificate_fingerprint();
+    let interfaces = collect_lan_interfaces();
+
+    let mut raw_stream = quic
+        .connect(remote_addr)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan connect failed: {err}")))?;
+
+    emit_log(&app, &task_id, format!("Connected to receiver at {}", remote_addr));
+
+    // Sender sends SenderReady first (reversed handshake)
+    raw_stream
+        .send(encode_control_message(&LanControlMessage::SenderReady {
+            addresses: interfaces,
+            port: 0, // Not listening, we're a client
+            public_key: encode_public_key_hex(&sender_public_key),
+            cert_fingerprint: cert_fingerprint.clone(),
+        })?)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan handshake failed: {err}")))?;
+
+    // Wait for ReceiverReady response
+    let ready = raw_stream.recv().await.map_err(|err| {
+        CommandError::route_unreachable(format!("lan handshake read failed: {err}"))
+    })?;
+    let receiver_public = match ready {
+        Frame::Control(text) => match decode_control_message(&text)? {
+            LanControlMessage::ReceiverReady { public_key } => {
+                let recv_key = decode_public_key(&public_key).map_err(|err| {
+                    CommandError::invalid(format!("invalid receiver public key: {err}"))
+                })?;
+                if recv_key != expected_receiver_key {
+                    return Err(CommandError::invalid(
+                        "receiver public key mismatch, please verify the connection",
+                    ));
+                }
+                recv_key
+            }
+            other => {
+                return Err(CommandError::route_unreachable(format!(
+                    "unexpected control {:?} during handshake, expected ReceiverReady",
+                    other
+                )));
+            }
+        },
+        _ => {
+            return Err(CommandError::route_unreachable(
+                "receiver did not respond to handshake",
+            ));
+        }
+    };
+
+    let shared = session_secret.derive_shared(&receiver_public);
+    let mut stream = SecureStream::new(Box::new(raw_stream), SessionCipher::new(shared));
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Connecting,
+            progress: Some(0.2),
+            bytes_sent: None,
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            route_attempts: None,
+            message: Some("Connected to receiver".into()),
+            resume: None,
+        },
+    );
+
+    // Send file manifest
+    let manifest: Vec<LanFileManifestEntry> = files
+        .iter()
+        .map(|file| LanFileManifestEntry {
+            name: file.name.clone(),
+            size: file.size,
+        })
+        .collect();
+    stream
+        .send(encode_control_message(&LanControlMessage::Manifest {
+            files: manifest,
+        })?)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+
+    let mut bytes_sent = 0u64;
+    let mut last_emit = Instant::now();
+    let started = Instant::now();
+
+    emit_progress(
+        &app,
+        TransferProgressEvent {
+            task_id: task_id.clone(),
+            phase: TransferPhase::Transferring,
+            progress: Some(0.3),
+            bytes_sent: Some(0),
+            bytes_total: Some(bytes_total),
+            speed_bps: None,
+            route: Some(TransferRoute::Lan),
+            route_attempts: None,
+            message: Some("Sending files".into()),
+            resume: None,
+        },
+    );
+
+    for file in &files {
+        emit_log(&app, &task_id, format!("Streaming {} ({} bytes)", file.name, file.size));
+        stream
+            .send(encode_control_message(&LanControlMessage::FileStart {
+                name: file.name.clone(),
+                size: file.size,
+            })?)
+            .await
+            .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+
+        let mut reader = File::open(&file.path).await.map_err(|err| {
+            CommandError::from_io(&err, format!("failed to open {}", file.path.display()))
+        })?;
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .await
+                .map_err(|err| CommandError::from_io(&err, "failed to read file chunk"))?;
+            if read == 0 {
+                break;
+            }
+            stream
+                .send(Frame::Data(buffer[..read].to_vec()))
+                .await
+                .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+            bytes_sent += read as u64;
+            if last_emit.elapsed() > Duration::from_millis(350) {
+                let elapsed = started.elapsed().as_secs_f32().max(0.001);
+                let speed = (bytes_sent as f32 / elapsed) as u64;
+                let progress = 0.3 + 0.55 * ((bytes_sent as f32 / bytes_total as f32).min(1.0));
+                emit_progress(
+                    &app,
+                    TransferProgressEvent {
+                        task_id: task_id.clone(),
+                        phase: TransferPhase::Transferring,
+                        progress: Some(progress),
+                        bytes_sent: Some(bytes_sent),
+                        bytes_total: Some(bytes_total),
+                        speed_bps: Some(speed),
+                        route: Some(TransferRoute::Lan),
+                        route_attempts: None,
+                        message: Some(format!("Sending {}", file.name)),
+                        resume: None,
+                    },
+                );
+                last_emit = Instant::now();
+            }
+        }
+        stream
+            .send(encode_control_message(&LanControlMessage::FileEnd {
+                name: file.name.clone(),
+            })?)
+            .await
+            .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+    }
+
+    stream
+        .send(encode_control_message(&LanControlMessage::Done)?)
+        .await
+        .map_err(|err| CommandError::route_unreachable(format!("lan send failed: {err}")))?;
+    stream.close().await.ok();
+
+    emit_log(&app, &task_id, format!("Delivered {} bytes via LAN", bytes_sent));
+    finalize_lan_success(&app, &state, &task_id, TransferRoute::Lan, bytes_sent).await
+}
+
 fn emit_event<T>(app: &AppHandle, event: &str, payload: &T)
 where
     T: serde::Serialize + Clone,
@@ -2957,6 +3819,8 @@ fn emit_progress(app: &AppHandle, payload: TransferProgressEvent) {
 }
 
 fn emit_log(app: &AppHandle, task_id: &str, message: String) {
+    info!("[transfer_log][{}] {}", task_id, message);
+    append_runtime_log(app, task_id, &message);
     emit_event(
         app,
         "transfer_log",
@@ -2968,9 +3832,45 @@ fn emit_log(app: &AppHandle, task_id: &str, message: String) {
 }
 
 #[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct LogPayload {
     task_id: String,
     message: String,
+}
+
+fn runtime_log_path(app: &AppHandle) -> Option<PathBuf> {
+    let mut base = app.path().app_data_dir().ok()?;
+    base.push("logs");
+    base.push("runtime.log");
+    Some(base)
+}
+
+fn append_runtime_log(app: &AppHandle, task_id: &str, message: &str) {
+    let Some(path) = runtime_log_path(app) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            warn!("failed to create runtime log dir: {err}");
+            return;
+        }
+    }
+    let mut file = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) => {
+            warn!("failed to open runtime log file {}: {err}", path.display());
+            return;
+        }
+    };
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let line = format!("{timestamp} [{task_id}] {message}");
+    if let Err(err) = writeln!(file, "{}", line) {
+        warn!("failed to write runtime log: {err}");
+    }
 }
 
 
@@ -3334,17 +4234,161 @@ fn decode_control_message(payload: &str) -> Result<LanControlMessage, CommandErr
 }
 
 fn collect_lan_interfaces() -> Vec<String> {
+    let is_preferred_lan = |ip: &std::net::Ipv4Addr| -> bool {
+        let octets = ip.octets();
+        // 192.168.x.x - most common home/office LAN
+        if octets[0] == 192 && octets[1] == 168 {
+            return true;
+        }
+        // 10.x.x.x - private network (but lower priority as often VPN)
+        if octets[0] == 10 {
+            return true;
+        }
+        // 172.16.x.x - 172.31.x.x - private network
+        if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
+            return true;
+        }
+        false
+    };
+
+    let is_vpn_or_virtual = |ip: &std::net::Ipv4Addr| -> bool {
+        let octets = ip.octets();
+        // 198.18.x.x / 198.19.x.x - benchmarking, often used by VPN/proxy (Surge, etc.)
+        if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+            return true;
+        }
+        // 100.64.x.x - 100.127.x.x - Carrier-grade NAT
+        if octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127 {
+            return true;
+        }
+        false
+    };
+
     get_if_addrs()
         .map(|ifaces| {
-            ifaces
-                .into_iter()
-                .filter_map(|iface| match iface.addr {
-                    IfAddr::V4(v4) if !v4.ip.is_loopback() => Some(v4.ip.to_string()),
-                    _ => None,
-                })
-                .collect()
+            let mut preferred: Vec<String> = Vec::new();
+            let mut others: Vec<String> = Vec::new();
+            let mut skipped_vpn: Vec<String> = Vec::new();
+
+            for iface in ifaces {
+                if let IfAddr::V4(v4) = iface.addr {
+                    if v4.ip.is_loopback() {
+                        continue;
+                    }
+                    // Skip VPN/virtual interfaces entirely for mDNS registration
+                    if is_vpn_or_virtual(&v4.ip) {
+                        skipped_vpn.push(format!("{}({})", iface.name, v4.ip));
+                        continue;
+                    }
+                    if is_preferred_lan(&v4.ip) {
+                        preferred.push(v4.ip.to_string());
+                    } else {
+                        others.push(v4.ip.to_string());
+                    }
+                }
+            }
+
+            info!("[mDNS] 网络接口 - 优先LAN: {:?}, 其他: {:?}, 跳过VPN: {:?}",
+                preferred, others, skipped_vpn);
+
+            // Preferred LAN IPs first
+            preferred.extend(others);
+            preferred
         })
         .unwrap_or_default()
+}
+
+#[cfg(feature = "transport-webrtc")]
+fn build_presence_signaling_url(
+    base: &str,
+    session_id: &str,
+    device_id: &str,
+    device_name: Option<String>,
+    public_key: &str,
+) -> Result<Url, CommandError> {
+    let mut url = Url::parse(base)
+        .map_err(|err| CommandError::route_unreachable(format!("invalid signaling url '{base}': {err}")))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("sessionId", session_id);
+        pairs.append_pair("deviceId", device_id);
+        if let Some(name) = device_name.as_ref().filter(|value| !value.trim().is_empty()) {
+            pairs.append_pair("deviceName", name);
+        }
+        if !public_key.trim().is_empty() {
+            pairs.append_pair("publicKey", public_key);
+        }
+    }
+    Ok(url)
+}
+
+#[cfg(feature = "transport-webrtc")]
+fn load_identity_signing_key(app: &AppHandle, identity_id: &str) -> Option<SigningKey> {
+    let mut path = app.path().app_data_dir().ok()?;
+    path.push("identity");
+    path.push(format!("{identity_id}.priv"));
+    let contents = fs::read_to_string(&path).ok()?;
+    let trimmed = contents.trim();
+    let decoded = hex::decode(trimmed).ok()?;
+    if decoded.len() != 32 {
+        warn!(
+            "identity private key for '{}' has invalid length ({} bytes)",
+            identity_id,
+            decoded.len()
+        );
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&decoded);
+    Some(SigningKey::from_bytes(&bytes))
+}
+
+#[cfg(feature = "transport-webrtc")]
+fn sign_presence_payload(session_id: &str, device_id: &str, signing_key: &SigningKey) -> String {
+    let payload = format!(
+        "{domain}\nsession:{session}\ndevice:{device}\noffer:\nanswer:\nice:[]",
+        domain = SIGNALING_DOMAIN,
+        session = session_id,
+        device = device_id
+    );
+    let signature = signing_key.sign(payload.as_bytes());
+    hex::encode(signature.to_bytes())
+}
+
+#[cfg(feature = "transport-webrtc")]
+fn emit_peer_discovered(app: &AppHandle, desc: &crate::signaling::SessionDesc) {
+    if let Some(device_id) = desc.signer_device_id.as_ref() {
+        let fingerprint = desc
+            .signer_public_key
+            .as_ref()
+            .and_then(|hex| fingerprint_from_public_key_hex(hex));
+        let payload = json!({
+            "sessionId": desc.session_id,
+            "deviceId": device_id,
+            "deviceName": desc.signer_device_name,
+            "publicKey": desc.signer_public_key,
+            "fingerprint": fingerprint,
+            "verified": desc.signature.is_some(),
+        });
+        if let Err(err) = app.emit("peer_discovered", payload) {
+            warn!("failed to emit peer_discovered: {err}");
+        }
+    }
+}
+
+#[cfg(feature = "transport-webrtc")]
+fn fingerprint_from_public_key_hex(hex_str: &str) -> Option<String> {
+    let bytes = hex::decode(hex_str).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(bytes);
+    let formatted: Vec<String> = digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{:02X}", byte))
+        .collect();
+    Some(formatted.join(":"))
 }
 
 fn unique_destination_path(base: &Path, file_name: &str) -> PathBuf {

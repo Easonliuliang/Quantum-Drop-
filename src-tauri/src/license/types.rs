@@ -42,7 +42,7 @@ impl LicenseLimits {
         Self {
             p2p_monthly_quota: Some(10),
             max_file_size_mb: Some(2048), // 2GB
-            max_devices: Some(3),
+            max_devices: Some(10),
             resume_enabled: false,
             history_days: Some(7),
         }

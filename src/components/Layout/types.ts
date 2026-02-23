@@ -1,1 +1,1 @@
-export type Page = "send" | "identity" | "webrtc" | "control";
+export type Page = "send" | "receive" | "devices" | "settings";

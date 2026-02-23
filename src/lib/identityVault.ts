@@ -17,6 +17,7 @@ import {
 const STORAGE_PREFIX = "courier.identity";
 const KEY_PRIVATE = (identityId: string) => `${STORAGE_PREFIX}.${identityId}.private`;
 const KEY_PUBLIC = (identityId: string) => `${STORAGE_PREFIX}.${identityId}.public`;
+const KEY_DEVICE = (identityId: string) => `${STORAGE_PREFIX}.${identityId}.device`;
 const KEY_LAST_ID = `${STORAGE_PREFIX}.last`;
 
 // 检测是否在 Tauri 环境中
@@ -151,6 +152,7 @@ export const forgetIdentity = async (identityId: string) => {
     try {
       const privatePath = await pathFor(`${identityId}.priv`);
       const publicPath = await pathFor(`${identityId}.pub`);
+      const devicePath = await pathFor(`${identityId}.device`);
 
       const privExists = await exists(privatePath);
       if (privExists) {
@@ -161,6 +163,11 @@ export const forgetIdentity = async (identityId: string) => {
       if (pubExists) {
         await remove(publicPath);
       }
+
+      const deviceExists = await exists(devicePath);
+      if (deviceExists) {
+        await remove(devicePath);
+      }
     } catch (error) {
       console.warn("forgetIdentity: remove files failed", error);
     }
@@ -169,6 +176,7 @@ export const forgetIdentity = async (identityId: string) => {
   if (typeof window !== "undefined") {
     writeLocal(KEY_PRIVATE(identityId), null);
     writeLocal(KEY_PUBLIC(identityId), null);
+    writeLocal(KEY_DEVICE(identityId), null);
   }
 };
 
@@ -212,6 +220,51 @@ export const rememberLastIdentityId = async (identityId: string) => {
   } else if (typeof window !== "undefined") {
     writeLocal(KEY_LAST_ID, identityId);
   }
+};
+
+export const rememberDeviceId = async (identityId: string, deviceId: string) => {
+  if (identityId.trim().length === 0 || deviceId.trim().length === 0) {
+    return;
+  }
+  if (isTauri()) {
+    try {
+      const devicePath = await pathFor(`${identityId}.device`);
+      await writeTextFile(devicePath, deviceId);
+      return;
+    } catch (err) {
+      console.warn("rememberDeviceId", err);
+    }
+  }
+  if (typeof window !== "undefined") {
+    writeLocal(KEY_DEVICE(identityId), deviceId);
+  }
+};
+
+export const loadDeviceId = async (identityId: string): Promise<string | null> => {
+  if (identityId.trim().length === 0) {
+    return null;
+  }
+  if (isTauri()) {
+    try {
+      const devicePath = await pathFor(`${identityId}.device`);
+      const fileExists = await exists(devicePath);
+      if (!fileExists) {
+        return null;
+      }
+      const content = await readTextFile(devicePath);
+      return content?.trim() || null;
+    } catch {
+      // Fallback to localStorage
+      if (typeof window !== "undefined") {
+        return readLocal(KEY_DEVICE(identityId));
+      }
+      return null;
+    }
+  }
+  if (typeof window === "undefined") {
+    return null;
+  }
+  return readLocal(KEY_DEVICE(identityId));
 };
 
 export const clearLastIdentityId = async () => {

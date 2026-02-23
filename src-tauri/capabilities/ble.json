@@ -1,9 +1,0 @@
-{
-  "$schema": "../../schemas/capability.json",
-  "identifier": "ble",
-  "description": "BLE discovery capability",
-  "windows": ["main"],
-  "permissions": [
-    "ble:default"
-  ]
-}

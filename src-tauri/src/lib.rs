@@ -17,13 +17,18 @@ use commands::{
     audit_get_logs, auth_heartbeat_device, auth_list_devices, auth_load_entitlement,
     auth_register_device, auth_register_identity, auth_update_device, auth_update_entitlement,
     courier_cancel, courier_connect_by_code, courier_generate_code, courier_list_senders,
-    courier_p2p_smoke_test, courier_receive, courier_relay_smoke_test, courier_resume,
-    courier_route_metrics, courier_send, export_pot, license_activate, license_get_status,
-    list_transfers, load_settings, security_get_config, transfer_stats, update_settings, verify_pot,
+    courier_log_file_path, courier_p2p_smoke_test, courier_receive, courier_recent_logs,
+    courier_relay_smoke_test, courier_resume, courier_route_metrics, courier_send, export_pot,
+    license_activate, license_get_status, list_transfers, load_settings, security_get_config,
+    transfer_stats, update_settings, verify_pot,
     SharedState,
 };
+#[cfg(feature = "transport-quic")]
+use commands::{courier_advertise_receiver, courier_send_to_receiver};
 #[cfg(feature = "transport-webrtc")]
-use commands::{courier_start_webrtc_receiver, courier_start_webrtc_sender};
+use commands::{
+    courier_signaling_presence, courier_start_webrtc_receiver, courier_start_webrtc_sender,
+};
 use config::ConfigStore;
 use license::LicenseManager;
 use metrics::RouteMetricsRegistry;
@@ -103,8 +108,10 @@ pub fn run() {
                     health_check,
                     courier_generate_code,
                     courier_send,
+                    courier_send_to_receiver,
                     courier_receive,
                     courier_connect_by_code,
+                    courier_advertise_receiver,
                     courier_cancel,
                     courier_p2p_smoke_test,
                     courier_relay_smoke_test,
@@ -112,6 +119,8 @@ pub fn run() {
                     courier_route_metrics,
                     export_pot,
                     courier_list_senders,
+                    courier_recent_logs,
+                    courier_log_file_path,
                     verify_pot,
                     security_get_config,
                     list_transfers,
@@ -119,6 +128,7 @@ pub fn run() {
                     update_settings,
                     courier_start_webrtc_sender,
                     courier_start_webrtc_receiver,
+                    courier_signaling_presence,
                     license_get_status,
                     license_activate,
                     transfer_stats,
@@ -138,8 +148,10 @@ pub fn run() {
                     health_check,
                     courier_generate_code,
                     courier_send,
+                    courier_send_to_receiver,
                     courier_receive,
                     courier_connect_by_code,
+                    courier_advertise_receiver,
                     courier_cancel,
                     courier_p2p_smoke_test,
                     courier_relay_smoke_test,
@@ -147,6 +159,8 @@ pub fn run() {
                     courier_route_metrics,
                     export_pot,
                     courier_list_senders,
+                    courier_recent_logs,
+                    courier_log_file_path,
                     verify_pot,
                     security_get_config,
                     list_transfers,

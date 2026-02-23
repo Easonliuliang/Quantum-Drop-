@@ -2,9 +2,11 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { downloadDir } from "@tauri-apps/api/path";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { QuantumBackground } from "./components/QuantumBackground";
 import { useI18n } from "./lib/i18n";
 import { useAuth } from "./hooks/useAuth";
+import { Friend, loadFriends, addFriend, isFriend } from "./lib/friendsStore";
 import "./styles.css";
 
 // 配对码格式验证
@@ -25,6 +27,10 @@ interface Device {
   online: boolean;
   route: "lan" | "p2p" | "ble";
   publicKey?: string;
+  host?: string;
+  port?: number;
+  certFingerprint?: string;
+  code?: string;
 }
 
 interface TransferProgress {
@@ -38,20 +44,30 @@ interface TransferProgress {
   message?: string;
 }
 
-interface PeerInfo {
-  code: string;
-  deviceId?: string;
-  deviceName?: string;
-  publicKey?: string;
-  route?: string;
+interface TransferLogPayload {
+  taskId: string;
+  message: string;
 }
 
-interface GenerateCodeResponse {
-  taskId?: string;
-  task_id?: string;
+interface PeerDiscoveredPayload {
+  sessionId: string;
+  deviceId: string;
+  deviceName?: string | null;
+  publicKey?: string | null;
+  fingerprint?: string | null;
+  verified: boolean;
+}
+
+interface PeerInfo {
   code: string;
-  publicKey?: string;
-  public_key?: string;
+  deviceName?: string;
+  deviceId?: string;
+  host: string;
+  port: number;
+  publicKey: string;
+  certFingerprint?: string;
+  discoveredVia?: string;
+  route?: string;
 }
 
 // ============ 工具函数 ============
@@ -101,6 +117,136 @@ export default function App() {
   const [transferTarget, setTransferTarget] = useState<string | null>(null);
   const [progress, setProgress] = useState<TransferProgress | null>(null);
   const [transferComplete, setTransferComplete] = useState<string | null>(null);
+  const [transferLogs, setTransferLogs] = useState<{ id: string; message: string }[]>([]);
+  const [logFilePath, setLogFilePath] = useState<string | null>(null);
+
+  const sendDirectToReceiver = useCallback(
+    async (
+      paths: string[],
+      target: { host: string; port: number; publicKey: string; certFingerprint?: string },
+      targetId: string
+    ) => {
+      if (!auth.ready || !auth.identity || !auth.device) {
+        console.error("身份验证未就绪");
+        setProgress({
+          taskId: "",
+          phase: "error",
+          message: "身份验证未就绪，请刷新应用重试",
+        });
+        return;
+      }
+
+      try {
+        setTransferring(true);
+        setTransferTarget(targetId);
+        setProgress({ taskId: "", phase: "connecting", message: "正在连接到接收方..." });
+
+        const sendAuth = await auth.createAuthPayload("send", {
+          paths,
+          host: target.host,
+          port: target.port,
+          receiverPublicKey: target.publicKey,
+          receiverCertFingerprint: target.certFingerprint || "",
+        });
+
+        const response = await invoke<{ taskId: string }>("courier_send_to_receiver", {
+          auth: sendAuth,
+        });
+
+        console.log("[直连发送] 任务已启动:", response.taskId);
+        setProgress({ taskId: response.taskId, phase: "transferring", message: "正在发送文件..." });
+      } catch (err) {
+        console.error("[直连发送] 失败:", err);
+        const errMsg = err instanceof Error ? err.message : typeof err === "object" ? JSON.stringify(err) : String(err);
+        setProgress({ taskId: "", phase: "error", message: errMsg });
+        setTransferring(false);
+        setTransferTarget(null);
+      }
+    },
+    [auth]
+  );
+
+  const startSignalingPresence = useCallback(
+    async (code: string, durationSec = 30) => {
+      if (!auth.ready || !auth.identity || !auth.device) {
+        return;
+      }
+      try {
+        const presenceAuth = await auth.createAuthPayload("signal", {
+          code: code.trim().toUpperCase(),
+          durationSec,
+        });
+        await invoke("courier_signaling_presence", {
+          auth: presenceAuth,
+        });
+      } catch (err) {
+        console.warn("[信令] presence 失败:", err);
+      }
+    },
+    [auth]
+  );
+
+  const startWebRtcReceiver = useCallback(
+    async (code: string) => {
+      if (!auth.ready || !auth.identity || !auth.device) {
+        return;
+      }
+      const normalizedCode = code.trim().toUpperCase();
+      if (webrtcReceiverCodeRef.current === normalizedCode) {
+        return;
+      }
+      webrtcReceiverCodeRef.current = normalizedCode;
+      try {
+        const saveDir = await downloadDir();
+        const receiveAuth = await auth.createAuthPayload("webrtc_receive", {
+          code: normalizedCode,
+          saveDir,
+          devicePublicKey: auth.identity.publicKey,
+          deviceName: auth.device.name || auth.device.deviceId,
+        });
+        await invoke("courier_start_webrtc_receiver", { auth: receiveAuth });
+      } catch (err) {
+        console.warn("[WebRTC] 接收监听失败:", err);
+      }
+    },
+    [auth]
+  );
+
+  const sendViaWebRtc = useCallback(
+    async (code: string, paths: string[]) => {
+      if (!auth.ready || !auth.identity || !auth.device) {
+        console.error("身份验证未就绪");
+        setProgress({
+          taskId: "",
+          phase: "error",
+          message: "身份验证未就绪，请刷新应用重试",
+        });
+        return;
+      }
+      const normalizedCode = code.trim().toUpperCase();
+      try {
+        setTransferring(true);
+        setProgress({ taskId: "", phase: "connecting", message: "正在连接跨网传输..." });
+        const sendAuth = await auth.createAuthPayload("webrtc_send", {
+          code: normalizedCode,
+          filePaths: paths,
+          devicePublicKey: auth.identity.publicKey,
+          deviceName: auth.device.name || auth.device.deviceId,
+        });
+        const response = await invoke<{ taskId: string }>("courier_start_webrtc_sender", {
+          auth: sendAuth,
+        });
+        setProgress({ taskId: response.taskId, phase: "transferring", message: "正在发送文件..." });
+      } catch (err) {
+        console.error("[WebRTC] 发送失败:", err);
+        const errMsg = err instanceof Error ? err.message : typeof err === "object" ? JSON.stringify(err) : String(err);
+        setProgress({ taskId: "", phase: "error", message: errMsg });
+        setTransferring(false);
+        setTransferTarget(null);
+      }
+    },
+    [auth]
+  );
 
   // 拖拽状态
   const [isDragging, setIsDragging] = useState(false);
@@ -117,6 +263,20 @@ export default function App() {
   const [inputCode, setInputCode] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [pendingConnectCode, setPendingConnectCode] = useState<string | null>(null);
+
+  // 好友系统
+  const [friends, setFriends] = useState<Friend[]>([]);
+  const [connectedPeer, setConnectedPeer] = useState<{
+    publicKey?: string;
+    deviceName: string;
+    host?: string;
+    port?: number;
+    certFingerprint?: string;
+    code?: string;
+    route?: "lan" | "p2p";
+  } | null>(null);
+  const [showConnectOptions, setShowConnectOptions] = useState(false);
 
   // 待发送的文件
   const pendingFilesRef = useRef<string[]>([]);
@@ -160,16 +320,68 @@ export default function App() {
 
   // ============ 生成配对码 ============
 
+  interface AdvertiseResponse {
+    code: string;
+    taskId: string;
+  }
+
+  const isGeneratingCodeRef = useRef(false);
+  const presenceCodeRef = useRef<string | null>(null);
+  const webrtcReceiverCodeRef = useRef<string | null>(null);
+
   const generateMyCode = useCallback(async () => {
-    // 生成本地临时码（用于显示，真正的配对码在发送时生成）
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let code = "";
-    for (let i = 0; i < 6; i++) {
-      code += chars[Math.floor(Math.random() * chars.length)];
+    // 防止重复调用
+    if (isGeneratingCodeRef.current) return;
+    isGeneratingCodeRef.current = true;
+
+    console.log("[配对码] 开始生成, auth.ready=", auth.ready, "identity=", !!auth.identity, "device=", !!auth.device);
+
+    try {
+      if (!auth.ready || !auth.identity || !auth.device) {
+        // 如果身份未就绪，生成临时显示码
+        console.warn("[配对码] 身份未就绪，生成临时显示码（不会广播到 mDNS）");
+        const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        let code = "";
+        for (let i = 0; i < 6; i++) {
+          code += chars[Math.floor(Math.random() * chars.length)];
+        }
+        setMyCode(code);
+        setCodeExpiresAt(Date.now() + 180000);
+        return;
+      }
+
+      // 获取保存目录
+      const saveDir = await downloadDir();
+      console.log("[配对码] 保存目录:", saveDir);
+
+      // 调用后端注册配对码到 mDNS
+      const advertiseAuth = await auth.createAuthPayload("advertise", {
+        saveDir,
+      });
+      console.log("[配对码] 调用 courier_advertise_receiver...");
+
+      const response = await invoke<AdvertiseResponse>("courier_advertise_receiver", {
+        auth: advertiseAuth,
+      });
+
+      console.log("[配对码] mDNS 注册成功, code=", response.code, "taskId=", response.taskId);
+      setMyCode(response.code);
+      setCodeExpiresAt(Date.now() + 180000); // 3分钟过期
+    } catch (err) {
+      console.error("[配对码] 生成失败:", err);
+      // 失败时生成临时显示码
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let code = "";
+      for (let i = 0; i < 6; i++) {
+        code += chars[Math.floor(Math.random() * chars.length)];
+      }
+      console.warn("[配对码] 使用临时显示码（不会广播到 mDNS）:", code);
+      setMyCode(code);
+      setCodeExpiresAt(Date.now() + 180000);
+    } finally {
+      isGeneratingCodeRef.current = false;
     }
-    setMyCode(code);
-    setCodeExpiresAt(Date.now() + 180000);
-  }, []);
+  }, [auth.ready, auth.identity, auth.device, auth.createAuthPayload]);
 
   // ============ 发现设备 ============
 
@@ -184,6 +396,10 @@ export default function App() {
         online: true,
         route: (peer.route as Device["route"]) || "lan",
         publicKey: peer.publicKey,
+        host: peer.host,
+        port: peer.port,
+        certFingerprint: peer.certFingerprint,
+        code: peer.code,
       }));
       setDevices(newDevices);
     } catch (err) {
@@ -197,56 +413,38 @@ export default function App() {
 
   const sendFiles = useCallback(async (deviceId: string, filePaths: string[]) => {
     if (filePaths.length === 0) return;
-    if (!auth.ready || !auth.identity || !auth.device) {
-      console.error("身份验证未就绪");
-      setProgress({
-        taskId: "",
-        phase: "error",
-        message: "身份验证未就绪，请刷新应用重试",
-      });
+    const device = devices.find((d) => d.id === deviceId);
+
+    if (device?.host && device?.port && device?.publicKey) {
+      setTransferTarget(deviceId);
+      await sendDirectToReceiver(
+        filePaths,
+        {
+          host: device.host,
+          port: device.port,
+          publicKey: device.publicKey,
+          certFingerprint: device.certFingerprint,
+        },
+        deviceId
+      );
       return;
     }
 
-    setTransferring(true);
-    setTransferTarget(deviceId);
-    setProgress({ taskId: "", phase: "preparing" });
-
-    try {
-      // 1. 生成配对码（需要认证）
-      const generateAuth = await auth.createAuthPayload("generate", {
-        paths: filePaths,
-      });
-
-      const codeResponse = await invoke<GenerateCodeResponse>("courier_generate_code", {
-        auth: generateAuth,
-      });
-
-      // 验证响应
-      if (!codeResponse?.code) {
-        throw new Error("生成配对码失败：响应无效");
-      }
-
-      setMyCode(codeResponse.code);
-      setProgress({ taskId: codeResponse.taskId || codeResponse.task_id || "", phase: "pairing" });
-
-      // 2. 发送文件（需要认证）
-      const sendAuth = await auth.createAuthPayload("send", {
-        paths: filePaths,
-      });
-
-      await invoke("courier_send", {
-        auth: sendAuth,
-        code: codeResponse.code,
-      });
-    } catch (err) {
-      console.error("发送失败:", err);
-      setProgress({
-        taskId: "",
-        phase: "error",
-        message: String(err),
-      });
+    if (device?.code) {
+      setTransferTarget(deviceId);
+      await sendViaWebRtc(device.code, filePaths);
+      return;
     }
-  }, [auth]);
+
+    console.warn("[发送] 缺少接收方信息，无法启动传输", device);
+    setProgress({
+      taskId: "",
+      phase: "error",
+      message: "未获取到接收方信息，请刷新设备列表或使用手动连接。",
+    });
+    setTransferring(false);
+    setTransferTarget(null);
+  }, [devices, sendDirectToReceiver, sendViaWebRtc]);
 
   // ============ 通过配对码连接 ============
 
@@ -256,40 +454,140 @@ export default function App() {
       setConnectError("配对码格式不正确（应为 6 位字母数字）");
       return;
     }
-    if (!auth.ready || !auth.identity || !auth.device) {
-      setConnectError("身份验证未就绪");
-      return;
-    }
 
     setConnecting(true);
     setConnectError(null);
+    setPendingConnectCode(code.toUpperCase());
 
     try {
-      // 获取默认保存目录
-      let saveDir: string;
-      try {
-        saveDir = await downloadDir();
-      } catch (pathErr) {
-        throw new Error(`获取下载目录失败: ${pathErr}`);
+      console.log("[连接] 开始通过 mDNS 发现设备...");
+      // 通过 mDNS 发现对方设备（超时 5 秒）
+      const peers = await invoke<PeerInfo[]>("courier_list_senders", {});
+      console.log("[连接] mDNS 发现完成，找到设备数:", peers.length);
+      console.log("[连接] 设备列表:", JSON.stringify(peers, null, 2));
+
+      const peer = peers.find(p => p.code?.toUpperCase() === code.toUpperCase());
+
+      if (!peer) {
+        const foundCodes = peers.map(p => p.code).join(", ") || "无";
+        console.log(`[连接] 未找到配对码 ${code}，已发现的配对码: ${foundCodes}`);
+        setConnectError(`未发现局域网设备，尝试跨网连接…`);
+
+        const upper = code.toUpperCase();
+        setConnectedPeer({
+          deviceName: `设备-${upper}`,
+          code: upper,
+          route: "p2p",
+        });
+        setShowConnectOptions(true);
+        setShowManualConnect(false);
+        setInputCode("");
+        void startSignalingPresence(upper, 20);
+        return;
       }
 
-      const connectAuth = await auth.createAuthPayload("connect", {
-        code: code.toUpperCase(),
-        saveDir,
+      console.log("[连接] 找到匹配设备:", peer.deviceName, "地址:", peer.host, "端口:", peer.port);
+      // 保存对方信息，显示选项弹窗
+      setConnectedPeer({
+        publicKey: peer.publicKey,
+        deviceName: peer.deviceName || `设备-${peer.code}`,
+        host: peer.host || "",
+        port: peer.port || 0,
+        certFingerprint: peer.certFingerprint || "",
+        code: peer.code,
+        route: "lan",
       });
-
-      await invoke("courier_connect_by_code", { auth: connectAuth });
+      setPendingConnectCode(null);
+      setShowConnectOptions(true);
       setShowManualConnect(false);
       setInputCode("");
-      // 刷新设备列表
-      await discoverDevices();
     } catch (err) {
-      console.error("连接失败:", err);
-      setConnectError(String(err));
+      console.error("[连接] 发现设备失败:", err);
+      const errMsg = err instanceof Error ? err.message : typeof err === 'string' ? err : JSON.stringify(err);
+      setConnectError(`mDNS 发现失败，尝试跨网连接…`);
+      const upper = code.toUpperCase();
+      setConnectedPeer({
+        deviceName: `设备-${upper}`,
+        code: upper,
+        route: "p2p",
+      });
+      setShowConnectOptions(true);
+      setShowManualConnect(false);
+      setInputCode("");
+      void startSignalingPresence(upper, 20);
     } finally {
       setConnecting(false);
     }
-  }, [auth, discoverDevices]);
+  }, [startSignalingPresence]);
+
+  // ============ 添加好友 ============
+
+  const handleAddFriend = useCallback(async () => {
+    if (!connectedPeer) return;
+    if (!connectedPeer.publicKey) {
+      setConnectError("尚未获取对方身份，请先建立连接或发送文件。");
+      return;
+    }
+
+    const friendId = connectedPeer.publicKey.slice(0, 16);
+    const newFriend = await addFriend({
+      id: friendId,
+      publicKey: connectedPeer.publicKey,
+      deviceName: connectedPeer.deviceName,
+    });
+
+    if (newFriend) {
+      setFriends(prev => [...prev, newFriend]);
+      setShowConnectOptions(false);
+      setConnectedPeer(null);
+      setPendingConnectCode(null);
+    }
+  }, [connectedPeer]);
+
+  // ============ 发送文件给连接的设备 ============
+
+  // 发送文件给已广播的接收方（作为发送方连接到接收方）
+  const handleSendToConnected = useCallback(async () => {
+    if (!connectedPeer) return;
+
+    try {
+      const selected = await openFileDialog({
+        multiple: true,
+        title: "选择要发送的文件",
+      });
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      if (paths.length === 0) return;
+
+      console.log("[直连发送] 选中文件:", paths);
+      console.log("[直连发送] 目标设备:", connectedPeer.host, connectedPeer.port);
+
+      setShowConnectOptions(false);
+      if (connectedPeer.host && connectedPeer.port && connectedPeer.publicKey) {
+        await sendDirectToReceiver(
+          paths,
+          {
+            host: connectedPeer.host,
+            port: connectedPeer.port,
+            publicKey: connectedPeer.publicKey,
+            certFingerprint: connectedPeer.certFingerprint,
+          },
+          connectedPeer.publicKey.slice(0, 16)
+        );
+      } else if (connectedPeer.code) {
+        setTransferTarget(connectedPeer.code);
+        await sendViaWebRtc(connectedPeer.code, paths);
+      } else {
+        setProgress({ taskId: "", phase: "error", message: "缺少目标信息，无法发送。" });
+      }
+
+    } catch (err) {
+      console.error("[直连发送] 失败:", err);
+      const errMsg = err instanceof Error ? err.message : typeof err === 'object' ? JSON.stringify(err) : String(err);
+      setProgress({ taskId: "", phase: "error", message: errMsg });
+      setTransferring(false);
+    }
+  }, [connectedPeer, sendDirectToReceiver, sendViaWebRtc]);
 
   // ============ 拖拽处理 ============
 
@@ -333,11 +631,24 @@ export default function App() {
 
   // ============ 点击设备 ============
 
-  const handleDeviceClick = useCallback((deviceId: string) => {
-    pendingFilesRef.current = [];
-    fileInputRef.current?.setAttribute("data-target", deviceId);
-    fileInputRef.current?.click();
-  }, []);
+  const handleDeviceClick = useCallback(async (deviceId: string) => {
+    try {
+      const selected = await openFileDialog({
+        multiple: true,
+        title: "选择要发送的文件",
+      });
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      if (paths.length === 0) return;
+
+      console.log("[文件选择] 选中文件:", paths);
+      await sendFiles(deviceId, paths);
+    } catch (err) {
+      console.error("[点击设备] 发送失败:", err);
+      setProgress({ taskId: "", phase: "error", message: `发送失败: ${err}` });
+      setTransferring(false);
+    }
+  }, [sendFiles]);
 
   const handleFileInput = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -358,6 +669,9 @@ export default function App() {
   // ============ 初始化和事件监听 ============
 
   useEffect(() => {
+    // 加载好友列表
+    loadFriends().then(setFriends);
+
     // 生成配对码
     generateMyCode();
 
@@ -372,14 +686,58 @@ export default function App() {
     };
   }, [generateMyCode, discoverDevices]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<string[]>("courier_recent_logs", { limit: 120 })
+      .then((lines) => {
+        if (cancelled || !Array.isArray(lines) || lines.length === 0) {
+          return;
+        }
+        setTransferLogs(
+          lines.map((line, index) => ({
+            id: `persist-${index}`,
+            message: line,
+          })),
+        );
+      })
+      .catch(() => undefined);
+    void invoke<string | null>("courier_log_file_path")
+      .then((path) => {
+        if (!cancelled && path) {
+          setLogFilePath(path);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // 监听传输进度
   useEffect(() => {
-    let unlisten: (() => void) | null = null;
+    let unlistenProgress: (() => void) | null = null;
+    let unlistenLog: (() => void) | null = null;
 
     listen<TransferProgress>("transfer_progress", (event) => {
-      setProgress(event.payload);
+      const payload = event.payload as TransferProgress & {
+        task_id?: string;
+        bytes_sent?: number;
+        bytes_total?: number;
+        speed_bps?: number;
+      };
+      const normalized: TransferProgress = {
+        taskId: payload.taskId || payload.task_id || "",
+        phase: payload.phase,
+        progress: payload.progress,
+        bytesSent: payload.bytesSent ?? payload.bytes_sent,
+        bytesTotal: payload.bytesTotal ?? payload.bytes_total,
+        speedBps: payload.speedBps ?? payload.speed_bps,
+        route: payload.route,
+        message: payload.message,
+      };
+      setProgress(normalized);
 
-      if (event.payload.phase === "done") {
+      if (normalized.phase === "done") {
         setTransferComplete(transferTarget);
         setTimeout(() => {
           setTransferring(false);
@@ -387,7 +745,7 @@ export default function App() {
           setTransferComplete(null);
           setProgress(null);
         }, 2000);
-      } else if (event.payload.phase === "error") {
+      } else if (normalized.phase === "error") {
         setTimeout(() => {
           setTransferring(false);
           setTransferTarget(null);
@@ -395,24 +753,93 @@ export default function App() {
         }, 3000);
       }
     }).then((fn) => {
-      unlisten = fn;
+      unlistenProgress = fn;
+    });
+
+    listen<TransferLogPayload>("transfer_log", (event) => {
+      const payload = event.payload as TransferLogPayload & { task_id?: string };
+      const taskId = payload.taskId || payload.task_id || "";
+      const message = payload.message || "";
+      console.log("[transfer_log]", taskId, message);
+      setTransferLogs((prev) => {
+        const next = [
+          ...prev,
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            message: `[${taskId}] ${message}`,
+          },
+        ];
+        return next.length > 50 ? next.slice(-50) : next;
+      });
+    }).then((fn) => {
+      unlistenLog = fn;
     });
 
     return () => {
-      unlisten?.();
+      unlistenProgress?.();
+      unlistenLog?.();
     };
   }, [transferTarget]);
 
+  // 监听跨网配对发现
+  useEffect(() => {
+    let unlistenPeer: (() => void) | null = null;
+    listen<PeerDiscoveredPayload>("peer_discovered", (event) => {
+      const payload = event.payload;
+      if (!pendingConnectCode) return;
+      if (payload.sessionId?.toUpperCase() !== pendingConnectCode.toUpperCase()) return;
+      if (auth.device?.deviceId && payload.deviceId === auth.device.deviceId) return;
+
+      setConnectedPeer({
+        publicKey: payload.publicKey || undefined,
+        deviceName: payload.deviceName || `设备-${payload.deviceId}`,
+        code: pendingConnectCode,
+        route: "p2p",
+      });
+      setShowConnectOptions(true);
+      setShowManualConnect(false);
+      setConnecting(false);
+      setConnectError(null);
+      setPendingConnectCode(null);
+    }).then((fn) => {
+      unlistenPeer = fn;
+    });
+
+    return () => {
+      unlistenPeer?.();
+    };
+  }, [pendingConnectCode, auth.device]);
+
+  // 打开手动连接面板时生成配对码
+  useEffect(() => {
+    if (showManualConnect) {
+      if (!myCode) {
+        generateMyCode();
+      } else {
+        const normalized = myCode.trim().toUpperCase();
+        if (presenceCodeRef.current !== normalized) {
+          presenceCodeRef.current = normalized;
+          void startSignalingPresence(normalized, 180);
+        }
+        void startWebRtcReceiver(normalized);
+      }
+    } else {
+      presenceCodeRef.current = null;
+      webrtcReceiverCodeRef.current = null;
+    }
+  }, [showManualConnect, myCode, generateMyCode, startSignalingPresence, startWebRtcReceiver]);
+
   // 配对码倒计时
   useEffect(() => {
-    if (!showManualConnect) return;
+    if (!showManualConnect || !codeExpiresAt) return;
 
     const timer = setInterval(() => {
       const remaining = Math.max(0, Math.ceil((codeExpiresAt - Date.now()) / 1000));
       setRemainingTime(remaining);
 
-      if (remaining <= 0) {
-        generateMyCode();
+      // 只在倒计时归零时重新生成
+      if (remaining === 0 && codeExpiresAt > 0) {
+        setCodeExpiresAt(0); // 停止计时，等待手动刷新
       }
     }, 1000);
 
@@ -595,6 +1022,30 @@ export default function App() {
                   </div>
                   <div className="toggle active" />
                 </div>
+                <div className="setting-log-panel">
+                  <div className="setting-title">{t("settings.transferLogs", "传输日志")}</div>
+                  <div className="setting-desc">
+                    {transferLogs.length > 0
+                      ? t("settings.transferLogsDesc", "最近 {count} 条", {
+                          count: Math.min(transferLogs.length, 8),
+                        })
+                      : t("settings.transferLogsEmpty", "暂无传输日志")}
+                  </div>
+                  {transferLogs.length > 0 && (
+                    <div className="setting-log-list">
+                      {transferLogs.slice(-8).map((entry) => (
+                        <div key={entry.id} className="setting-log-item">
+                          <span className="setting-log-message">{entry.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {logFilePath && (
+                    <div className="setting-desc">
+                      {t("settings.transferLogsPath", "日志文件")}: {logFilePath}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -673,6 +1124,54 @@ export default function App() {
                   </button>
                 </div>
                 {connectError && <div className="connect-error">{connectError}</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 连接成功选项弹窗 */}
+        {showConnectOptions && connectedPeer && (
+          <div className="modal-overlay" onClick={() => { setShowConnectOptions(false); setConnectedPeer(null); setPendingConnectCode(null); }}>
+            <div className="modal modal-options" onClick={(e) => e.stopPropagation()}>
+              <button className="modal-close-float" onClick={() => { setShowConnectOptions(false); setConnectedPeer(null); setPendingConnectCode(null); }}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+
+              <div className="connect-success-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M22 11.08V12a10 10 0 11-5.93-9.14" />
+                  <polyline points="22 4 12 14.01 9 11.01" />
+                </svg>
+              </div>
+
+              <h3 className="connect-title">{t("connect.success", "连接成功")}</h3>
+              <p className="connect-device-name">{connectedPeer.deviceName}</p>
+
+              <div className="connect-options">
+                <button className="option-btn primary" onClick={handleSendToConnected}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="12" y1="18" x2="12" y2="12" />
+                    <line x1="9" y1="15" x2="15" y2="15" />
+                  </svg>
+                  {t("connect.sendFile", "发送文件")}
+                </button>
+                <button
+                  className="option-btn secondary"
+                  onClick={handleAddFriend}
+                  disabled={!connectedPeer.publicKey}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+                    <circle cx="8.5" cy="7" r="4" />
+                    <line x1="20" y1="8" x2="20" y2="14" />
+                    <line x1="23" y1="11" x2="17" y2="11" />
+                  </svg>
+                  {t("connect.addFriend", "添加好友")}
+                </button>
               </div>
             </div>
           </div>
@@ -1106,6 +1605,30 @@ export default function App() {
           left: 22px;
         }
 
+        .setting-log-panel {
+          padding-top: 16px;
+        }
+
+        .setting-log-list {
+          margin-top: 10px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          max-height: 160px;
+          overflow: auto;
+          padding-right: 4px;
+        }
+
+        .setting-log-item {
+          font-size: 12px;
+          color: rgba(255, 255, 255, 0.55);
+          line-height: 1.4;
+        }
+
+        .setting-log-message {
+          word-break: break-word;
+        }
+
         /* 手动连接弹窗 - 毛玻璃风格 */
         .modal-connect {
           padding: 24px;
@@ -1158,6 +1681,86 @@ export default function App() {
           font-size: 17px;
           font-weight: 600;
           color: rgba(255, 255, 255, 0.9);
+        }
+
+        /* 连接选项弹窗 */
+        .modal-options {
+          padding: 32px 24px;
+          max-width: 280px;
+          text-align: center;
+          background: rgba(255, 255, 255, 0.08);
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .connect-success-icon {
+          width: 56px;
+          height: 56px;
+          margin: 0 auto 16px;
+          border-radius: 50%;
+          background: rgba(34, 197, 94, 0.2);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .connect-success-icon svg {
+          width: 28px;
+          height: 28px;
+          color: #22c55e;
+        }
+
+        .connect-device-name {
+          font-size: 14px;
+          color: rgba(255, 255, 255, 0.6);
+          margin: 0 0 24px;
+        }
+
+        .connect-options {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .option-btn {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          padding: 14px 20px;
+          border: none;
+          border-radius: 12px;
+          font-size: 15px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+
+        .option-btn svg {
+          width: 20px;
+          height: 20px;
+        }
+
+        .option-btn.primary {
+          background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+          color: #fff;
+        }
+
+        .option-btn.primary:hover {
+          transform: scale(1.02);
+          box-shadow: 0 4px 20px rgba(139, 92, 246, 0.4);
+        }
+
+        .option-btn.secondary {
+          background: rgba(255, 255, 255, 0.1);
+          color: rgba(255, 255, 255, 0.9);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
+        .option-btn.secondary:hover {
+          background: rgba(255, 255, 255, 0.15);
         }
 
         .my-code-card {

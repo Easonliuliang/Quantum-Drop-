@@ -41,6 +41,7 @@ pub struct GenerateCodeResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskResponse {
     pub task_id: String,
 }
@@ -239,6 +240,7 @@ pub struct ResumeProgressDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransferProgressEvent {
     pub task_id: String,
     pub phase: TransferPhase,
@@ -253,6 +255,7 @@ pub struct TransferProgressEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransferLifecycleEvent {
     pub task_id: String,
     pub direction: TransferDirection,
@@ -441,6 +444,29 @@ pub struct ConnectByCodePayload {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SendToReceiverPayload {
+    pub paths: Vec<String>,
+    pub host: String,
+    pub port: u16,
+    pub receiver_public_key: String,
+    pub receiver_cert_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvertiseReceiverPayload {
+    pub save_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvertiseReceiverResponse {
+    pub code: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebRtcSenderPayload {
     pub code: String,
     pub file_paths: Vec<String>,
@@ -455,6 +481,13 @@ pub struct WebRtcReceiverPayload {
     pub save_dir: String,
     pub device_public_key: String,
     pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalingPresencePayload {
+    pub code: String,
+    pub duration_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

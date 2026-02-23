@@ -1,6 +1,6 @@
 {
   "name": "courier-agent",
-  "version": "0.1.8",
+  "version": "0.2.15",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,7 @@
     "check": "npm run lint && npm run test && npm run test:license && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "bash scripts/tauri_build_stable.sh"
   },
   "engines": {
     "node": ">=18.17.0",
@@ -25,6 +25,7 @@
     "@noble/ed25519": "^2.3.0",
     "@noble/hashes": "^2.0.1",
     "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.4.5",
     "@types/qrcode": "^1.5.6",
     "face-api.js": "^0.22.2",

@@ -13,6 +13,8 @@ import {
   loadLastIdentityId,
   rememberIdentity,
   rememberLastIdentityId,
+  loadDeviceId,
+  rememberDeviceId,
 } from "../lib/identityVault";
 
 // 合并 Uint8Array
@@ -166,6 +168,7 @@ export function useAuth(): AuthState & AuthActions {
 
       // 4. 在后端注册身份（如果需要）
       try {
+        console.log("[Auth] 注册身份...", storedIdentity.identityId);
         const response = await invoke<IdentityResponse>("auth_register_identity", {
           payload: {
             identityId: storedIdentity.identityId,
@@ -173,6 +176,7 @@ export function useAuth(): AuthState & AuthActions {
             label: "QuantumDrop",
           },
         });
+        console.log("[Auth] 身份注册响应:", response);
 
         setIdentity({
           identityId: response.identityId || response.identity_id || storedIdentity.identityId,
@@ -180,8 +184,10 @@ export function useAuth(): AuthState & AuthActions {
         });
       } catch (err: unknown) {
         // 如果已存在，尝试获取
-        const errMsg = err instanceof Error ? err.message : String(err);
+        console.log("[Auth] 身份注册错误:", err, JSON.stringify(err));
+        const errMsg = err instanceof Error ? err.message : typeof err === 'object' ? JSON.stringify(err) : String(err);
         if (errMsg.includes("already exists") || errMsg.includes("CONFLICT")) {
+          console.log("[Auth] 身份已存在，使用本地身份");
           setIdentity({
             identityId: storedIdentity.identityId,
             publicKey: storedIdentity.publicKeyHex,
@@ -191,7 +197,41 @@ export function useAuth(): AuthState & AuthActions {
         }
       }
 
-      // 5. 注册设备
+      // 5. 优先复用已注册设备，避免反复占用设备名额
+      const storedDeviceId = await loadDeviceId(storedIdentity.identityId);
+      try {
+        const devicesResponse = await invoke<DevicesResponse>("auth_list_devices", {
+          payload: { identityId: storedIdentity.identityId },
+        });
+        const devices = devicesResponse.items ?? [];
+        const matched =
+          storedDeviceId &&
+          devices.find(
+            (item) => (item.deviceId || item.device_id) === storedDeviceId
+          );
+        const existingDevice = matched || devices[0];
+        if (existingDevice) {
+          const resolvedDeviceId =
+            existingDevice.deviceId || existingDevice.device_id || storedDeviceId || "";
+          setDevice({
+            deviceId: resolvedDeviceId,
+            identityId:
+              existingDevice.identityId ||
+              existingDevice.identity_id ||
+              storedIdentity.identityId,
+            publicKey: existingDevice.publicKey || existingDevice.public_key || "",
+            name: existingDevice.name,
+            status: existingDevice.status || "active",
+            capabilities: existingDevice.capabilities || ["send", "receive"],
+          });
+          await rememberDeviceId(storedIdentity.identityId, resolvedDeviceId);
+          return;
+        }
+      } catch (err) {
+        console.warn("[Auth] 设备列表读取失败:", err);
+      }
+
+      // 6. 没有已注册设备时才创建新设备
       const deviceId = `dev_${generateRandomHex(10)}`;
       const devicePrivateBytes = ed25519Utils.randomPrivateKey();
       const devicePublicBytes = getPublicKey(devicePrivateBytes);
@@ -205,6 +245,7 @@ export function useAuth(): AuthState & AuthActions {
       const signatureHex = bytesToHex(signatureBytes);
 
       try {
+        console.log("[Auth] 注册设备...", deviceId);
         const deviceResponse = await invoke<DeviceResponse>("auth_register_device", {
           payload: {
             identityId: storedIdentity.identityId,
@@ -215,40 +256,87 @@ export function useAuth(): AuthState & AuthActions {
             capabilities: ["send", "receive"],
           },
         });
+        console.log("[Auth] 设备注册响应:", deviceResponse);
 
+        const resolvedDeviceId = deviceResponse.deviceId || deviceResponse.device_id || deviceId;
         setDevice({
-          deviceId: deviceResponse.deviceId || deviceResponse.device_id || deviceId,
-          identityId: deviceResponse.identityId || deviceResponse.identity_id || storedIdentity.identityId,
+          deviceId: resolvedDeviceId,
+          identityId:
+            deviceResponse.identityId ||
+            deviceResponse.identity_id ||
+            storedIdentity.identityId,
           publicKey: deviceResponse.publicKey || deviceResponse.public_key || devicePublicKeyHex,
           name: deviceResponse.name,
           status: deviceResponse.status || "active",
           capabilities: deviceResponse.capabilities || ["send", "receive"],
         });
+        await rememberDeviceId(storedIdentity.identityId, resolvedDeviceId);
       } catch (err: unknown) {
-        // 如果设备已存在，尝试获取设备列表
-        const errMsg = err instanceof Error ? err.message : String(err);
-        if (errMsg.includes("already exists") || errMsg.includes("CONFLICT")) {
+        console.log("[Auth] 设备注册错误:", err, JSON.stringify(err));
+        const errMsg =
+          err instanceof Error
+            ? err.message
+            : typeof err === "object"
+              ? JSON.stringify(err)
+              : String(err);
+        const deviceLimitHit =
+          errMsg.includes("DEVICE_LIMIT_EXCEEDED") || errMsg.includes("E_LICENSE");
+        if (deviceLimitHit) {
+          console.warn("[Auth] 设备数量已达上限，尝试复用已注册设备");
           const devicesResponse = await invoke<DevicesResponse>("auth_list_devices", {
             payload: { identityId: storedIdentity.identityId },
           });
-
           const existingDevice = devicesResponse.items?.[0];
           if (existingDevice) {
+            const resolvedDeviceId =
+              existingDevice.deviceId || existingDevice.device_id || deviceId;
             setDevice({
-              deviceId: existingDevice.deviceId || existingDevice.device_id || deviceId,
-              identityId: existingDevice.identityId || existingDevice.identity_id || storedIdentity.identityId,
+              deviceId: resolvedDeviceId,
+              identityId:
+                existingDevice.identityId ||
+                existingDevice.identity_id ||
+                storedIdentity.identityId,
               publicKey: existingDevice.publicKey || existingDevice.public_key || devicePublicKeyHex,
               name: existingDevice.name,
               status: existingDevice.status || "active",
               capabilities: existingDevice.capabilities || ["send", "receive"],
             });
+            await rememberDeviceId(storedIdentity.identityId, resolvedDeviceId);
+            return;
           }
-        } else {
-          throw err;
         }
+        if (errMsg.includes("already exists") || errMsg.includes("CONFLICT")) {
+          console.log("[Auth] 设备已存在，获取设备列表...");
+          const devicesResponse = await invoke<DevicesResponse>("auth_list_devices", {
+            payload: { identityId: storedIdentity.identityId },
+          });
+          console.log("[Auth] 设备列表:", devicesResponse);
+
+          const existingDevice = devicesResponse.items?.[0];
+          if (existingDevice) {
+            const resolvedDeviceId =
+              existingDevice.deviceId || existingDevice.device_id || deviceId;
+            setDevice({
+              deviceId: resolvedDeviceId,
+              identityId:
+                existingDevice.identityId ||
+                existingDevice.identity_id ||
+                storedIdentity.identityId,
+              publicKey: existingDevice.publicKey || existingDevice.public_key || devicePublicKeyHex,
+              name: existingDevice.name,
+              status: existingDevice.status || "active",
+              capabilities: existingDevice.capabilities || ["send", "receive"],
+            });
+            await rememberDeviceId(storedIdentity.identityId, resolvedDeviceId);
+            return;
+          }
+        }
+        throw err;
       }
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("初始化身份失败 - 原始错误:", err);
+      console.error("初始化身份失败 - JSON:", JSON.stringify(err, null, 2));
+      const errMsg = err instanceof Error ? err.message : typeof err === 'object' ? JSON.stringify(err) : String(err);
       console.error("初始化身份失败:", errMsg);
       setError(errMsg);
     } finally {

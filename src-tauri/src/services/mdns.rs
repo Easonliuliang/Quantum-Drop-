@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use log::{debug, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tokio::time;
 
@@ -62,20 +63,44 @@ impl MdnsRegistry {
             props.insert("certfp".into(), fp.to_string());
         }
 
-        let ip = addresses
+        let parsed_addrs: Vec<IpAddr> = addresses
             .iter()
             .filter_map(|addr| addr.parse::<IpAddr>().ok())
-            .next()
-            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            .collect();
+        let ip_addrs: Vec<IpAddr> = if parsed_addrs.is_empty() {
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+        } else {
+            parsed_addrs
+        };
         let service_name = format!("quantumdrop-{}", code);
         let host_label = format!("{}.local.", service_name);
 
-        let info = ServiceInfo::new(SERVICE_TYPE, &service_name, &host_label, ip, port, props)
-            .map_err(|err| anyhow!("failed to build mDNS info: {err}"))?;
+        info!(
+            "[mDNS] 注册服务: code={}, service={}, host={}, ips={:?}, port={}, addresses={:?}",
+            code, service_name, host_label, ip_addrs, port, addresses
+        );
+
+        let info = ServiceInfo::new(
+            SERVICE_TYPE,
+            &service_name,
+            &host_label,
+            ip_addrs.as_slice(),
+            port,
+            props,
+        )
+            .map_err(|err| {
+                warn!("[mDNS] 构建 ServiceInfo 失败: {}", err);
+                anyhow!("failed to build mDNS info: {err}")
+            })?;
 
         self.daemon
             .register(info.clone())
-            .map_err(|err| anyhow!("mDNS register failed: {err}"))?;
+            .map_err(|err| {
+                warn!("[mDNS] 注册服务失败: {}", err);
+                anyhow!("mDNS register failed: {err}")
+            })?;
+
+        info!("[mDNS] 服务注册成功: {}", info.get_fullname());
 
         let mut guard = self.registered.lock().await;
         guard.insert(code.to_string(), info);
@@ -125,27 +150,73 @@ impl MdnsRegistry {
     }
 
     pub async fn list_senders(&self, timeout: Duration) -> Result<Vec<SenderInfo>> {
+        info!("[mDNS] 开始浏览服务: type={}, timeout={:?}", SERVICE_TYPE, timeout);
+
+        // Get our own registered codes to filter them out
+        let own_codes: Vec<String> = {
+            let guard = self.registered.lock().await;
+            guard.keys().cloned().collect()
+        };
+        info!("[mDNS] 本机已注册的配对码: {:?}", own_codes);
+
         let receiver = self
             .daemon
             .browse(SERVICE_TYPE)
-            .map_err(|err| anyhow!("mDNS browse failed: {err}"))?;
+            .map_err(|err| {
+                warn!("[mDNS] 浏览服务失败: {}", err);
+                anyhow!("mDNS browse failed: {err}")
+            })?;
+
         let timer = time::sleep(timeout);
         tokio::pin!(timer);
         let mut list = Vec::new();
+        let mut event_count = 0;
+
         loop {
             tokio::select! {
-                _ = &mut timer => break,
+                _ = &mut timer => {
+                    info!("[mDNS] 浏览超时，共收到 {} 个事件，发现 {} 个设备（过滤本机后）", event_count, list.len());
+                    break;
+                }
                 event = receiver.recv_async() => {
+                    event_count += 1;
                     match event {
                         Ok(ServiceEvent::ServiceResolved(info)) => {
+                            debug!("[mDNS] ServiceResolved: fullname={}, addresses={:?}, port={}",
+                                info.get_fullname(), info.get_addresses(), info.get_port());
                             if let Some(addr) = pick_addr(&info) {
                                 if let Some(dto) = sender_info_from(&info, addr) {
+                                    // Filter out our own registered services
+                                    if own_codes.contains(&dto.code) {
+                                        debug!("[mDNS] 跳过本机服务: code={}", dto.code);
+                                        continue;
+                                    }
+                                    info!("[mDNS] 发现远程设备: code={}, name={}, host={}:{}",
+                                        dto.code, dto.device_name, dto.host, dto.port);
                                     list.push(dto);
+                                } else {
+                                    debug!("[mDNS] 无法解析 SenderInfo，可能缺少必要属性");
                                 }
+                            } else {
+                                debug!("[mDNS] 无法获取有效地址");
                             }
                         }
-                        Ok(_) => {}
-                        Err(_) => break,
+                        Ok(ServiceEvent::ServiceFound(svc_type, fullname)) => {
+                            debug!("[mDNS] ServiceFound: type={}, name={}", svc_type, fullname);
+                        }
+                        Ok(ServiceEvent::ServiceRemoved(svc_type, fullname)) => {
+                            debug!("[mDNS] ServiceRemoved: type={}, name={}", svc_type, fullname);
+                        }
+                        Ok(ServiceEvent::SearchStarted(svc_type)) => {
+                            debug!("[mDNS] SearchStarted: type={}", svc_type);
+                        }
+                        Ok(ServiceEvent::SearchStopped(svc_type)) => {
+                            debug!("[mDNS] SearchStopped: type={}", svc_type);
+                        }
+                        Err(err) => {
+                            warn!("[mDNS] 接收事件错误: {:?}", err);
+                            break;
+                        }
                     }
                 }
             }
@@ -155,11 +226,56 @@ impl MdnsRegistry {
 }
 
 fn pick_addr(info: &ServiceInfo) -> Option<IpAddr> {
-    info.get_addresses()
-        .iter()
-        .cloned()
-        .find(|addr| !addr.is_loopback())
-        .or_else(|| info.get_addresses().iter().cloned().next())
+    // Prefer real LAN IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+    // Skip VPN/virtual interfaces like 198.18.x.x
+    let is_preferred_lan = |addr: &IpAddr| -> bool {
+        if let IpAddr::V4(v4) = addr {
+            let octets = v4.octets();
+            // 192.168.x.x - most common home/office LAN
+            if octets[0] == 192 && octets[1] == 168 {
+                return true;
+            }
+            // 10.x.x.x - private network
+            if octets[0] == 10 {
+                return true;
+            }
+            // 172.16.x.x - 172.31.x.x - private network
+            if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
+                return true;
+            }
+        }
+        false
+    };
+
+    let is_vpn_or_virtual = |addr: &IpAddr| -> bool {
+        if let IpAddr::V4(v4) = addr {
+            let octets = v4.octets();
+            // 198.18.x.x / 198.19.x.x - benchmarking, often used by VPN/proxy
+            if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+                return true;
+            }
+            // 100.64.x.x - 100.127.x.x - Carrier-grade NAT
+            if octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127 {
+                return true;
+            }
+        }
+        false
+    };
+
+    let addrs: Vec<IpAddr> = info.get_addresses().iter().cloned().collect();
+
+    // First try: preferred LAN IPs
+    if let Some(addr) = addrs.iter().find(|a| is_preferred_lan(a) && !a.is_loopback()) {
+        return Some(*addr);
+    }
+
+    // Second try: any non-loopback, non-VPN address
+    if let Some(addr) = addrs.iter().find(|a| !a.is_loopback() && !is_vpn_or_virtual(a)) {
+        return Some(*addr);
+    }
+
+    // Fallback: any non-loopback
+    addrs.iter().find(|a| !a.is_loopback()).cloned()
 }
 
 fn sender_info_from(info: &ServiceInfo, addr: IpAddr) -> Option<SenderInfo> {
